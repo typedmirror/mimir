@@ -2,7 +2,9 @@ package mimir
 
 import "core:fmt"
 import "core:os"
-import "core:strings"
+
+import "core"
+import "parser"
 
 main :: proc() {
 	args := os.args
@@ -39,8 +41,62 @@ cmd_check :: proc(args: []string) {
 	}
 
 	target := args[0]
-	fmt.printfln("mimir: checking '%s'...", target)
-	fmt.println("mimir: no analysis passes implemented yet")
+
+	// Find Python files
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir: no Python files found in '%s'", target)
+		return
+	}
+
+	// Start parser bridge
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	// Initialize analysis arena
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	// Parse each file
+	error_count := 0
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			error_count += 1
+			switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir: %s: %s", file, e.msg)
+			}
+			continue
+		}
+		fmt.printfln("  parsed %s (%d statements)", file, len(module.body))
+	}
+
+	if error_count > 0 {
+		fmt.eprintfln("mimir: %d file(s) had errors", error_count)
+	} else {
+		fmt.printfln("mimir: successfully parsed %d file(s)", len(files))
+	}
 }
 
 print_usage :: proc() {
