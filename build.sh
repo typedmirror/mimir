@@ -13,15 +13,15 @@ MODE="${1:-debug}"
 case "$MODE" in
     debug)
         echo "Building mimir (debug)..."
-        odin build "$SRC_DIR" -out:"$BINARY" -debug
+        odin build "$SRC_DIR" -out:"$BINARY" -debug -collection:mimir="$SRC_DIR"
         ;;
     release)
         echo "Building mimir (release)..."
-        odin build "$SRC_DIR" -out:"$BINARY" -o:speed
+        odin build "$SRC_DIR" -out:"$BINARY" -o:speed -collection:mimir="$SRC_DIR"
         ;;
     test)
         echo "Running mimir tests..."
-        odin test "$SRC_DIR" -out:"$OUT_DIR/mimir_test" -debug
+        odin test "$SRC_DIR" -out:"$OUT_DIR/mimir_test" -debug -collection:mimir="$SRC_DIR"
         ;;
     clean)
         echo "Cleaning build artifacts..."

@@ -5,6 +5,7 @@ import "core:os"
 
 import "core"
 import "parser"
+import "binder"
 
 main :: proc() {
 	args := os.args
@@ -89,13 +90,26 @@ cmd_check :: proc(args: []string) {
 			}
 			continue
 		}
-		fmt.printfln("  parsed %s (%d statements)", file, len(module.body))
+		// Bind the module
+		bind_result := binder.bind(module, file, arena.allocator)
+
+		// Report binder diagnostics
+		for d in bind_result.diagnostics {
+			core.diagnostic_print(d)
+			if d.severity == .Error {
+				error_count += 1
+			}
+		}
+
+		fmt.printfln("  parsed %s (%d stmts, %d symbols, %d scopes)",
+			file, len(module.body),
+			len(bind_result.symbols), len(bind_result.scopes))
 	}
 
 	if error_count > 0 {
 		fmt.eprintfln("mimir: %d file(s) had errors", error_count)
 	} else {
-		fmt.printfln("mimir: successfully parsed %d file(s)", len(files))
+		fmt.printfln("mimir: successfully checked %d file(s)", len(files))
 	}
 }
 
