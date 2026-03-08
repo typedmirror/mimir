@@ -6,6 +6,7 @@ import "core:os"
 import "core"
 import "parser"
 import "binder"
+import "flow"
 
 main :: proc() {
 	args := os.args
@@ -101,9 +102,21 @@ cmd_check :: proc(args: []string) {
 			}
 		}
 
-		fmt.printfln("  parsed %s (%d stmts, %d symbols, %d scopes)",
+		// Flow analysis
+		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+
+		// Report flow diagnostics
+		for d in flow_result.diagnostics {
+			core.diagnostic_print(d)
+			if d.severity == .Error {
+				error_count += 1
+			}
+		}
+
+		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards)",
 			file, len(module.body),
-			len(bind_result.symbols), len(bind_result.scopes))
+			len(bind_result.symbols), len(bind_result.scopes),
+			flow.total_blocks(&flow_result), len(flow_result.guards))
 	}
 
 	if error_count > 0 {
