@@ -703,24 +703,22 @@ resolve_refs_expr :: proc(b: ^Binder, expr: parser.Expr) {
 	if expr == nil { return }
 	#partial switch e in expr {
 	case ^parser.Name_Expr:
-		if e.ctx == .Load {
-			sym_id, found := resolve_name(b, e.id, current_scope(b))
-			if found {
-				b.result.refs[rawptr(e)] = sym_id
-			} else if !b.has_star_import {
-				append(&b.result.diagnostics, core.Diagnostic{
-					severity = .Error,
-					location = core.Location{
-						file   = b.file_path,
-						line   = int(e.loc.line),
-						column = int(e.loc.col),
-					},
-					what = fmt_undefined_name(e.id, b.allocator),
-					why  = "this name is not defined in any accessible scope",
-					fix  = "check spelling, add an import, or define the variable before use",
-					code = "B001",
-				})
-			}
+		sym_id, found := resolve_name(b, e.id, current_scope(b))
+		if found {
+			b.result.refs[rawptr(e)] = sym_id
+		} else if e.ctx == .Load && !b.has_star_import {
+			append(&b.result.diagnostics, core.Diagnostic{
+				severity = .Error,
+				location = core.Location{
+					file   = b.file_path,
+					line   = int(e.loc.line),
+					column = int(e.loc.col),
+				},
+				what = fmt_undefined_name(e.id, b.allocator),
+				why  = "this name is not defined in any accessible scope",
+				fix  = "check spelling, add an import, or define the variable before use",
+				code = "B001",
+			})
 		}
 
 	case ^parser.Call_Expr:

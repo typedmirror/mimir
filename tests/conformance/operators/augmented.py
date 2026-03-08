@@ -12,9 +12,9 @@ y += 0.5
 s: str = "hello"
 s += " world"
 
-# Invalid augmented assignments (augmented op checking not yet implemented)
+# Invalid augmented assignments
 z: int = 10
-z += "bad"    # E?
+z += "bad"    # E
 
 w: str = "hello"
-w -= "world"  # E?
+w -= "world"  # E

@@ -466,6 +466,11 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		attrs     = attrs,
 	})
 
+	// Register in class_types cache for annotation resolution
+	if sym_id != binder.INVALID_SYMBOL {
+		ctx.reg.class_types[sym_id] = class_type_id
+	}
+
 	return class_type_id
 }
 

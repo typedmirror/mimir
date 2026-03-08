@@ -120,6 +120,7 @@ Type_Registry :: struct {
 	list_cache:  map[Type_ID]Type_ID,
 	dict_cache:  map[[2]Type_ID]Type_ID,
 	set_cache:   map[Type_ID]Type_ID,
+	class_types: map[binder.Symbol_ID]Type_ID,
 	allocator:   mem.Allocator,
 }
 
@@ -131,6 +132,7 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.list_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.dict_cache = make(map[[2]Type_ID]Type_ID, 16, allocator)
 	reg.set_cache = make(map[Type_ID]Type_ID, 16, allocator)
+	reg.class_types = make(map[binder.Symbol_ID]Type_ID, 16, allocator)
 
 	// Slot 0: INVALID
 	append(&reg.types, Type{id = INVALID_TYPE})

@@ -15,7 +15,7 @@ one_arg(1)
 two_args(1, 2)
 
 # Too many arguments
-zero_args(1)       # E?: too many arguments (zero-param edge case)
+zero_args(1)       # E: too many arguments
 one_arg(1, 2)      # E: too many arguments
 two_args(1, 2, 3)  # E: too many arguments
 

@@ -309,10 +309,18 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 		return info.return_type
 
 	case Class_Type:
-		// Calling a class = constructor → Instance
-		// Type-check args (would check __init__ in full impl)
-		for arg in e.args {
-			infer_expr(arg, ctx)
+		// Calling a class = constructor → check __init__ args
+		if init_type_id, ok := info.attrs["__init__"]; ok {
+			init_t := get_type(ctx.reg, init_type_id)
+			#partial switch &init_info in init_t.info {
+			case Callable_Type:
+				check_call_args(e, &init_info, ctx)
+			case:
+				for arg in e.args { infer_expr(arg, ctx) }
+			}
+		} else {
+			// No __init__ — just infer args
+			for arg in e.args { infer_expr(arg, ctx) }
 		}
 		return make_instance_type(ctx.reg, func_type)
 	}
@@ -340,14 +348,21 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 			"Too few arguments",
 			fmt_arg_count_error(required, n_args, ctx.reg),
 			"Add missing arguments")
-	} else if n_args > n_params && n_params > 0 {
-		// Check if last param is *args (has_default used as approximation)
-		last := func_info.params[n_params - 1]
-		if last.type_id != TYPE_ANY { // non-variadic
+	} else if n_args > n_params {
+		if n_params == 0 {
 			emit_diagnostic(ctx, e.loc, "T004", .Error,
 				"Too many arguments",
 				fmt_arg_count_error(n_params, n_args, ctx.reg),
 				"Remove extra arguments")
+		} else {
+			// Check if last param is *args (has_default used as approximation)
+			last := func_info.params[n_params - 1]
+			if last.type_id != TYPE_ANY { // non-variadic
+				emit_diagnostic(ctx, e.loc, "T004", .Error,
+					"Too many arguments",
+					fmt_arg_count_error(n_params, n_args, ctx.reg),
+					"Remove extra arguments")
+			}
 		}
 	}
 

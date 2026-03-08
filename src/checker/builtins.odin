@@ -181,8 +181,9 @@ resolve_annotation :: proc(
 		}
 		// Look up as a symbol reference (user-defined class)
 		if sym_id, ok := binder.get_ref(bind_result, rawptr(e)); ok {
-			_ = sym_id
-			// For now, return UNKNOWN for user-defined types not yet handled
+			if class_type_id, found := reg.class_types[sym_id]; found {
+				return make_instance_type(reg, class_type_id)
+			}
 			return TYPE_UNKNOWN
 		}
 		// Special names

@@ -11,9 +11,9 @@ class Point:
 # Correct usage — no errors
 p = Point(1, 2)
 
-# Wrong argument types (class constructor arg checking not yet implemented)
-bad1 = Point("a", "b")   # E?
+# Wrong argument types
+bad1 = Point("a", "b")   # E
 
-# Wrong argument count (class constructor arg checking not yet implemented)
-bad2 = Point(1)           # E?
-bad3 = Point(1, 2, 3)    # E?
+# Wrong argument count
+bad2 = Point(1)           # E
+bad3 = Point(1, 2, 3)    # E

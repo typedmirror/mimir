@@ -14,5 +14,5 @@ class Dog(Animal):
 # Subclass assignable to superclass — no errors
 a: Animal = Dog("Rex", "Lab")
 
-# Superclass NOT assignable to subclass (not yet enforced)
-bad1: Dog = Animal("Rex")   # E?
+# Superclass NOT assignable to subclass
+bad1: Dog = Animal("Rex")   # E
