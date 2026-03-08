@@ -7,6 +7,7 @@ import "core"
 import "parser"
 import "binder"
 import "flow"
+import "checker"
 
 main :: proc() {
 	args := os.args
@@ -113,10 +114,22 @@ cmd_check :: proc(args: []string) {
 			}
 		}
 
-		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards)",
+		// Type checking
+		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+
+		// Report type diagnostics
+		for d in check_result.diagnostics {
+			core.diagnostic_print(d)
+			if d.severity == .Error {
+				error_count += 1
+			}
+		}
+
+		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards, %d types)",
 			file, len(module.body),
 			len(bind_result.symbols), len(bind_result.scopes),
-			flow.total_blocks(&flow_result), len(flow_result.guards))
+			flow.total_blocks(&flow_result), len(flow_result.guards),
+			len(check_result.registry.types))
 	}
 
 	if error_count > 0 {
