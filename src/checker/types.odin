@@ -338,6 +338,19 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		}
 	}
 
+	// Tuple element-wise comparison
+	#partial switch src in src_type.info {
+	case Tuple_Type:
+		#partial switch tgt in tgt_type.info {
+		case Tuple_Type:
+			if len(src.elements) != len(tgt.elements) { return false }
+			for e, i in src.elements {
+				if !is_assignable(reg, e, tgt.elements[i]) { return false }
+			}
+			return true
+		}
+	}
+
 	// Instance subtyping via inheritance
 	#partial switch src in src_type.info {
 	case Instance_Type:

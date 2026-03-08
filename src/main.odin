@@ -8,6 +8,7 @@ import "parser"
 import "binder"
 import "flow"
 import "checker"
+import "conform"
 
 main :: proc() {
 	args := os.args
@@ -21,6 +22,8 @@ main :: proc() {
 	switch command {
 	case "check":
 		cmd_check(args[2:])
+	case "conform":
+		conform.cmd_conform(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -146,6 +149,7 @@ print_usage :: proc() {
 	fmt.println()
 	fmt.println("Commands:")
 	fmt.println("  check <path>    Analyze Python source files")
+	fmt.println("  conform [path]  Run conformance tests (default: tests/conformance/)")
 	fmt.println("  version         Print version")
 	fmt.println("  help            Show this message")
 }
