@@ -83,4 +83,12 @@ record_import_from :: proc(b: ^Binder, stmt: ^parser.Import_From) {
 		level       = stmt.level,
 		loc         = stmt.loc,
 	})
+
+	// Detect typing imports for special form dispatch
+	if stmt.module == "typing" || stmt.module == "typing_extensions" {
+		for alias in stmt.names {
+			local_name := alias.asname if len(alias.asname) > 0 else alias.name
+			b.result.typing_names[local_name] = alias.name
+		}
+	}
 }

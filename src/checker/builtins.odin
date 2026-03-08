@@ -184,6 +184,15 @@ resolve_annotation :: proc(
 			if class_type_id, found := reg.class_types[sym_id]; found {
 				return make_instance_type(reg, class_type_id)
 			}
+			// Check typing imports (Any, Never, NoReturn, object)
+			if orig_name, is_typing := bind_result.typing_names[e.id]; is_typing {
+				switch orig_name {
+				case "Any":      return TYPE_ANY
+				case "Never":    return TYPE_NEVER
+				case "NoReturn": return TYPE_NEVER
+				case "object":   return TYPE_OBJECT
+				}
+			}
 			return TYPE_UNKNOWN
 		}
 		// Special names

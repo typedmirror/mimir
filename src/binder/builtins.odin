@@ -18,7 +18,7 @@ BUILTIN_NAMES := [?]string{
 	"next",
 	"object", "oct", "open", "ord",
 	"pow", "print", "property", "quit",
-	"range", "repr", "reversed", "round",
+	"range", "repr", "reveal_type", "reversed", "round",
 	"setattr", "slice", "sorted", "staticmethod", "sum", "super",
 	"vars", "zip",
 	// Types

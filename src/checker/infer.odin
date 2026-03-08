@@ -292,6 +292,11 @@ infer_unaryop :: proc(op: parser.Unary_Op, operand: Type_ID, reg: ^Type_Registry
 // ==================== Call Inference ====================
 
 infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	// Check for typing special forms before normal dispatch
+	if typing_result, handled := try_typing_call(e, ctx); handled {
+		return typing_result
+	}
+
 	func_type := infer_expr(e.func, ctx)
 
 	if func_type == TYPE_UNKNOWN || func_type == TYPE_ANY {
@@ -645,6 +650,100 @@ expr_to_rawptr :: proc(expr: parser.Expr) -> rawptr {
 	case ^parser.Slice_Expr:     return rawptr(e)
 	}
 	return nil
+}
+
+// ==================== Typing Special Forms ====================
+
+try_typing_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> (Type_ID, bool) {
+	name_expr, ok := e.func.(^parser.Name_Expr)
+	if !ok { return TYPE_UNKNOWN, false }
+
+	// Check typing imports
+	if orig_name, is_typing := ctx.bind_result.typing_names[name_expr.id]; is_typing {
+		switch orig_name {
+		case "assert_type": return handle_assert_type(e, ctx), true
+		case "reveal_type": return handle_reveal_type(e, ctx), true
+		case "cast":        return handle_cast(e, ctx), true
+		case "TypeVar":
+			for arg in e.args { infer_expr(arg, ctx) }
+			return TYPE_ANY, true
+		case:
+			// Unknown typing form — infer args, don't error
+			for arg in e.args { infer_expr(arg, ctx) }
+			return TYPE_UNKNOWN, true
+		}
+	}
+
+	// reveal_type is also a Python 3.11+ builtin (no import needed)
+	if name_expr.id == "reveal_type" {
+		return handle_reveal_type(e, ctx), true
+	}
+
+	return TYPE_UNKNOWN, false
+}
+
+handle_assert_type :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	if len(e.args) != 2 {
+		emit_diagnostic(ctx, e.loc, "T006", .Error,
+			len(e.args) < 2 ? "Too few arguments" : "Too many arguments",
+			fmt.aprintf("assert_type requires exactly 2 arguments, got %d", len(e.args),
+				allocator = ctx.reg.allocator),
+			"Usage: assert_type(value, expected_type)")
+		for arg in e.args { infer_expr(arg, ctx) }
+		return TYPE_UNKNOWN
+	}
+
+	val_type := infer_expr(e.args[0], ctx)
+	expected := resolve_annotation(e.args[1], ctx.reg, ctx.bind_result, ctx.builtins)
+
+	if expected != TYPE_UNKNOWN && expected != TYPE_ANY &&
+	   val_type != TYPE_UNKNOWN && val_type != TYPE_ANY {
+		if !is_assignable(ctx.reg, val_type, expected) ||
+		   !is_assignable(ctx.reg, expected, val_type) {
+			emit_diagnostic(ctx, e.loc, "T006", .Error,
+				"assert_type failed",
+				fmt.aprintf("Expression has type '%s', asserted type is '%s'",
+					type_to_string(ctx.reg, val_type),
+					type_to_string(ctx.reg, expected),
+					allocator = ctx.reg.allocator),
+				"Fix the type annotation or the expression")
+		}
+	}
+
+	return val_type
+}
+
+handle_reveal_type :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	if len(e.args) != 1 {
+		emit_diagnostic(ctx, e.loc, "T007", .Error,
+			len(e.args) < 1 ? "Too few arguments" : "Too many arguments",
+			fmt.aprintf("reveal_type requires exactly 1 argument, got %d", len(e.args),
+				allocator = ctx.reg.allocator),
+			"Usage: reveal_type(expression)")
+		for arg in e.args { infer_expr(arg, ctx) }
+		return TYPE_UNKNOWN
+	}
+
+	val_type := infer_expr(e.args[0], ctx)
+	emit_diagnostic(ctx, e.loc, "T007", .Info,
+		"Revealed type",
+		fmt.aprintf("Type of expression is '%s'",
+			type_to_string(ctx.reg, val_type),
+			allocator = ctx.reg.allocator),
+		"")
+
+	return val_type
+}
+
+handle_cast :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	if len(e.args) != 2 {
+		for arg in e.args { infer_expr(arg, ctx) }
+		return TYPE_UNKNOWN
+	}
+
+	target_type := resolve_annotation(e.args[0], ctx.reg, ctx.bind_result, ctx.builtins)
+	infer_expr(e.args[1], ctx) // type-check the value
+	return target_type
 }
 
 import "core:fmt"

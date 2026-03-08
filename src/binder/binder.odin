@@ -12,6 +12,7 @@ Bind_Result :: struct {
 	diagnostics:  [dynamic]core.Diagnostic,
 	module_scope: Scope_ID,
 	file_path:    string,
+	typing_names: map[string]string, // local_name → original_name (from typing/typing_extensions)
 }
 
 Binder :: struct {
@@ -34,6 +35,7 @@ bind :: proc(module: ^parser.Module, file_path: string, allocator: mem.Allocator
 	b.result.refs = make(map[rawptr]Symbol_ID, 256, allocator)
 	b.result.imports = make([dynamic]Import_Record, 0, 16, allocator)
 	b.result.diagnostics = make([dynamic]core.Diagnostic, 0, 16, allocator)
+	b.result.typing_names = make(map[string]string, 8, allocator)
 	b.scope_stack = make([dynamic]Scope_ID, 0, 16, allocator)
 
 	// Builtins scope (always scope 1)
