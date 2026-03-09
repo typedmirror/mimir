@@ -163,7 +163,18 @@ check_stmt :: proc(
 ) {
 	switch s in stmt {
 	case ^parser.Assign:
-		rhs_type := infer_expr(s.value, ctx)
+		// Look up target's known type for contextual typing
+		target_expected := TYPE_UNKNOWN
+		if len(s.targets) == 1 {
+			if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+					if t, found := ctx.env.types[sym_id]; found {
+						target_expected = t
+					}
+				}
+			}
+		}
+		rhs_type := infer_expr(s.value, ctx, target_expected)
 		for target in s.targets {
 			assign_target(target, rhs_type, ctx)
 		}
@@ -174,7 +185,7 @@ check_stmt :: proc(
 		set_target_type(s.target, declared, ctx)
 
 		if s.value != nil {
-			rhs_type := infer_expr(s.value, ctx)
+			rhs_type := infer_expr(s.value, ctx, declared)
 			if declared != TYPE_UNKNOWN && rhs_type != TYPE_UNKNOWN &&
 			   rhs_type != TYPE_ANY && declared != TYPE_ANY {
 				if !is_assignable(ctx.reg, rhs_type, declared) {
@@ -188,7 +199,7 @@ check_stmt :: proc(
 
 	case ^parser.Return_Stmt:
 		if s.value != nil {
-			ret_type := infer_expr(s.value, ctx)
+			ret_type := infer_expr(s.value, ctx, declared_return)
 			append(return_types, ret_type)
 
 			if declared_return != TYPE_UNKNOWN && declared_return != TYPE_ANY &&

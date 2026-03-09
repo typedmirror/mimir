@@ -18,10 +18,10 @@ Infer_Context :: struct {
 	file_path:   string,
 }
 
-infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context) -> Type_ID {
+infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
 	if expr == nil { return TYPE_UNKNOWN }
 
-	result := infer_expr_inner(expr, ctx)
+	result := infer_expr_inner(expr, ctx, expected)
 
 	// Record in expr_types map
 	ctx.expr_types[expr_to_rawptr(expr)] = result
@@ -29,7 +29,7 @@ infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context) -> Type_ID {
 	return result
 }
 
-infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context) -> Type_ID {
+infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID) -> Type_ID {
 	switch e in expr {
 	case ^parser.Constant_Expr:
 		return infer_constant(e)
@@ -65,7 +65,7 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context) -> Type_ID {
 		// and/or: result is union of operand types
 		types := make([dynamic]Type_ID, 0, len(e.values), ctx.reg.allocator)
 		for v in e.values {
-			append(&types, infer_expr(v, ctx))
+			append(&types, infer_expr(v, ctx, expected))
 		}
 		return make_union_type(ctx.reg, types[:])
 
@@ -82,54 +82,126 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context) -> Type_ID {
 		return get_subscript_type(container, ctx.reg)
 
 	case ^parser.List_Expr:
+		// Extract expected element type for contextual typing
+		elem_expected := TYPE_UNKNOWN
+		if expected != TYPE_UNKNOWN {
+			exp_t := get_type(ctx.reg, expected)
+			#partial switch exp_info in exp_t.info {
+			case List_Type:
+				elem_expected = exp_info.element
+			}
+		}
 		if len(e.elts) == 0 {
+			if elem_expected != TYPE_UNKNOWN {
+				return make_list_type(ctx.reg, elem_expected)
+			}
 			return make_list_type(ctx.reg, TYPE_UNKNOWN)
 		}
 		elem_types := make([dynamic]Type_ID, 0, len(e.elts), ctx.reg.allocator)
+		all_match := elem_expected != TYPE_UNKNOWN
 		for elt in e.elts {
-			append(&elem_types, infer_expr(elt, ctx))
+			et := infer_expr(elt, ctx, elem_expected)
+			append(&elem_types, et)
+			if all_match && !is_assignable(ctx.reg, et, elem_expected) {
+				all_match = false
+			}
+		}
+		if all_match {
+			return make_list_type(ctx.reg, elem_expected)
 		}
 		elem := unify_types(elem_types[:], ctx.reg)
 		return make_list_type(ctx.reg, elem)
 
 	case ^parser.Dict_Expr:
+		// Extract expected key/value types for contextual typing
+		key_expected, val_expected := TYPE_UNKNOWN, TYPE_UNKNOWN
+		if expected != TYPE_UNKNOWN {
+			exp_t := get_type(ctx.reg, expected)
+			#partial switch exp_info in exp_t.info {
+			case Dict_Type:
+				key_expected = exp_info.key
+				val_expected = exp_info.value
+			}
+		}
 		if len(e.keys) == 0 {
-			return make_dict_type(ctx.reg, TYPE_UNKNOWN, TYPE_UNKNOWN)
+			return make_dict_type(ctx.reg, key_expected, val_expected)
 		}
 		key_types := make([dynamic]Type_ID, 0, len(e.keys), ctx.reg.allocator)
 		val_types := make([dynamic]Type_ID, 0, len(e.values), ctx.reg.allocator)
+		keys_match := key_expected != TYPE_UNKNOWN
+		vals_match := val_expected != TYPE_UNKNOWN
 		for k in e.keys {
-			append(&key_types, infer_expr(k, ctx))
+			kt := infer_expr(k, ctx, key_expected)
+			append(&key_types, kt)
+			if keys_match && !is_assignable(ctx.reg, kt, key_expected) {
+				keys_match = false
+			}
 		}
 		for v in e.values {
-			append(&val_types, infer_expr(v, ctx))
+			vt := infer_expr(v, ctx, val_expected)
+			append(&val_types, vt)
+			if vals_match && !is_assignable(ctx.reg, vt, val_expected) {
+				vals_match = false
+			}
 		}
-		key := unify_types(key_types[:], ctx.reg)
-		val := unify_types(val_types[:], ctx.reg)
+		key := key_expected if keys_match else unify_types(key_types[:], ctx.reg)
+		val := val_expected if vals_match else unify_types(val_types[:], ctx.reg)
 		return make_dict_type(ctx.reg, key, val)
 
 	case ^parser.Set_Expr:
+		// Extract expected element type for contextual typing
+		elem_expected := TYPE_UNKNOWN
+		if expected != TYPE_UNKNOWN {
+			exp_t := get_type(ctx.reg, expected)
+			#partial switch exp_info in exp_t.info {
+			case Set_Type:
+				elem_expected = exp_info.element
+			}
+		}
 		if len(e.elts) == 0 {
+			if elem_expected != TYPE_UNKNOWN {
+				return make_set_type(ctx.reg, elem_expected)
+			}
 			return make_set_type(ctx.reg, TYPE_UNKNOWN)
 		}
 		elem_types := make([dynamic]Type_ID, 0, len(e.elts), ctx.reg.allocator)
+		all_match := elem_expected != TYPE_UNKNOWN
 		for elt in e.elts {
-			append(&elem_types, infer_expr(elt, ctx))
+			et := infer_expr(elt, ctx, elem_expected)
+			append(&elem_types, et)
+			if all_match && !is_assignable(ctx.reg, et, elem_expected) {
+				all_match = false
+			}
+		}
+		if all_match {
+			return make_set_type(ctx.reg, elem_expected)
 		}
 		elem := unify_types(elem_types[:], ctx.reg)
 		return make_set_type(ctx.reg, elem)
 
 	case ^parser.Tuple_Expr:
-		elem_types := make([]Type_ID, len(e.elts), ctx.reg.allocator)
+		elem_count := len(e.elts)
+		tup_expected := make([]Type_ID, elem_count, ctx.reg.allocator)
+		for i in 0..<elem_count { tup_expected[i] = TYPE_UNKNOWN }
+		if expected != TYPE_UNKNOWN {
+			exp_t := get_type(ctx.reg, expected)
+			#partial switch exp_info in exp_t.info {
+			case Tuple_Type:
+				for i in 0..<min(elem_count, len(exp_info.elements)) {
+					tup_expected[i] = exp_info.elements[i]
+				}
+			}
+		}
+		elem_types := make([]Type_ID, elem_count, ctx.reg.allocator)
 		for elt, i in e.elts {
-			elem_types[i] = infer_expr(elt, ctx)
+			elem_types[i] = infer_expr(elt, ctx, tup_expected[i])
 		}
 		return make_tuple_type(ctx.reg, elem_types, false)
 
 	case ^parser.If_Expr:
 		infer_expr(e.test, ctx)
-		body_type := infer_expr(e.body, ctx)
-		else_type := infer_expr(e.orelse, ctx)
+		body_type := infer_expr(e.body, ctx, expected)
+		else_type := infer_expr(e.orelse, ctx, expected)
 		members := [2]Type_ID{body_type, else_type}
 		return make_union_type(ctx.reg, members[:])
 
@@ -373,8 +445,8 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 
 	// Check arg types against param types
 	for i := 0; i < min(n_args, n_params); i += 1 {
-		arg_type := infer_expr(e.args[i], ctx)
 		param_type := func_info.params[i].type_id
+		arg_type := infer_expr(e.args[i], ctx, param_type)
 		if param_type != TYPE_ANY && param_type != TYPE_UNKNOWN &&
 		   arg_type != TYPE_UNKNOWN && arg_type != TYPE_ANY {
 			if !is_assignable(ctx.reg, arg_type, param_type) {
