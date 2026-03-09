@@ -109,18 +109,15 @@ analyze_condition :: proc(
 			if is_none_compare(e) {
 				sym_id := expr_to_symbol(e.left, bind_result)
 				if sym_id != binder.INVALID_SYMBOL {
-					kind: Guard_Kind
-					if e.ops[0] == .Is {
-						kind = .Is_None
-					} else {
-						kind = .Is_Not_None
-					}
+					// For "is not", use Is_None with swapped blocks (consistent with unary inversion)
+					tb := e.ops[0] == .Is ? true_block : false_block
+					fb := e.ops[0] == .Is ? false_block : true_block
 					append(guards, Guard{
-						kind         = kind,
+						kind         = .Is_None,
 						symbol_id    = sym_id,
 						branch_block = branch_block,
-						true_block   = true_block,
-						false_block  = false_block,
+						true_block   = tb,
+						false_block  = fb,
 						loc          = loc,
 					})
 				}
@@ -129,18 +126,14 @@ analyze_condition :: proc(
 			if is_none_compare_reversed(e) {
 				sym_id := expr_to_symbol(e.comparators[0], bind_result)
 				if sym_id != binder.INVALID_SYMBOL {
-					kind: Guard_Kind
-					if e.ops[0] == .Is {
-						kind = .Is_None
-					} else {
-						kind = .Is_Not_None
-					}
+					tb := e.ops[0] == .Is ? true_block : false_block
+					fb := e.ops[0] == .Is ? false_block : true_block
 					append(guards, Guard{
-						kind         = kind,
+						kind         = .Is_None,
 						symbol_id    = sym_id,
 						branch_block = branch_block,
-						true_block   = true_block,
-						false_block  = false_block,
+						true_block   = tb,
+						false_block  = fb,
 						loc          = loc,
 					})
 				}
@@ -151,19 +144,16 @@ analyze_condition :: proc(
 				if call != nil && len(call.args) >= 1 {
 					sym_id := expr_to_symbol(call.args[0], bind_result)
 					if sym_id != binder.INVALID_SYMBOL {
-						kind: Guard_Kind
-						if e.ops[0] == .Is {
-							kind = .Type_Is
-						} else {
-							kind = .Type_Is_Not
-						}
+						// For "is not", use Type_Is with swapped blocks
+						tb := e.ops[0] == .Is ? true_block : false_block
+						fb := e.ops[0] == .Is ? false_block : true_block
 						append(guards, Guard{
-							kind         = kind,
+							kind         = .Type_Is,
 							symbol_id    = sym_id,
 							type_expr    = e.comparators[0],
 							branch_block = branch_block,
-							true_block   = true_block,
-							false_block  = false_block,
+							true_block   = tb,
+							false_block  = fb,
 							loc          = loc,
 						})
 					}

@@ -55,11 +55,15 @@ analyze :: proc(module: ^parser.Module, bind_result: ^binder.Bind_Result, file_p
 
 		has_return_ann := false
 		has_any_return := false
+		returns_none := false
 
 		// Check if function has return annotation or explicit returns
-		check_function_returns(module.body, scope, &has_return_ann, &has_any_return)
+		check_function_returns(module.body, scope, &has_return_ann, &has_any_return, &returns_none)
 
-		check_missing_return(&cfg, cfg.scope_name, has_return_ann, has_any_return, file_path, &result.diagnostics)
+		// Only flag F002 for functions with non-None return annotations
+		if !has_return_ann || returns_none { continue }
+
+		check_missing_return(&cfg, cfg.scope_name, has_return_ann, has_any_return, file_path, scope.loc, &result.diagnostics)
 	}
 
 	return result
@@ -163,44 +167,54 @@ find_scope_for_def :: proc(bind_result: ^binder.Bind_Result, name: string, loc: 
 	return binder.INVALID_SCOPE
 }
 
-check_function_returns :: proc(stmts: []parser.Stmt, target_scope: ^binder.Scope, has_return_ann: ^bool, has_any_return: ^bool) {
+returns_is_none :: proc(returns: parser.Expr) -> bool {
+	if returns == nil { return false }
+	c, ok := returns.(^parser.Constant_Expr)
+	if !ok { return false }
+	_, is_none := c.value.(parser.Const_None)
+	return is_none
+}
+
+check_function_returns :: proc(stmts: []parser.Stmt, target_scope: ^binder.Scope, has_return_ann: ^bool, has_any_return: ^bool, returns_none: ^bool) {
 	for stmt in stmts {
 		#partial switch s in stmt {
 		case ^parser.Func_Def:
 			if s.name == target_scope.name && s.loc.line == target_scope.loc.line {
 				has_return_ann^ = s.returns != nil
+				returns_none^ = returns_is_none(s.returns)
 				scan_for_returns(s.body, has_any_return)
 				return
 			}
 			// Recurse to find nested
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none)
 
 		case ^parser.Async_Func_Def:
 			if s.name == target_scope.name && s.loc.line == target_scope.loc.line {
 				has_return_ann^ = s.returns != nil
+				returns_none^ = returns_is_none(s.returns)
 				scan_for_returns(s.body, has_any_return)
 				return
 			}
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none)
 
 		case ^parser.Class_Def:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none)
 		case ^parser.If_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return)
-			check_function_returns(s.orelse, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none)
+			check_function_returns(s.orelse, target_scope, has_return_ann, has_any_return, returns_none)
 		case ^parser.While_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none)
 		case ^parser.For_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none)
 		case ^parser.Try_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none)
 			for handler in s.handlers {
-				check_function_returns(handler.body, target_scope, has_return_ann, has_any_return)
+				check_function_returns(handler.body, target_scope, has_return_ann, has_any_return, returns_none)
 			}
-			check_function_returns(s.orelse, target_scope, has_return_ann, has_any_return)
-			check_function_returns(s.finalbody, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.orelse, target_scope, has_return_ann, has_any_return, returns_none)
+			check_function_returns(s.finalbody, target_scope, has_return_ann, has_any_return, returns_none)
 		case ^parser.With_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none)
 		}
 	}
 }

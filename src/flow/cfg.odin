@@ -669,7 +669,7 @@ emit_unreachable :: proc(b: ^CFG_Builder, stmt: parser.Stmt) {
 	if loc.line == 0 { return }
 
 	append(b.diagnostics, core.Diagnostic{
-		severity = .Warning,
+		severity = .Error,
 		location = core.Location{
 			file   = b.file_path,
 			line   = int(loc.line),
@@ -682,7 +682,7 @@ emit_unreachable :: proc(b: ^CFG_Builder, stmt: parser.Stmt) {
 	})
 }
 
-check_missing_return :: proc(cfg: ^CFG, scope_name: string, has_return_annotation: bool, has_any_return: bool, file_path: string, diagnostics: ^[dynamic]core.Diagnostic) {
+check_missing_return :: proc(cfg: ^CFG, scope_name: string, has_return_annotation: bool, has_any_return: bool, file_path: string, def_loc: parser.Src_Loc, diagnostics: ^[dynamic]core.Diagnostic) {
 	// Only check functions that have a return annotation or at least one explicit return
 	if !has_return_annotation && !has_any_return { return }
 
@@ -704,13 +704,12 @@ check_missing_return :: proc(cfg: ^CFG, scope_name: string, has_return_annotatio
 						continue
 					}
 					// This path reaches exit without return
-					loc := block_end_loc(pred)
 					append(diagnostics, core.Diagnostic{
-						severity = .Warning,
+						severity = .Error,
 						location = core.Location{
 							file   = file_path,
-							line   = int(loc.line),
-							column = int(loc.col),
+							line   = int(def_loc.line),
+							column = int(def_loc.col),
 						},
 						what = "missing return statement",
 						why  = "not all code paths return a value",

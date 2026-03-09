@@ -33,9 +33,11 @@ check :: proc(
 
 	builtins := init_builtins(&result.registry)
 
-	// Build scope→return type map by scanning AST
+	// Build scope→return type map and scope→args map by scanning AST
 	return_type_map := make(map[binder.Scope_ID]Type_ID, 16, allocator)
+	func_args_map := make(map[binder.Scope_ID]^parser.Arguments, 16, allocator)
 	collect_func_return_types(module.body, bind_result, &result.registry, &builtins, &return_type_map)
+	collect_func_args(module.body, bind_result, &func_args_map)
 
 	// Process each scope's CFG
 	for &cfg in flow_result.cfgs {
@@ -47,10 +49,11 @@ check :: proc(
 			&cfg,
 			bind_result,
 			flow_result,
-			&result,
-			&builtins,
-			file_path,
-			declared_return,
+			result    = &result,
+			builtins  = &builtins,
+			file_path = file_path,
+			declared_return = declared_return,
+			func_args_map = &func_args_map,
 		)
 	}
 
@@ -67,6 +70,7 @@ check_scope :: proc(
 	builtins: ^Builtin_Names,
 	file_path: string,
 	declared_return: Type_ID,
+	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
 ) {
 	n_blocks := len(cfg.blocks)
 	if n_blocks == 0 { return }
@@ -77,12 +81,12 @@ check_scope :: proc(
 		envs[i].types = make(map[binder.Symbol_ID]Type_ID, 16, result.registry.allocator)
 	}
 
-	// Initialize entry block with parameter types from scope
-	entry_idx := int(cfg.entry) - 1
-	if entry_idx >= 0 && entry_idx < n_blocks {
-		scope := binder.result_get_scope(bind_result, cfg.scope_id)
-		if scope != nil && (scope.kind == .Function || scope.kind == .Lambda) {
-			init_param_types(scope, bind_result, &envs[entry_idx], &result.registry, builtins)
+	// Resolve function args for parameter type initialization
+	scope := binder.result_get_scope(bind_result, cfg.scope_id)
+	func_args: ^parser.Arguments = nil
+	if scope != nil && (scope.kind == .Function || scope.kind == .Lambda) {
+		if args, ok := func_args_map[cfg.scope_id]; ok {
+			func_args = args
 		}
 	}
 
@@ -108,6 +112,11 @@ check_scope :: proc(
 
 		// Merge environments from predecessors
 		env := merge_envs(block, envs[:], cfg, &result.registry)
+
+		// Initialize parameter types for the entry block (after merge to avoid overwrite)
+		if block_id == cfg.entry && scope != nil && (scope.kind == .Function || scope.kind == .Lambda) {
+			init_param_types(scope, bind_result, &env, &result.registry, builtins, func_args)
+		}
 
 		// Apply narrowing guards
 		apply_guards(&env, block_id, flow_result.guards[:], &result.registry, bind_result, builtins)
@@ -346,27 +355,21 @@ apply_positive_guard :: proc(
 	builtins: ^Builtin_Names,
 ) {
 	#partial switch guard.kind {
-	case .Is_Instance:
+	case .Is_Instance, .Is_Not_Instance, .Type_Is, .Type_Is_Not:
+		// Narrow to the guard type (inverted kinds come from unary `not` with block swap,
+		// so double inversion cancels → same semantics as non-inverted)
 		narrow_type := resolve_annotation(guard.type_expr, reg, bind_result, builtins)
 		if narrow_type != TYPE_UNKNOWN {
 			env.types[guard.symbol_id] = narrow_type
 		}
-	case .Is_None:
+	case .Is_None, .Is_Not_None:
+		// Is_Not_None only from unary `not` inversion with block swap → same as Is_None
 		env.types[guard.symbol_id] = TYPE_NONE
-	case .Is_Not_None:
+	case .Is_Truthy, .Is_Falsy:
+		// Is_Falsy only from unary `not` inversion with block swap → same as Is_Truthy
 		current, ok := env.types[guard.symbol_id]
 		if ok {
 			env.types[guard.symbol_id] = remove_none(reg, current)
-		}
-	case .Is_Truthy:
-		current, ok := env.types[guard.symbol_id]
-		if ok {
-			env.types[guard.symbol_id] = remove_none(reg, current)
-		}
-	case .Type_Is:
-		narrow_type := resolve_annotation(guard.type_expr, reg, bind_result, builtins)
-		if narrow_type != TYPE_UNKNOWN {
-			env.types[guard.symbol_id] = narrow_type
 		}
 	}
 }
@@ -379,20 +382,21 @@ apply_negative_guard :: proc(
 	builtins: ^Builtin_Names,
 ) {
 	#partial switch guard.kind {
-	case .Is_Instance:
+	case .Is_Instance, .Is_Not_Instance, .Type_Is, .Type_Is_Not:
+		// Subtract the guard type from the union (inverted kinds come from unary `not`
+		// with block swap, so double inversion cancels → same semantics as non-inverted)
 		narrow_type := resolve_annotation(guard.type_expr, reg, bind_result, builtins)
 		current, ok := env.types[guard.symbol_id]
 		if ok && narrow_type != TYPE_UNKNOWN {
 			env.types[guard.symbol_id] = subtract_type(reg, current, narrow_type)
 		}
-	case .Is_None:
+	case .Is_None, .Is_Not_None:
+		// Is_Not_None only from unary `not` inversion with block swap → same as Is_None
 		current, ok := env.types[guard.symbol_id]
 		if ok {
 			env.types[guard.symbol_id] = remove_none(reg, current)
 		}
-	case .Is_Not_None:
-		env.types[guard.symbol_id] = TYPE_NONE
-	case .Is_Truthy:
+	case .Is_Truthy, .Is_Falsy:
 		// In false branch of truthiness — could be None/False/0/empty
 		// Conservative: don't narrow
 		break
@@ -698,6 +702,47 @@ collect_func_return_types :: proc(
 	}
 }
 
+collect_func_args :: proc(
+	stmts: []parser.Stmt,
+	bind_result: ^binder.Bind_Result,
+	out: ^map[binder.Scope_ID]^parser.Arguments,
+) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			scope_id := find_scope_for_def(s.name, s.loc, bind_result, .Function)
+			if scope_id != binder.INVALID_SCOPE {
+				out[scope_id] = &s.args
+			}
+			collect_func_args(s.body, bind_result, out)
+		case ^parser.Async_Func_Def:
+			scope_id := find_scope_for_def(s.name, s.loc, bind_result, .Function)
+			if scope_id != binder.INVALID_SCOPE {
+				out[scope_id] = &s.args
+			}
+			collect_func_args(s.body, bind_result, out)
+		case ^parser.Class_Def:
+			collect_func_args(s.body, bind_result, out)
+		case ^parser.If_Stmt:
+			collect_func_args(s.body, bind_result, out)
+			collect_func_args(s.orelse, bind_result, out)
+		case ^parser.For_Stmt:
+			collect_func_args(s.body, bind_result, out)
+		case ^parser.While_Stmt:
+			collect_func_args(s.body, bind_result, out)
+		case ^parser.Try_Stmt:
+			collect_func_args(s.body, bind_result, out)
+			for handler in s.handlers {
+				collect_func_args(handler.body, bind_result, out)
+			}
+			collect_func_args(s.orelse, bind_result, out)
+			collect_func_args(s.finalbody, bind_result, out)
+		case ^parser.With_Stmt:
+			collect_func_args(s.body, bind_result, out)
+		}
+	}
+}
+
 // ==================== Scope/Symbol Lookup Helpers ====================
 
 find_scope_for_def :: proc(
@@ -756,15 +801,34 @@ init_param_types :: proc(
 	env: ^Type_Env,
 	reg: ^Type_Registry,
 	builtins: ^Builtin_Names,
+	func_args: ^parser.Arguments = nil,
 ) {
+	// Build param name → annotation map from function args
+	param_annotations: map[string]parser.Expr
+	if func_args != nil {
+		param_annotations.allocator = context.temp_allocator
+		for a in func_args.posonlyargs {
+			if a.annotation != nil { param_annotations[a.arg] = a.annotation }
+		}
+		for a in func_args.args {
+			if a.annotation != nil { param_annotations[a.arg] = a.annotation }
+		}
+		for a in func_args.kwonlyargs {
+			if a.annotation != nil { param_annotations[a.arg] = a.annotation }
+		}
+	}
+
 	// Set parameter symbols to their annotated types or UNKNOWN
 	for _, sym_id in scope.symbols {
 		sym := binder.result_get_symbol(bind_result, sym_id)
 		if sym == nil { continue }
 		if .Is_Param in sym.flags {
-			// Parameter starts as UNKNOWN; annotation-based type comes from
-			// the function def processing which sets the callable type
-			env.types[sym_id] = TYPE_UNKNOWN
+			if ann, ok := param_annotations[sym.name]; ok {
+				resolved := resolve_annotation(ann, reg, bind_result, builtins)
+				env.types[sym_id] = resolved != TYPE_UNKNOWN ? resolved : TYPE_UNKNOWN
+			} else {
+				env.types[sym_id] = TYPE_UNKNOWN
+			}
 		}
 	}
 }
