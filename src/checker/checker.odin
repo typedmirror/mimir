@@ -1,7 +1,6 @@
 package checker
 
 import "core:mem"
-import "core:fmt"
 
 import parser "mimir:parser"
 import binder "mimir:binder"
@@ -79,8 +78,8 @@ check_scope :: proc(
 	}
 
 	// Initialize entry block with parameter types from scope
-	entry_idx := int(cfg.entry)
-	if entry_idx < n_blocks {
+	entry_idx := int(cfg.entry) - 1
+	if entry_idx >= 0 && entry_idx < n_blocks {
 		scope := binder.result_get_scope(bind_result, cfg.scope_id)
 		if scope != nil && (scope.kind == .Function || scope.kind == .Lambda) {
 			init_param_types(scope, bind_result, &envs[entry_idx], &result.registry, builtins)
@@ -98,9 +97,9 @@ check_scope :: proc(
 	for len(queue) > 0 {
 		block_id := queue[0]
 		ordered_remove(&queue, 0)
-		idx := int(block_id)
+		idx := int(block_id) - 1  // Block_IDs are 1-indexed
 
-		if idx >= n_blocks { continue }
+		if idx < 0 || idx >= n_blocks { continue }
 		if visited[idx] { continue }
 		visited[idx] = true
 
@@ -134,8 +133,8 @@ check_scope :: proc(
 
 		// Enqueue successors
 		for succ in block.succs {
-			succ_idx := int(succ)
-			if succ_idx < n_blocks && !visited[succ_idx] {
+			succ_idx := int(succ) - 1  // Block_IDs are 1-indexed
+			if succ_idx >= 0 && succ_idx < n_blocks && !visited[succ_idx] {
 				append(&queue, succ)
 			}
 		}
@@ -300,8 +299,8 @@ merge_envs :: proc(
 
 	pred_count := 0
 	for pred_id in block.preds {
-		pred_idx := int(pred_id)
-		if pred_idx >= len(envs) { continue }
+		pred_idx := int(pred_id) - 1  // Block_IDs are 1-indexed
+		if pred_idx < 0 || pred_idx >= len(envs) { continue }
 		pred_env := &envs[pred_idx]
 
 		for sym_id, type_id in pred_env.types {
