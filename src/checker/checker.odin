@@ -179,7 +179,7 @@ check_stmt :: proc(
 		}
 
 	case ^parser.Ann_Assign:
-		declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins)
+		declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 		// Set the declared type on the symbol
 		set_target_type(s.target, declared, ctx)
 
@@ -410,7 +410,7 @@ build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 		actual_params = params[1:]
 	}
 
-	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins)
+	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 	return make_callable_type(ctx.reg, actual_params, ret_type)
 }
 
@@ -420,7 +420,7 @@ build_async_func_type :: proc(fd: ^parser.Async_Func_Def, ctx: ^Infer_Context) -
 	if len(params) > 0 && params[0].name == "self" {
 		actual_params = params[1:]
 	}
-	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins)
+	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 	return make_callable_type(ctx.reg, actual_params, ret_type)
 }
 
@@ -450,7 +450,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 			}
 
 		case ^parser.Ann_Assign:
-			declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins)
+			declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
 				attrs[name_expr.id] = declared
 			}
@@ -503,7 +503,7 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 									for arg in fd.args.args {
 										if arg.arg == name.id {
 											val_type = resolve_annotation(
-												arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins)
+												arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 											break
 										}
 									}
@@ -519,7 +519,7 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 			if attr, ok := s.target.(^parser.Attribute_Expr); ok {
 				if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
 					if self_name.id == "self" {
-						declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins)
+						declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 						attrs[attr.attr] = declared
 					}
 				}

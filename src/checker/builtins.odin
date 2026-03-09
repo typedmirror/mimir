@@ -158,6 +158,7 @@ resolve_annotation :: proc(
 	reg: ^Type_Registry,
 	bind_result: ^binder.Bind_Result,
 	builtins: ^Builtin_Names,
+	env: ^Type_Env = nil,
 ) -> Type_ID {
 	if expr == nil { return TYPE_UNKNOWN }
 
@@ -184,6 +185,15 @@ resolve_annotation :: proc(
 			if class_type_id, found := reg.class_types[sym_id]; found {
 				return make_instance_type(reg, class_type_id)
 			}
+			// Check if symbol maps to a TypeVar in environment
+			if env != nil {
+				if tv_type, tv_found := env.types[sym_id]; tv_found {
+					tv := get_type(reg, tv_type)
+					if _, is_tv := tv.info.(TypeVar_Type); is_tv {
+						return tv_type
+					}
+				}
+			}
 			// Check typing imports (Any, Never, NoReturn, object)
 			if orig_name, is_typing := bind_result.typing_names[e.id]; is_typing {
 				switch orig_name {
@@ -207,27 +217,26 @@ resolve_annotation :: proc(
 		base_name := get_annotation_name(e.value)
 		switch base_name {
 		case "list":
-			elem := resolve_annotation(e.slice, reg, bind_result, builtins)
+			elem := resolve_annotation(e.slice, reg, bind_result, builtins, env)
 			return make_list_type(reg, elem)
 		case "List":
-			elem := resolve_annotation(e.slice, reg, bind_result, builtins)
+			elem := resolve_annotation(e.slice, reg, bind_result, builtins, env)
 			return make_list_type(reg, elem)
 		case "dict", "Dict":
-			// dict[K, V] — slice is a Tuple_Expr with two elements
-			key, val := resolve_two_args(e.slice, reg, bind_result, builtins)
+			key, val := resolve_two_args(e.slice, reg, bind_result, builtins, env)
 			return make_dict_type(reg, key, val)
 		case "set", "Set":
-			elem := resolve_annotation(e.slice, reg, bind_result, builtins)
+			elem := resolve_annotation(e.slice, reg, bind_result, builtins, env)
 			return make_set_type(reg, elem)
 		case "tuple", "Tuple":
-			elems := resolve_tuple_args(e.slice, reg, bind_result, builtins)
+			elems := resolve_tuple_args(e.slice, reg, bind_result, builtins, env)
 			return make_tuple_type(reg, elems, false)
 		case "Optional":
-			inner := resolve_annotation(e.slice, reg, bind_result, builtins)
+			inner := resolve_annotation(e.slice, reg, bind_result, builtins, env)
 			members := [2]Type_ID{inner, TYPE_NONE}
 			return make_union_type(reg, members[:])
 		case "Union":
-			args := resolve_tuple_args(e.slice, reg, bind_result, builtins)
+			args := resolve_tuple_args(e.slice, reg, bind_result, builtins, env)
 			return make_union_type(reg, args)
 		case "Callable":
 			// Simplified: Callable[[params], return_type]
@@ -238,8 +247,8 @@ resolve_annotation :: proc(
 	case ^parser.Bin_Op_Expr:
 		// int | str → Union
 		if e.op == .Bit_Or {
-			left := resolve_annotation(e.left, reg, bind_result, builtins)
-			right := resolve_annotation(e.right, reg, bind_result, builtins)
+			left := resolve_annotation(e.left, reg, bind_result, builtins, env)
+			right := resolve_annotation(e.right, reg, bind_result, builtins, env)
 			members := [2]Type_ID{left, right}
 			return make_union_type(reg, members[:])
 		}
@@ -284,12 +293,13 @@ resolve_two_args :: proc(
 	reg: ^Type_Registry,
 	bind_result: ^binder.Bind_Result,
 	builtins: ^Builtin_Names,
+	env: ^Type_Env = nil,
 ) -> (Type_ID, Type_ID) {
 	#partial switch e in expr {
 	case ^parser.Tuple_Expr:
 		if len(e.elts) >= 2 {
-			k := resolve_annotation(e.elts[0], reg, bind_result, builtins)
-			v := resolve_annotation(e.elts[1], reg, bind_result, builtins)
+			k := resolve_annotation(e.elts[0], reg, bind_result, builtins, env)
+			v := resolve_annotation(e.elts[1], reg, bind_result, builtins, env)
 			return k, v
 		}
 	}
@@ -302,17 +312,18 @@ resolve_tuple_args :: proc(
 	reg: ^Type_Registry,
 	bind_result: ^binder.Bind_Result,
 	builtins: ^Builtin_Names,
+	env: ^Type_Env = nil,
 ) -> []Type_ID {
 	#partial switch e in expr {
 	case ^parser.Tuple_Expr:
 		result := make([]Type_ID, len(e.elts), reg.allocator)
 		for elt, i in e.elts {
-			result[i] = resolve_annotation(elt, reg, bind_result, builtins)
+			result[i] = resolve_annotation(elt, reg, bind_result, builtins, env)
 		}
 		return result
 	}
 	// Single arg
 	single := make([]Type_ID, 1, reg.allocator)
-	single[0] = resolve_annotation(expr, reg, bind_result, builtins)
+	single[0] = resolve_annotation(expr, reg, bind_result, builtins, env)
 	return single
 }

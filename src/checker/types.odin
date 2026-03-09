@@ -51,6 +51,7 @@ Type_Info :: union {
 	Literal_Str_Type,
 	Literal_Bool_Type,
 	Module_Type,
+	TypeVar_Type,
 }
 
 Primitive_Kind :: enum u8 {
@@ -104,6 +105,12 @@ Literal_Bool_Type :: struct { value: bool }
 
 Module_Type :: struct {
 	scope_id: binder.Scope_ID,
+}
+
+TypeVar_Type :: struct {
+	name:        string,
+	bound:       Type_ID,
+	constraints: []Type_ID,
 }
 
 // ==================== Type Environment ====================
@@ -284,6 +291,10 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 
 	src_type := get_type(reg, source)
 	tgt_type := get_type(reg, target)
+
+	// TypeVar types are permissive (resolved via substitution at call sites)
+	if _, src_is_tv := src_type.info.(TypeVar_Type); src_is_tv { return true }
+	if _, tgt_is_tv := tgt_type.info.(TypeVar_Type); tgt_is_tv { return true }
 
 	// Literal <: base type
 	#partial switch _ in src_type.info {
@@ -506,6 +517,160 @@ type_to_string :: proc(reg: ^Type_Registry, id: Type_ID) -> string {
 		return "Literal[False]"
 	case Module_Type:
 		return "<module>"
+	case TypeVar_Type:
+		return info.name
 	}
 	return "<unknown>"
+}
+
+// ==================== TypeVar Utilities ====================
+
+is_typevar :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
+	typ := get_type(reg, t)
+	_, ok := typ.info.(TypeVar_Type)
+	return ok
+}
+
+contains_typevar :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
+	typ := get_type(reg, t)
+	#partial switch info in typ.info {
+	case TypeVar_Type: return true
+	case List_Type:    return contains_typevar(reg, info.element)
+	case Dict_Type:    return contains_typevar(reg, info.key) || contains_typevar(reg, info.value)
+	case Set_Type:     return contains_typevar(reg, info.element)
+	case Tuple_Type:
+		for e in info.elements {
+			if contains_typevar(reg, e) { return true }
+		}
+	case Union_Type:
+		for m in info.members {
+			if contains_typevar(reg, m) { return true }
+		}
+	case Callable_Type:
+		for p in info.params {
+			if contains_typevar(reg, p.type_id) { return true }
+		}
+		return contains_typevar(reg, info.return_type)
+	}
+	return false
+}
+
+callable_has_typevars :: proc(info: ^Callable_Type, reg: ^Type_Registry) -> bool {
+	for p in info.params {
+		if contains_typevar(reg, p.type_id) { return true }
+	}
+	return contains_typevar(reg, info.return_type)
+}
+
+// ==================== Type Matching (TypeVar Inference) ====================
+
+// Match a pattern type against a concrete type, extracting TypeVar bindings
+match_type :: proc(reg: ^Type_Registry, pattern: Type_ID, concrete: Type_ID, subs: ^map[Type_ID]Type_ID) -> bool {
+	pt := get_type(reg, pattern)
+	#partial switch _ in pt.info {
+	case TypeVar_Type:
+		if existing, ok := subs[pattern]; ok {
+			return existing == concrete || is_assignable(reg, concrete, existing)
+		}
+		subs[pattern] = concrete
+		return true
+	}
+
+	#partial switch p_info in pt.info {
+	case List_Type:
+		ct := get_type(reg, concrete)
+		#partial switch c_info in ct.info {
+		case List_Type:
+			return match_type(reg, p_info.element, c_info.element, subs)
+		}
+		return false
+	case Dict_Type:
+		ct := get_type(reg, concrete)
+		#partial switch c_info in ct.info {
+		case Dict_Type:
+			return match_type(reg, p_info.key, c_info.key, subs) &&
+			       match_type(reg, p_info.value, c_info.value, subs)
+		}
+		return false
+	case Set_Type:
+		ct := get_type(reg, concrete)
+		#partial switch c_info in ct.info {
+		case Set_Type:
+			return match_type(reg, p_info.element, c_info.element, subs)
+		}
+		return false
+	case Tuple_Type:
+		ct := get_type(reg, concrete)
+		#partial switch c_info in ct.info {
+		case Tuple_Type:
+			if len(p_info.elements) != len(c_info.elements) { return false }
+			for e, i in p_info.elements {
+				if !match_type(reg, e, c_info.elements[i], subs) { return false }
+			}
+			return true
+		}
+		return false
+	}
+
+	return is_assignable(reg, concrete, pattern)
+}
+
+// ==================== Type Substitution ====================
+
+// Apply substitution map to a type, replacing TypeVars with concrete types
+substitute_type :: proc(reg: ^Type_Registry, type_id: Type_ID, subs: map[Type_ID]Type_ID) -> Type_ID {
+	if sub, ok := subs[type_id]; ok {
+		return sub
+	}
+
+	t := get_type(reg, type_id)
+	#partial switch info in t.info {
+	case TypeVar_Type:
+		return TYPE_ANY // Unresolved TypeVar fallback
+	case List_Type:
+		new_elem := substitute_type(reg, info.element, subs)
+		if new_elem == info.element { return type_id }
+		return make_list_type(reg, new_elem)
+	case Dict_Type:
+		new_key := substitute_type(reg, info.key, subs)
+		new_val := substitute_type(reg, info.value, subs)
+		if new_key == info.key && new_val == info.value { return type_id }
+		return make_dict_type(reg, new_key, new_val)
+	case Set_Type:
+		new_elem := substitute_type(reg, info.element, subs)
+		if new_elem == info.element { return type_id }
+		return make_set_type(reg, new_elem)
+	case Tuple_Type:
+		changed := false
+		new_elems := make([]Type_ID, len(info.elements), reg.allocator)
+		for e, i in info.elements {
+			new_elems[i] = substitute_type(reg, e, subs)
+			if new_elems[i] != e { changed = true }
+		}
+		if !changed { return type_id }
+		return make_tuple_type(reg, new_elems, info.is_variadic)
+	case Union_Type:
+		new_members := make([]Type_ID, len(info.members), reg.allocator)
+		changed := false
+		for m, i in info.members {
+			new_members[i] = substitute_type(reg, m, subs)
+			if new_members[i] != m { changed = true }
+		}
+		if !changed { return type_id }
+		return make_union_type(reg, new_members)
+	case Callable_Type:
+		changed := false
+		new_params := make([]Param_Type, len(info.params), reg.allocator)
+		for p, i in info.params {
+			new_type := substitute_type(reg, p.type_id, subs)
+			new_params[i] = Param_Type{name = p.name, type_id = new_type, has_default = p.has_default}
+			if new_type != p.type_id { changed = true }
+		}
+		new_ret := substitute_type(reg, info.return_type, subs)
+		if new_ret != info.return_type { changed = true }
+		if !changed { return type_id }
+		return make_callable_type(reg, new_params, new_ret)
+	}
+
+	return type_id
 }

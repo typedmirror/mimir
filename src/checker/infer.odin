@@ -382,6 +382,9 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 	ft := get_type(ctx.reg, func_type)
 	#partial switch &info in ft.info {
 	case Callable_Type:
+		if callable_has_typevars(&info, ctx.reg) {
+			return infer_generic_call(e, &info, ctx)
+		}
 		check_call_args(e, &info, ctx)
 		return info.return_type
 
@@ -702,7 +705,7 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 	for a in args.posonlyargs {
 		params[idx] = Param_Type{
 			name = a.arg,
-			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins),
+			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env),
 		}
 		idx += 1
 	}
@@ -714,7 +717,7 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 		has_default := i >= (n_args - n_defaults)
 		params[idx] = Param_Type{
 			name = a.arg,
-			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins),
+			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env),
 			has_default = has_default,
 		}
 		idx += 1
@@ -735,7 +738,7 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 		has_default := i < len(args.kw_defaults) && args.kw_defaults[i] != nil
 		params[idx] = Param_Type{
 			name = a.arg,
-			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins),
+			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env),
 			has_default = has_default,
 		}
 		idx += 1
@@ -811,8 +814,7 @@ try_typing_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> (Type_ID, 
 		case "reveal_type": return handle_reveal_type(e, ctx), true
 		case "cast":        return handle_cast(e, ctx), true
 		case "TypeVar":
-			for arg in e.args { infer_expr(arg, ctx) }
-			return TYPE_ANY, true
+			return handle_typevar(e, ctx), true
 		case:
 			// Unknown typing form — infer args, don't error
 			for arg in e.args { infer_expr(arg, ctx) }
@@ -840,7 +842,7 @@ handle_assert_type :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID
 	}
 
 	val_type := infer_expr(e.args[0], ctx)
-	expected := resolve_annotation(e.args[1], ctx.reg, ctx.bind_result, ctx.builtins)
+	expected := resolve_annotation(e.args[1], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 
 	if expected != TYPE_UNKNOWN && expected != TYPE_ANY &&
 	   val_type != TYPE_UNKNOWN && val_type != TYPE_ANY {
@@ -887,7 +889,7 @@ handle_cast :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 		return TYPE_UNKNOWN
 	}
 
-	target_type := resolve_annotation(e.args[0], ctx.reg, ctx.bind_result, ctx.builtins)
+	target_type := resolve_annotation(e.args[0], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 	infer_expr(e.args[1], ctx) // type-check the value
 	return target_type
 }
@@ -925,4 +927,143 @@ fmt_type_mismatch :: proc(actual: Type_ID, expected: Type_ID, reg: ^Type_Registr
 fmt_arg_count_error :: proc(expected: int, actual: int, reg: ^Type_Registry) -> string {
 	return fmt.aprintf("Expected %d argument(s), got %d", expected, actual,
 		allocator = reg.allocator)
+}
+
+// ==================== TypeVar Handling ====================
+
+handle_typevar :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	name := ""
+	bound := TYPE_UNKNOWN
+	constraints := make([dynamic]Type_ID, 0, 4, ctx.reg.allocator)
+
+	// First arg is the name (string constant)
+	if len(e.args) >= 1 {
+		#partial switch arg in e.args[0] {
+		case ^parser.Constant_Expr:
+			if s, ok := arg.value.(string); ok {
+				name = s
+			}
+		}
+	}
+
+	// Remaining positional args are constraints
+	for i := 1; i < len(e.args); i += 1 {
+		ct := resolve_annotation(e.args[i], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		append(&constraints, ct)
+	}
+
+	// Check keywords for bound=
+	for kw in e.keywords {
+		if kw.arg == "bound" {
+			bound = resolve_annotation(kw.value, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		}
+	}
+
+	constraint_slice: []Type_ID
+	if len(constraints) > 0 {
+		constraint_slice = make([]Type_ID, len(constraints), ctx.reg.allocator)
+		copy(constraint_slice, constraints[:])
+	}
+
+	return register_type(ctx.reg, TypeVar_Type{
+		name        = name,
+		bound       = bound,
+		constraints = constraint_slice,
+	})
+}
+
+// ==================== Generic Call Inference ====================
+
+infer_generic_call :: proc(e: ^parser.Call_Expr, info: ^Callable_Type, ctx: ^Infer_Context) -> Type_ID {
+	subs := make(map[Type_ID]Type_ID, 4, ctx.reg.allocator)
+
+	n_args := len(e.args)
+	n_params := len(info.params)
+
+	// Check arg count
+	required := 0
+	for p in info.params {
+		if !p.has_default { required += 1 }
+	}
+	if n_args < required {
+		emit_diagnostic(ctx, e.loc, "T004", .Error,
+			"Too few arguments",
+			fmt_arg_count_error(required, n_args, ctx.reg),
+			"Add missing arguments")
+	} else if n_args > n_params {
+		emit_diagnostic(ctx, e.loc, "T004", .Error,
+			"Too many arguments",
+			fmt_arg_count_error(n_params, n_args, ctx.reg),
+			"Remove extra arguments")
+	}
+
+	// Match args against params, building substitution map
+	for i := 0; i < min(n_args, n_params); i += 1 {
+		arg_type := infer_expr(e.args[i], ctx, info.params[i].type_id)
+		if contains_typevar(ctx.reg, info.params[i].type_id) {
+			match_type(ctx.reg, info.params[i].type_id, arg_type, &subs)
+		} else {
+			if info.params[i].type_id != TYPE_ANY && info.params[i].type_id != TYPE_UNKNOWN &&
+			   arg_type != TYPE_UNKNOWN && arg_type != TYPE_ANY {
+				if !is_assignable(ctx.reg, arg_type, info.params[i].type_id) {
+					emit_diagnostic(ctx, e.loc, "T002", .Error,
+						"Incompatible argument type",
+						fmt_type_mismatch(arg_type, info.params[i].type_id, ctx.reg),
+						"Use the correct type")
+				}
+			}
+		}
+	}
+
+	// Infer remaining args
+	for i := n_params; i < n_args; i += 1 {
+		infer_expr(e.args[i], ctx)
+	}
+
+	// Validate TypeVar bindings against bounds/constraints
+	validate_typevar_bindings(ctx, &subs, e.loc)
+
+	// Substitute return type
+	return substitute_type(ctx.reg, info.return_type, subs)
+}
+
+validate_typevar_bindings :: proc(ctx: ^Infer_Context, subs: ^map[Type_ID]Type_ID, loc: parser.Src_Loc) {
+	for tv_id, concrete in subs {
+		tv := get_type(ctx.reg, tv_id)
+		#partial switch tv_info in tv.info {
+		case TypeVar_Type:
+			// Check bound
+			if tv_info.bound != TYPE_UNKNOWN && tv_info.bound != TYPE_ANY {
+				if !is_assignable(ctx.reg, concrete, tv_info.bound) {
+					emit_diagnostic(ctx, loc, "T008", .Error,
+						"TypeVar bound violated",
+						fmt.aprintf("Type '%s' is not assignable to bound '%s' of TypeVar '%s'",
+							type_to_string(ctx.reg, concrete),
+							type_to_string(ctx.reg, tv_info.bound),
+							tv_info.name,
+							allocator = ctx.reg.allocator),
+						"Use a type compatible with the TypeVar bound")
+				}
+			}
+			// Check constraints
+			if len(tv_info.constraints) > 0 {
+				matches := false
+				for c in tv_info.constraints {
+					if is_assignable(ctx.reg, concrete, c) {
+						matches = true
+						break
+					}
+				}
+				if !matches {
+					emit_diagnostic(ctx, loc, "T008", .Error,
+						"TypeVar constraint violated",
+						fmt.aprintf("Type '%s' doesn't match any constraint of TypeVar '%s'",
+							type_to_string(ctx.reg, concrete),
+							tv_info.name,
+							allocator = ctx.reg.allocator),
+						"Use a type matching one of the TypeVar constraints")
+				}
+			}
+		}
+	}
 }
