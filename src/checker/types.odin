@@ -88,11 +88,12 @@ Tuple_Type :: struct {
 }
 
 Class_Type :: struct {
-	name:      string,
-	symbol_id: binder.Symbol_ID,
-	scope_id:  binder.Scope_ID,
-	bases:     []Type_ID,
-	attrs:     map[string]Type_ID,
+	name:        string,
+	symbol_id:   binder.Symbol_ID,
+	scope_id:    binder.Scope_ID,
+	bases:       []Type_ID,
+	attrs:       map[string]Type_ID,
+	type_params: []Type_ID,
 }
 
 Instance_Type :: struct {
@@ -128,6 +129,7 @@ Type_Registry :: struct {
 	dict_cache:  map[[2]Type_ID]Type_ID,
 	set_cache:   map[Type_ID]Type_ID,
 	class_types: map[binder.Symbol_ID]Type_ID,
+	spec_cache:  map[u64]Type_ID,
 	allocator:   mem.Allocator,
 }
 
@@ -140,6 +142,7 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.dict_cache = make(map[[2]Type_ID]Type_ID, 16, allocator)
 	reg.set_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.class_types = make(map[binder.Symbol_ID]Type_ID, 16, allocator)
+	reg.spec_cache = make(map[u64]Type_ID, 8, allocator)
 
 	// Slot 0: INVALID
 	append(&reg.types, Type{id = INVALID_TYPE})
@@ -673,4 +676,46 @@ substitute_type :: proc(reg: ^Type_Registry, type_id: Type_ID, subs: map[Type_ID
 	}
 
 	return type_id
+}
+
+// ==================== Class Specialization ====================
+
+specialize_class :: proc(reg: ^Type_Registry, class_type_id: Type_ID, type_args: []Type_ID) -> Type_ID {
+	// Cache key: hash of class + args
+	h: u64 = u64(class_type_id)
+	for arg in type_args {
+		h = h * 31 + u64(arg)
+	}
+	if cached, ok := reg.spec_cache[h]; ok {
+		return cached
+	}
+
+	ct := get_type(reg, class_type_id)
+	cls, ok := ct.info.(Class_Type)
+	if !ok { return make_instance_type(reg, class_type_id) }
+
+	// Build substitution map: type_params[i] → type_args[i]
+	subs := make(map[Type_ID]Type_ID, len(cls.type_params), reg.allocator)
+	for i := 0; i < min(len(cls.type_params), len(type_args)); i += 1 {
+		subs[cls.type_params[i]] = type_args[i]
+	}
+
+	// Substitute all attrs
+	new_attrs := make(map[string]Type_ID, len(cls.attrs), reg.allocator)
+	for name, attr_type in cls.attrs {
+		new_attrs[name] = substitute_type(reg, attr_type, subs)
+	}
+
+	// Create specialized Class_Type with empty type_params
+	spec_id := register_type(reg, Class_Type{
+		name      = cls.name,
+		symbol_id = cls.symbol_id,
+		scope_id  = cls.scope_id,
+		bases     = cls.bases,
+		attrs     = new_attrs,
+	})
+
+	result := make_instance_type(reg, spec_id)
+	reg.spec_cache[h] = result
+	return result
 }

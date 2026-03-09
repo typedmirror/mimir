@@ -242,6 +242,20 @@ resolve_annotation :: proc(
 			// Simplified: Callable[[params], return_type]
 			return TYPE_ANY // Detailed callable parsing deferred
 		}
+		// User-defined generic class: MyClass[int]
+		base_type := resolve_annotation(e.value, reg, bind_result, builtins, env)
+		bt := get_type(reg, base_type)
+		#partial switch inst in bt.info {
+		case Instance_Type:
+			cls_t := get_type(reg, inst.class_type)
+			#partial switch cls_info in cls_t.info {
+			case Class_Type:
+				if len(cls_info.type_params) > 0 {
+					type_args := resolve_tuple_args(e.slice, reg, bind_result, builtins, env)
+					return specialize_class(reg, inst.class_type, type_args)
+				}
+			}
+		}
 		return TYPE_UNKNOWN
 
 	case ^parser.Bin_Op_Expr:

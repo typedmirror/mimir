@@ -428,10 +428,41 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	// Find the scope for this class in binder
 	scope_id := find_scope_for_def(cd.name, cd.loc, ctx.bind_result, .Class)
 
-	// Resolve base classes
-	bases := make([]Type_ID, len(cd.bases), ctx.reg.allocator)
-	for base, i in cd.bases {
-		bases[i] = infer_expr(base, ctx)
+	// Resolve base classes, detecting Generic[T] for type_params
+	bases_dyn := make([dynamic]Type_ID, 0, len(cd.bases), ctx.reg.allocator)
+	type_params_dyn := make([dynamic]Type_ID, 0, 4, ctx.reg.allocator)
+	for base in cd.bases {
+		// Check for Generic[T, U, ...] in bases
+		if sub, ok := base.(^parser.Subscript_Expr); ok {
+			base_name := get_annotation_name(sub.value)
+			if orig, is_typing := ctx.bind_result.typing_names[base_name]; is_typing && orig == "Generic" {
+				// Extract TypeVar IDs from subscript
+				#partial switch _ in sub.slice {
+				case ^parser.Tuple_Expr:
+					tup := sub.slice.(^parser.Tuple_Expr)
+					for elt in tup.elts {
+						tv := resolve_annotation(elt, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+						if is_typevar(ctx.reg, tv) {
+							append(&type_params_dyn, tv)
+						}
+					}
+				case:
+					tv := resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					if is_typevar(ctx.reg, tv) {
+						append(&type_params_dyn, tv)
+					}
+				}
+				continue // Don't add Generic to bases
+			}
+		}
+		append(&bases_dyn, infer_expr(base, ctx))
+	}
+	bases := make([]Type_ID, len(bases_dyn), ctx.reg.allocator)
+	copy(bases, bases_dyn[:])
+	type_params: []Type_ID
+	if len(type_params_dyn) > 0 {
+		type_params = make([]Type_ID, len(type_params_dyn), ctx.reg.allocator)
+		copy(type_params, type_params_dyn[:])
 	}
 
 	// Build attrs from class body
@@ -469,11 +500,12 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 
 	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
 	class_type_id := register_type(ctx.reg, Class_Type{
-		name      = cd.name,
-		symbol_id = sym_id,
-		scope_id  = scope_id,
-		bases     = bases,
-		attrs     = attrs,
+		name        = cd.name,
+		symbol_id   = sym_id,
+		scope_id    = scope_id,
+		bases       = bases,
+		attrs       = attrs,
+		type_params = type_params,
 	})
 
 	// Register in class_types cache for annotation resolution

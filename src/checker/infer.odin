@@ -389,6 +389,10 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 		return info.return_type
 
 	case Class_Type:
+		// Generic class — infer TypeVar bindings from __init__ args
+		if len(info.type_params) > 0 {
+			return infer_generic_constructor(e, &info, func_type, ctx)
+		}
 		// Calling a class = constructor → check __init__ args
 		if init_type_id, ok := info.attrs["__init__"]; ok {
 			init_t := get_type(ctx.reg, init_type_id)
@@ -1025,6 +1029,67 @@ infer_generic_call :: proc(e: ^parser.Call_Expr, info: ^Callable_Type, ctx: ^Inf
 
 	// Substitute return type
 	return substitute_type(ctx.reg, info.return_type, subs)
+}
+
+infer_generic_constructor :: proc(e: ^parser.Call_Expr, info: ^Class_Type, class_type_id: Type_ID, ctx: ^Infer_Context) -> Type_ID {
+	init_type_id, has_init := info.attrs["__init__"]
+	if !has_init {
+		for arg in e.args { infer_expr(arg, ctx) }
+		return make_instance_type(ctx.reg, class_type_id)
+	}
+
+	init_t := get_type(ctx.reg, init_type_id)
+	init_info, ok := &init_t.info.(Callable_Type)
+	if !ok {
+		for arg in e.args { infer_expr(arg, ctx) }
+		return make_instance_type(ctx.reg, class_type_id)
+	}
+
+	// Use generic call logic: match args → build subs → specialize
+	subs := make(map[Type_ID]Type_ID, 4, ctx.reg.allocator)
+
+	n_args := len(e.args)
+	n_params := len(init_info.params)
+
+	required := 0
+	for p in init_info.params {
+		if !p.has_default { required += 1 }
+	}
+	if n_args < required {
+		emit_diagnostic(ctx, e.loc, "T004", .Error,
+			"Too few arguments",
+			fmt_arg_count_error(required, n_args, ctx.reg),
+			"Add missing arguments")
+	} else if n_args > n_params {
+		emit_diagnostic(ctx, e.loc, "T004", .Error,
+			"Too many arguments",
+			fmt_arg_count_error(n_params, n_args, ctx.reg),
+			"Remove extra arguments")
+	}
+
+	for i := 0; i < min(n_args, n_params); i += 1 {
+		arg_type := infer_expr(e.args[i], ctx, init_info.params[i].type_id)
+		if contains_typevar(ctx.reg, init_info.params[i].type_id) {
+			match_type(ctx.reg, init_info.params[i].type_id, arg_type, &subs)
+		}
+	}
+	for i := n_params; i < n_args; i += 1 {
+		infer_expr(e.args[i], ctx)
+	}
+
+	validate_typevar_bindings(ctx, &subs, e.loc)
+
+	// Build type_args from type_params using subs
+	type_args := make([]Type_ID, len(info.type_params), ctx.reg.allocator)
+	for tp, i in info.type_params {
+		if concrete, found := subs[tp]; found {
+			type_args[i] = concrete
+		} else {
+			type_args[i] = TYPE_ANY
+		}
+	}
+
+	return specialize_class(ctx.reg, class_type_id, type_args)
 }
 
 validate_typevar_bindings :: proc(ctx: ^Infer_Context, subs: ^map[Type_ID]Type_ID, loc: parser.Src_Loc) {
