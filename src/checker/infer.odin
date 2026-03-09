@@ -638,6 +638,10 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 		if attr_type, ok := info.attrs[attr]; ok {
 			return attr_type
 		}
+	case Module_Type:
+		if attr_type, ok := info.exports[attr]; ok {
+			return attr_type
+		}
 	}
 
 	return TYPE_UNKNOWN

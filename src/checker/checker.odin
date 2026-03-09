@@ -60,6 +60,61 @@ check :: proc(
 	return result
 }
 
+// ==================== Multi-Module Entry Point ====================
+
+check_with_imports :: proc(
+	module: ^parser.Module,
+	bind_result: ^binder.Bind_Result,
+	flow_result: ^flow.Flow_Result,
+	file_path: string,
+	registry: ^Type_Registry,
+	builtins: ^Builtin_Names,
+	import_types: map[binder.Symbol_ID]Type_ID,
+	allocator: mem.Allocator,
+) -> Check_Result {
+	result: Check_Result
+	result.symbol_types = make(map[binder.Symbol_ID]Type_ID, 128, allocator)
+	result.expr_types = make(map[rawptr]Type_ID, 256, allocator)
+	result.diagnostics = make([dynamic]core.Diagnostic, 0, 32, allocator)
+
+	// Register imported class types in the shared registry's class_types cache
+	for sym_id, type_id in import_types {
+		t := get_type(registry, type_id)
+		#partial switch _ in t.info {
+		case Class_Type:
+			registry.class_types[sym_id] = type_id
+		}
+	}
+
+	return_type_map := make(map[binder.Scope_ID]Type_ID, 16, allocator)
+	func_args_map := make(map[binder.Scope_ID]^parser.Arguments, 16, allocator)
+	collect_func_return_types(module.body, bind_result, registry, builtins, &return_type_map)
+	collect_func_args(module.body, bind_result, &func_args_map)
+
+	local_import_types := import_types
+
+	for &cfg in flow_result.cfgs {
+		declared_return := TYPE_UNKNOWN
+		if ret, ok := return_type_map[cfg.scope_id]; ok {
+			declared_return = ret
+		}
+		check_scope(
+			&cfg,
+			bind_result,
+			flow_result,
+			result        = &result,
+			builtins      = builtins,
+			file_path     = file_path,
+			declared_return = declared_return,
+			func_args_map = &func_args_map,
+			reg_override  = registry,
+			import_types  = &local_import_types,
+		)
+	}
+
+	return result
+}
+
 // ==================== Scope Checking (CFG Walk) ====================
 
 check_scope :: proc(
@@ -71,14 +126,19 @@ check_scope :: proc(
 	file_path: string,
 	declared_return: Type_ID,
 	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
+	reg_override: ^Type_Registry = nil,
+	import_types: ^map[binder.Symbol_ID]Type_ID = nil,
 ) {
+	// Use shared registry if provided, otherwise use result's own
+	reg := reg_override if reg_override != nil else &result.registry
+
 	n_blocks := len(cfg.blocks)
 	if n_blocks == 0 { return }
 
 	// Create per-block type environments
-	envs := make([]Type_Env, n_blocks, result.registry.allocator)
+	envs := make([]Type_Env, n_blocks, reg.allocator)
 	for i in 0..<n_blocks {
-		envs[i].types = make(map[binder.Symbol_ID]Type_ID, 16, result.registry.allocator)
+		envs[i].types = make(map[binder.Symbol_ID]Type_ID, 16, reg.allocator)
 	}
 
 	// Resolve function args for parameter type initialization
@@ -91,11 +151,11 @@ check_scope :: proc(
 	}
 
 	// Collect return types for function return checking
-	return_types := make([dynamic]Type_ID, 0, 8, result.registry.allocator)
+	return_types := make([dynamic]Type_ID, 0, 8, reg.allocator)
 
 	// BFS walk from entry
-	visited := make([]bool, n_blocks, result.registry.allocator)
-	queue := make([dynamic]flow.Block_ID, 0, n_blocks, result.registry.allocator)
+	visited := make([]bool, n_blocks, reg.allocator)
+	queue := make([dynamic]flow.Block_ID, 0, n_blocks, reg.allocator)
 	append(&queue, cfg.entry)
 
 	for len(queue) > 0 {
@@ -111,20 +171,27 @@ check_scope :: proc(
 		if block == nil || !block.is_reachable { continue }
 
 		// Merge environments from predecessors
-		env := merge_envs(block, envs[:], cfg, &result.registry)
+		env := merge_envs(block, envs[:], cfg, reg)
+
+		// Seed import types into module-scope entry block
+		if block_id == cfg.entry && import_types != nil {
+			for sym_id, type_id in import_types {
+				env.types[sym_id] = type_id
+			}
+		}
 
 		// Initialize parameter types for the entry block (after merge to avoid overwrite)
 		if block_id == cfg.entry && scope != nil && (scope.kind == .Function || scope.kind == .Lambda) {
-			init_param_types(scope, bind_result, &env, &result.registry, builtins, func_args)
+			init_param_types(scope, bind_result, &env, reg, builtins, func_args)
 		}
 
 		// Apply narrowing guards
-		apply_guards(&env, block_id, flow_result.guards[:], &result.registry, bind_result, builtins)
+		apply_guards(&env, block_id, flow_result.guards[:], reg, bind_result, builtins)
 
 		// Build inference context
 		ctx := Infer_Context{
 			env         = &env,
-			reg         = &result.registry,
+			reg         = reg,
 			bind_result = bind_result,
 			builtins    = builtins,
 			expr_types  = &result.expr_types,

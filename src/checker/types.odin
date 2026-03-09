@@ -106,6 +106,8 @@ Literal_Bool_Type :: struct { value: bool }
 
 Module_Type :: struct {
 	scope_id: binder.Scope_ID,
+	name:     string,
+	exports:  map[string]Type_ID,
 }
 
 TypeVar_Type :: struct {
@@ -519,6 +521,9 @@ type_to_string :: proc(reg: ^Type_Registry, id: Type_ID) -> string {
 		if info.value { return "Literal[True]" }
 		return "Literal[False]"
 	case Module_Type:
+		if len(info.name) > 0 {
+			return fmt.aprintf("module '%s'", info.name, allocator = reg.allocator)
+		}
 		return "<module>"
 	case TypeVar_Type:
 		return info.name

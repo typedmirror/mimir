@@ -9,6 +9,7 @@ import "binder"
 import "flow"
 import "checker"
 import "conform"
+import "modules"
 
 main :: proc() {
 	args := os.args
@@ -81,62 +82,160 @@ cmd_check :: proc(args: []string) {
 	}
 	defer core.arena_destroy(&arena)
 
-	// Parse each file
+	// Single file: fast path (existing behavior)
+	if len(files) == 1 {
+		cmd_check_single(files[0], &bridge, &arena)
+	} else {
+		// Multi-module: shared registry + module graph
+		cmd_check_multi(target, files, &bridge, &arena)
+	}
+}
+
+// Single-file check — original behavior, unchanged
+cmd_check_single :: proc(
+	file: string,
+	bridge: ^parser.Bridge,
+	arena: ^core.Analysis_Arena,
+) {
 	error_count := 0
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+
+	module, parse_err := parser.bridge_parse(bridge, file, arena.allocator)
+	if parse_err != nil {
+		error_count += 1
+		switch e in parse_err {
+		case parser.Syntax_Error:
+			fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s: %s", file, e.msg)
+		}
+		fmt.eprintfln("mimir: 1 file(s) had errors")
+		return
+	}
+
+	bind_result := binder.bind(module, file, arena.allocator)
+	for d in bind_result.diagnostics {
+		core.diagnostic_print(d)
+		if d.severity == .Error { error_count += 1 }
+	}
+
+	flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+	for d in flow_result.diagnostics {
+		core.diagnostic_print(d)
+		if d.severity == .Error { error_count += 1 }
+	}
+
+	check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+	for d in check_result.diagnostics {
+		core.diagnostic_print(d)
+		if d.severity == .Error { error_count += 1 }
+	}
+
+	fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards, %d types)",
+		file, len(module.body),
+		len(bind_result.symbols), len(bind_result.scopes),
+		flow.total_blocks(&flow_result), len(flow_result.guards),
+		len(check_result.registry.types))
+
+	if error_count > 0 {
+		fmt.eprintfln("mimir: 1 file(s) had errors")
+	} else {
+		fmt.printfln("mimir: successfully checked 1 file(s)")
+	}
+}
+
+// Multi-module check — shared registry, import resolution
+cmd_check_multi :: proc(
+	root_path: string,
+	files: []string,
+	bridge: ^parser.Bridge,
+	arena: ^core.Analysis_Arena,
+) {
+	// 1. Init shared registry + builtins
+	registry := checker.init_registry(arena.allocator)
+	builtins := checker.init_builtins(&registry)
+
+	// 2. Discover modules
+	graph := modules.discover_modules(root_path, files, arena.allocator)
+
+	// 3. Parse all files
+	parse_errors := 0
+	for _, info in graph.modules {
+		module, parse_err := parser.bridge_parse(bridge, info.file_path, arena.allocator)
 		if parse_err != nil {
-			error_count += 1
+			parse_errors += 1
 			switch e in parse_err {
 			case parser.Syntax_Error:
 				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
 			case parser.Bridge_Error:
-				fmt.eprintfln("mimir: %s: %s", file, e.msg)
+				fmt.eprintfln("mimir: %s: %s", info.file_path, e.msg)
 			}
 			continue
 		}
-		// Bind the module
-		bind_result := binder.bind(module, file, arena.allocator)
+		info.parse_result = module
+	}
+
+	// 4. Bind all files
+	for _, info in graph.modules {
+		if info.parse_result == nil { continue }
+		info.bind_result = binder.bind(info.parse_result, info.file_path, arena.allocator)
+	}
+
+	// 5. Build import edges + topo sort
+	modules.build_import_edges(&graph)
+	graph_diagnostics := make([dynamic]core.Diagnostic, 0, 8, arena.allocator)
+	modules.topological_sort(&graph, &graph_diagnostics)
+
+	// Report module graph diagnostics (e.g., cycle warnings)
+	for d in graph_diagnostics {
+		core.diagnostic_print(d)
+	}
+
+	// 6. Init resolution context
+	res_ctx := modules.init_resolution_context(&registry, arena.allocator)
+
+	// 7. For each module in topo order: resolve → flow → check → export
+	error_count := parse_errors
+	for name in graph.topo_order {
+		info, ok := graph.modules[name]
+		if !ok || info.parse_result == nil { continue }
 
 		// Report binder diagnostics
-		for d in bind_result.diagnostics {
+		for d in info.bind_result.diagnostics {
 			core.diagnostic_print(d)
-			if d.severity == .Error {
-				error_count += 1
-			}
+			if d.severity == .Error { error_count += 1 }
 		}
 
-		// Flow analysis
-		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+		// a. Resolve imports
+		import_types := modules.resolve_imports(info, &res_ctx)
 
-		// Report flow diagnostics
+		// b. Flow analysis
+		flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, arena.allocator)
 		for d in flow_result.diagnostics {
 			core.diagnostic_print(d)
-			if d.severity == .Error {
-				error_count += 1
-			}
+			if d.severity == .Error { error_count += 1 }
 		}
 
-		// Type checking
-		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
-
-		// Report type diagnostics
+		// c. Type check with imports
+		check_result := checker.check_with_imports(
+			info.parse_result, &info.bind_result, &flow_result,
+			info.file_path, &registry, &builtins, import_types, arena.allocator)
 		for d in check_result.diagnostics {
 			core.diagnostic_print(d)
-			if d.severity == .Error {
-				error_count += 1
-			}
+			if d.severity == .Error { error_count += 1 }
 		}
 
-		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards, %d types)",
-			file, len(module.body),
-			len(bind_result.symbols), len(bind_result.scopes),
-			flow.total_blocks(&flow_result), len(flow_result.guards),
-			len(check_result.registry.types))
+		// d. Collect exports
+		modules.collect_exports(info, &check_result, &res_ctx)
+
+		// e. Print summary
+		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d types)",
+			info.file_path, len(info.parse_result.body),
+			len(info.bind_result.symbols), len(info.bind_result.scopes),
+			len(registry.types))
 	}
 
 	if error_count > 0 {
-		fmt.eprintfln("mimir: %d file(s) had errors", error_count)
+		fmt.eprintfln("mimir: %d error(s) in %d file(s)", error_count, len(files))
 	} else {
 		fmt.printfln("mimir: successfully checked %d file(s)", len(files))
 	}
