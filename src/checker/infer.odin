@@ -466,28 +466,65 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 
 // ==================== Attribute Lookup ====================
 
+// Helper to build param slices for method signatures
+make_params :: proc(reg: ^Type_Registry, types: []Type_ID, defaults: []bool = {}) -> []Param_Type {
+	ps := make([]Param_Type, len(types), reg.allocator)
+	for t, i in types {
+		ps[i] = Param_Type{name = "", type_id = t, has_default = i < len(defaults) && defaults[i]}
+	}
+	return ps
+}
+
 lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -> Type_ID {
 	if receiver == TYPE_UNKNOWN || receiver == TYPE_ANY { return TYPE_UNKNOWN }
+
+	no_params := make([]Param_Type, 0, reg.allocator)
 
 	// String methods
 	if receiver == TYPE_STR {
 		switch attr {
+		// 0-arg methods returning str
 		case "upper", "lower", "strip", "lstrip", "rstrip", "title", "capitalize",
-		     "swapcase", "replace", "join", "format", "center", "ljust", "rjust",
-		     "zfill", "encode":
+		     "swapcase":
+			return make_callable_type(reg, no_params, TYPE_STR)
+		// 1+ arg methods returning str
+		case "replace":
 			return make_callable_type(reg,
-				make([]Param_Type, 0, reg.allocator), TYPE_STR)
-		case "split", "rsplit", "splitlines":
+				make_params(reg, {TYPE_STR, TYPE_STR, TYPE_INT}, {false, false, true}), TYPE_STR)
+		case "join":
+			return make_callable_type(reg, make_params(reg, {TYPE_ANY}), TYPE_STR)
+		case "format":
+			// format(*args, **kwargs) — accept any number via TYPE_ANY variadic
+			return make_callable_type(reg, make_params(reg, {TYPE_ANY}, {true}), TYPE_STR)
+		case "center", "ljust", "rjust":
 			return make_callable_type(reg,
-				make([]Param_Type, 0, reg.allocator), make_list_type(reg, TYPE_STR))
-		case "find", "rfind", "index", "rindex", "count":
+				make_params(reg, {TYPE_INT, TYPE_STR}, {false, true}), TYPE_STR)
+		case "zfill":
+			return make_callable_type(reg, make_params(reg, {TYPE_INT}), TYPE_STR)
+		case "encode":
 			return make_callable_type(reg,
-				make([]Param_Type, 0, reg.allocator), TYPE_INT)
-		case "startswith", "endswith", "isdigit", "isalpha", "isalnum",
+				make_params(reg, {TYPE_STR, TYPE_STR}, {true, true}), TYPE_BYTES)
+		// Methods returning list[str]
+		case "split", "rsplit":
+			return make_callable_type(reg,
+				make_params(reg, {TYPE_STR, TYPE_INT}, {true, true}), make_list_type(reg, TYPE_STR))
+		case "splitlines":
+			return make_callable_type(reg,
+				make_params(reg, {TYPE_BOOL}, {true}), make_list_type(reg, TYPE_STR))
+		// Methods returning int
+		case "find", "rfind", "index", "rindex":
+			return make_callable_type(reg,
+				make_params(reg, {TYPE_STR, TYPE_INT, TYPE_INT}, {false, true, true}), TYPE_INT)
+		case "count":
+			return make_callable_type(reg,
+				make_params(reg, {TYPE_STR, TYPE_INT, TYPE_INT}, {false, true, true}), TYPE_INT)
+		// 0-arg predicates returning bool
+		case "startswith", "endswith":
+			return make_callable_type(reg, make_params(reg, {TYPE_STR}), TYPE_BOOL)
+		case "isdigit", "isalpha", "isalnum",
 		     "isspace", "isupper", "islower", "istitle", "isnumeric",
 		     "isidentifier", "isprintable", "isascii", "isdecimal":
-			return make_callable_type(reg,
-				make([]Param_Type, 0, reg.allocator), TYPE_BOOL)
+			return make_callable_type(reg, no_params, TYPE_BOOL)
 		}
 	}
 
@@ -495,19 +532,29 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 	if is_list_type(reg, receiver) {
 		elem := get_list_element(reg, receiver)
 		switch attr {
-		case "append", "extend", "insert", "remove", "clear",
-		     "reverse", "sort":
+		case "append":
+			return make_callable_type(reg, make_params(reg, {elem}), TYPE_NONE)
+		case "extend":
+			return make_callable_type(reg, make_params(reg, {TYPE_ANY}), TYPE_NONE)
+		case "insert":
+			return make_callable_type(reg, make_params(reg, {TYPE_INT, elem}), TYPE_NONE)
+		case "remove":
+			return make_callable_type(reg, make_params(reg, {elem}), TYPE_NONE)
+		case "clear", "reverse":
+			return make_callable_type(reg, no_params, TYPE_NONE)
+		case "sort":
 			return make_callable_type(reg,
-				make([]Param_Type, 0, reg.allocator), TYPE_NONE)
+				make_params(reg, {TYPE_ANY, TYPE_BOOL}, {true, true}), TYPE_NONE)
 		case "pop":
 			return make_callable_type(reg,
-				make([]Param_Type, 0, reg.allocator), elem)
-		case "index", "count":
+				make_params(reg, {TYPE_INT}, {true}), elem)
+		case "index":
 			return make_callable_type(reg,
-				make([]Param_Type, 0, reg.allocator), TYPE_INT)
+				make_params(reg, {elem, TYPE_INT, TYPE_INT}, {false, true, true}), TYPE_INT)
+		case "count":
+			return make_callable_type(reg, make_params(reg, {elem}), TYPE_INT)
 		case "copy":
-			return make_callable_type(reg,
-				make([]Param_Type, 0, reg.allocator), receiver)
+			return make_callable_type(reg, no_params, receiver)
 		}
 	}
 
@@ -518,26 +565,53 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 		case Dict_Type:
 			switch attr {
 			case "keys":
-				return make_callable_type(reg,
-					make([]Param_Type, 0, reg.allocator), TYPE_ANY)
+				return make_callable_type(reg, no_params, TYPE_ANY)
 			case "values":
-				return make_callable_type(reg,
-					make([]Param_Type, 0, reg.allocator), TYPE_ANY)
+				return make_callable_type(reg, no_params, TYPE_ANY)
 			case "items":
-				return make_callable_type(reg,
-					make([]Param_Type, 0, reg.allocator), TYPE_ANY)
+				return make_callable_type(reg, no_params, TYPE_ANY)
 			case "get":
 				return make_callable_type(reg,
-					make([]Param_Type, 0, reg.allocator), info.value)
+					make_params(reg, {info.key, info.value}, {false, true}), info.value)
 			case "pop":
 				return make_callable_type(reg,
-					make([]Param_Type, 0, reg.allocator), info.value)
-			case "update", "clear":
+					make_params(reg, {info.key, info.value}, {false, true}), info.value)
+			case "setdefault":
 				return make_callable_type(reg,
-					make([]Param_Type, 0, reg.allocator), TYPE_NONE)
+					make_params(reg, {info.key, info.value}, {false, true}), info.value)
+			case "update":
+				return make_callable_type(reg, make_params(reg, {TYPE_ANY}, {true}), TYPE_NONE)
+			case "clear":
+				return make_callable_type(reg, no_params, TYPE_NONE)
 			case "copy":
-				return make_callable_type(reg,
-					make([]Param_Type, 0, reg.allocator), receiver)
+				return make_callable_type(reg, no_params, receiver)
+			}
+		}
+	}
+
+	// Set methods
+	if is_set_type(reg, receiver) {
+		set_t := get_type(reg, receiver)
+		#partial switch set_info in set_t.info {
+		case Set_Type:
+			switch attr {
+			case "add":
+				return make_callable_type(reg, make_params(reg, {set_info.element}), TYPE_NONE)
+			case "remove", "discard":
+				return make_callable_type(reg, make_params(reg, {set_info.element}), TYPE_NONE)
+			case "pop":
+				return make_callable_type(reg, no_params, set_info.element)
+			case "clear":
+				return make_callable_type(reg, no_params, TYPE_NONE)
+			case "copy":
+				return make_callable_type(reg, no_params, receiver)
+			case "update", "intersection_update", "difference_update",
+			     "symmetric_difference_update":
+				return make_callable_type(reg, make_params(reg, {TYPE_ANY}), TYPE_NONE)
+			case "union", "intersection", "difference", "symmetric_difference":
+				return make_callable_type(reg, make_params(reg, {TYPE_ANY}), receiver)
+			case "issubset", "issuperset", "isdisjoint":
+				return make_callable_type(reg, make_params(reg, {TYPE_ANY}), TYPE_BOOL)
 			}
 		}
 	}
