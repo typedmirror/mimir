@@ -148,6 +148,17 @@ add_dependency :: proc(config: ^Project_Config, name, constraint: string, alloca
 	})
 }
 
+// Remove a dependency by name. Returns true if found and removed.
+remove_dependency :: proc(config: ^Project_Config, name: string) -> bool {
+	for i := 0; i < len(config.dependencies); i += 1 {
+		if config.dependencies[i].name == name {
+			ordered_remove(&config.dependencies, i)
+			return true
+		}
+	}
+	return false
+}
+
 // Create a new default config for `mimir add` when no mimir.toml exists.
 default_config :: proc(dir: string, allocator: mem.Allocator) -> Project_Config {
 	// Derive project name from directory name
