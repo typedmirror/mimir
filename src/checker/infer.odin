@@ -9,13 +9,14 @@ import core "mimir:core"
 // ==================== Expression Type Inference ====================
 
 Infer_Context :: struct {
-	env:         ^Type_Env,
-	reg:         ^Type_Registry,
-	bind_result: ^binder.Bind_Result,
-	builtins:    ^Builtin_Names,
-	expr_types:  ^map[rawptr]Type_ID,
-	diagnostics: ^[dynamic]core.Diagnostic,
-	file_path:   string,
+	env:            ^Type_Env,
+	reg:            ^Type_Registry,
+	bind_result:    ^binder.Bind_Result,
+	builtins:       ^Builtin_Names,
+	expr_types:     ^map[rawptr]Type_ID,
+	diagnostics:    ^[dynamic]core.Diagnostic,
+	file_path:      string,
+	declared_types: ^map[binder.Symbol_ID]Type_ID,
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -299,40 +300,42 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 	if left == TYPE_UNKNOWN || left == TYPE_ANY { return TYPE_UNKNOWN }
 	if right == TYPE_UNKNOWN || right == TYPE_ANY { return TYPE_UNKNOWN }
 
+	// Helper: int or bool (Python promotes bool to int in arithmetic)
+	left_intlike := left == TYPE_INT || left == TYPE_BOOL
+	right_intlike := right == TYPE_INT || right == TYPE_BOOL
+
 	switch op {
 	case .Add:
-		if left == TYPE_INT && right == TYPE_INT { return TYPE_INT }
+		if left_intlike && right_intlike { return TYPE_INT }
 		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
 		if left == TYPE_STR && right == TYPE_STR { return TYPE_STR }
 		if is_list_type(reg, left) && is_list_type(reg, right) { return left }
-		// bool + bool = int (Python promotes)
-		if left == TYPE_BOOL && right == TYPE_BOOL { return TYPE_INT }
 
 	case .Sub, .Mult:
-		if left == TYPE_INT && right == TYPE_INT { return TYPE_INT }
+		if left_intlike && right_intlike { return TYPE_INT }
 		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
 		// str * int or int * str
 		if op == .Mult {
-			if left == TYPE_STR && right == TYPE_INT { return TYPE_STR }
-			if left == TYPE_INT && right == TYPE_STR { return TYPE_STR }
+			if left == TYPE_STR && right_intlike { return TYPE_STR }
+			if left_intlike && right == TYPE_STR { return TYPE_STR }
 		}
 
 	case .Div:
 		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
 
 	case .Floor_Div, .Mod:
-		if left == TYPE_INT && right == TYPE_INT { return TYPE_INT }
+		if left_intlike && right_intlike { return TYPE_INT }
 		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
 
 	case .Pow:
-		if left == TYPE_INT && right == TYPE_INT { return TYPE_INT }
+		if left_intlike && right_intlike { return TYPE_INT }
 		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
 
 	case .LShift, .RShift, .Bit_And, .Bit_Xor:
-		if left == TYPE_INT && right == TYPE_INT { return TYPE_INT }
+		if left_intlike && right_intlike { return TYPE_INT }
 
 	case .Bit_Or:
-		if left == TYPE_INT && right == TYPE_INT { return TYPE_INT }
+		if left_intlike && right_intlike { return TYPE_INT }
 		if is_set_type(reg, left) && is_set_type(reg, right) { return left }
 
 	case .Mat_Mult:

@@ -153,6 +153,9 @@ check_scope :: proc(
 	// Collect return types for function return checking
 	return_types := make([dynamic]Type_ID, 0, 8, reg.allocator)
 
+	// Track declared annotation types across blocks (for reassignment checking)
+	declared_types := make(map[binder.Symbol_ID]Type_ID, 16, reg.allocator)
+
 	// BFS walk from entry
 	visited := make([]bool, n_blocks, reg.allocator)
 	queue := make([dynamic]flow.Block_ID, 0, n_blocks, reg.allocator)
@@ -190,13 +193,14 @@ check_scope :: proc(
 
 		// Build inference context
 		ctx := Infer_Context{
-			env         = &env,
-			reg         = reg,
-			bind_result = bind_result,
-			builtins    = builtins,
-			expr_types  = &result.expr_types,
-			diagnostics = &result.diagnostics,
-			file_path   = file_path,
+			env            = &env,
+			reg            = reg,
+			bind_result    = bind_result,
+			builtins       = builtins,
+			expr_types     = &result.expr_types,
+			diagnostics    = &result.diagnostics,
+			file_path      = file_path,
+			declared_types = &declared_types,
 		}
 
 		// Process each statement in the block
@@ -250,6 +254,23 @@ check_stmt :: proc(
 			}
 		}
 		rhs_type := infer_expr(s.value, ctx, target_expected)
+		// Check reassignment against declared annotation type
+		if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY {
+			for target in s.targets {
+				if name, ok := target.(^parser.Name_Expr); ok {
+					if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+						if declared, found := ctx.declared_types[sym_id]; found {
+							if !is_assignable(ctx.reg, rhs_type, declared) {
+								emit_diagnostic(ctx, s.loc, "T001", .Error,
+									"Incompatible types in assignment",
+									fmt_type_mismatch(rhs_type, declared, ctx.reg),
+									"Change the value or the annotation")
+							}
+						}
+					}
+				}
+			}
+		}
 		for target in s.targets {
 			assign_target(target, rhs_type, ctx)
 		}
@@ -258,6 +279,15 @@ check_stmt :: proc(
 		declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 		// Set the declared type on the symbol
 		set_target_type(s.target, declared, ctx)
+
+		// Record declared annotation type for reassignment checking
+		if declared != TYPE_UNKNOWN && declared != TYPE_ANY {
+			if name, ok := s.target.(^parser.Name_Expr); ok {
+				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+					ctx.declared_types[sym_id] = declared
+				}
+			}
+		}
 
 		if s.value != nil {
 			rhs_type := infer_expr(s.value, ctx, declared)
