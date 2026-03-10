@@ -35,6 +35,8 @@ main :: proc() {
 		cmd_lock(args[2:])
 	case "install":
 		cmd_install(args[2:])
+	case "test":
+		cmd_test(args[2:])
 	case "remove":
 		cmd_remove(args[2:])
 	case "update":
@@ -572,6 +574,97 @@ cmd_install :: proc(args: []string) {
 	}
 }
 
+cmd_test :: proc(args: []string) {
+	config := platform.Test_Config{
+		target = ".",
+	}
+
+	// Parse flags
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "-k" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir test: -k requires a pattern argument")
+				os.exit(1)
+			}
+			config.filter = args[i + 1]
+			i += 2
+		} else if arg == "--check" {
+			config.check_first = true
+			i += 1
+		} else if arg == "-v" || arg == "--verbose" {
+			config.verbose = true
+			i += 1
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir test: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir test [-k <pattern>] [--check] [-v] [path]")
+			os.exit(1)
+		} else {
+			config.target = arg
+			i += 1
+		}
+	}
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	// --check: type-check test files before running
+	if config.check_first {
+		test_files, discover_err := platform.discover_test_files(config.target, arena.allocator)
+		if discover_err != nil {
+			fmt.eprintfln("mimir test: %s", platform.error_msg(discover_err))
+			os.exit(1)
+		}
+
+		if len(test_files) > 0 {
+			bridge, bridge_err := parser.bridge_start()
+			if bridge_err != nil {
+				switch e in bridge_err {
+				case parser.Bridge_Error:
+					fmt.eprintfln("mimir: %s", e.msg)
+				case parser.Syntax_Error:
+					fmt.eprintfln("mimir: %s", e.msg)
+				}
+				os.exit(1)
+			}
+
+			total_errors := 0
+			for file in test_files {
+				total_errors += cmd_check_single(file, &bridge, &arena)
+			}
+			parser.bridge_stop(&bridge)
+
+			if total_errors > 0 {
+				os.exit(1)
+			}
+		}
+	}
+
+	// Run tests
+	summary, run_err := platform.run_tests(config, arena.allocator)
+	if run_err != nil {
+		fmt.eprintfln("mimir test: %s", platform.error_msg(run_err))
+		os.exit(1)
+	}
+
+	if len(summary.results) == 0 {
+		fmt.println("mimir test: no tests found")
+		return
+	}
+
+	platform.print_results(&summary, config.verbose)
+
+	if summary.failed > 0 || summary.errors > 0 {
+		os.exit(1)
+	}
+}
+
 cmd_remove :: proc(args: []string) {
 	if len(args) == 0 {
 		fmt.eprintln("mimir remove: no packages specified")
@@ -757,6 +850,7 @@ print_usage :: proc() {
 	fmt.println()
 	fmt.println("Commands:")
 	fmt.println("  check <path>      Analyze Python source files")
+	fmt.println("  test [path]       Run tests (discovers test_*.py and *_test.py files)")
 	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
 	fmt.println("  add <packages>    Add dependencies to mimir.toml, lock, and install")
 	fmt.println("  remove <packages> Remove dependencies from mimir.toml and re-lock")
