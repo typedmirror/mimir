@@ -76,6 +76,85 @@ ensure_dependencies :: proc(
 	return paths, nil
 }
 
+// Install a single package at an exact version with --no-deps.
+// Used by lockfile install — all transitive deps are already resolved.
+install_package_pinned :: proc(
+	python: string,
+	name, version: string,
+	target_dir: string,
+	allocator: mem.Allocator,
+) -> Platform_Error {
+	temp_dir := strings.concatenate({target_dir, ".tmp"}, allocator)
+
+	// Clean up any previous partial install
+	if os.exists(temp_dir) {
+		os.remove_all(temp_dir)
+	}
+
+	// pip install --target <temp> --no-deps --quiet <name>==<version>
+	pinned := strings.concatenate({name, "==", version}, allocator)
+	state, _, stderr, exec_err := os.process_exec({
+		command = {python, "-m", "pip", "install", "--target", temp_dir, "--no-deps", "--quiet", pinned},
+	}, allocator)
+	if exec_err != nil {
+		if os.exists(temp_dir) { os.remove_all(temp_dir) }
+		return Platform_Error_Data{msg = fmt.tprintf("failed to run pip for '%s': %v", name, exec_err)}
+	}
+
+	if state.exit_code != 0 {
+		msg := string(stderr) if len(stderr) > 0 else "unknown error"
+		if os.exists(temp_dir) { os.remove_all(temp_dir) }
+		return Platform_Error_Data{msg = fmt.tprintf("pip install '%s==%s' failed: %s", name, version, strings.trim_space(msg))}
+	}
+
+	// Ensure parent directory exists (packages/<name>/)
+	parent := parent_dir(target_dir)
+	os.make_directory_all(parent)
+
+	// Atomic: rename temp → target
+	if os.exists(target_dir) {
+		os.remove_all(target_dir)
+	}
+	rename_err := os.rename(temp_dir, target_dir)
+	if rename_err != nil {
+		if os.exists(temp_dir) { os.remove_all(temp_dir) }
+		return Platform_Error_Data{msg = fmt.tprintf("failed to move installed packages for '%s': %v", name, rename_err)}
+	}
+
+	return nil
+}
+
+// Install all packages from a lockfile into the cache.
+// Skips packages that are already cached at the correct version.
+install_from_lockfile :: proc(
+	python: string,
+	lf: ^Lockfile,
+	cache: ^Cache,
+	allocator: mem.Allocator,
+) -> Platform_Error {
+	installed := 0
+	skipped := 0
+
+	for pkg in lf.packages {
+		_, found := find_package_version(cache, pkg.name, pkg.version)
+		if found {
+			skipped += 1
+			continue
+		}
+
+		target := package_version_dir(cache, pkg.name, pkg.version)
+		fmt.printfln("  installing %s==%s...", pkg.name, pkg.version)
+		install_err := install_package_pinned(python, pkg.name, pkg.version, target, allocator)
+		if install_err != nil {
+			return install_err
+		}
+		installed += 1
+	}
+
+	fmt.printfln("  %d installed, %d already cached", installed, skipped)
+	return nil
+}
+
 // Check if pip is available for the given Python interpreter.
 detect_pip :: proc(python: string, allocator: mem.Allocator) -> bool {
 	state, _, _, exec_err := os.process_exec({

@@ -6,7 +6,8 @@ import "core:os"
 import "core:strings"
 
 // Global package cache manager.
-// Layout: ~/.mimir/cache/packages/<name>/
+// Phase 8 layout: ~/.mimir/cache/packages/<name>/
+// Phase 9 layout: ~/.mimir/cache/packages/<name>/<version>/
 
 Cache :: struct {
 	root:      string,   // ~/.mimir/cache
@@ -46,7 +47,21 @@ find_package :: proc(cache: ^Cache, name: string) -> (path: string, found: bool)
 	return "", false
 }
 
-// Return the cache directory path for a package.
+// Return the cache directory path for a package (unversioned — Phase 8 compat).
 package_dir :: proc(cache: ^Cache, name: string) -> string {
 	return strings.concatenate({cache.packages, "/", name}, cache.allocator)
+}
+
+// Check if a versioned package is cached.
+find_package_version :: proc(cache: ^Cache, name, version: string) -> (path: string, found: bool) {
+	dir := package_version_dir(cache, name, version)
+	if os.is_directory(dir) {
+		return dir, true
+	}
+	return "", false
+}
+
+// Return the cache directory path for a versioned package.
+package_version_dir :: proc(cache: ^Cache, name, version: string) -> string {
+	return strings.concatenate({cache.packages, "/", name, "/", version}, cache.allocator)
 }

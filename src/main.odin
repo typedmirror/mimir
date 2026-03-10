@@ -29,6 +29,12 @@ main :: proc() {
 		conform.cmd_conform(args[2:])
 	case "run":
 		cmd_run(args[2:])
+	case "add":
+		cmd_add(args[2:])
+	case "lock":
+		cmd_lock(args[2:])
+	case "install":
+		cmd_install(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -307,15 +313,251 @@ cmd_run :: proc(args: []string) {
 	os.exit(exit_code)
 }
 
+cmd_add :: proc(args: []string) {
+	if len(args) == 0 {
+		fmt.eprintln("mimir add: no packages specified")
+		fmt.eprintln("Usage: mimir add <package> [package...]")
+		os.exit(1)
+	}
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+	allocator := arena.allocator
+
+	// Find or create mimir.toml
+	cwd, cwd_err := os.get_working_directory(allocator)
+	if cwd_err != nil {
+		cwd = "."
+	}
+	config_path, config_found := platform.find_config(cwd, allocator)
+
+	config: platform.Project_Config
+	if config_found {
+		cfg, read_err := platform.read_config(config_path, allocator)
+		if read_err != nil {
+			fmt.eprintfln("mimir add: %s", platform.error_msg(read_err))
+			os.exit(1)
+		}
+		config = cfg
+	} else {
+		config = platform.default_config(cwd, allocator)
+		config_path = config.file_path
+		fmt.printfln("  creating %s", config_path)
+	}
+
+	// Add each package
+	for arg in args {
+		dep := platform.parse_dep_spec(arg, allocator)
+		platform.add_dependency(&config, dep.name, dep.constraint, allocator)
+		fmt.printfln("  added %s", dep.raw)
+	}
+
+	// Write mimir.toml
+	write_err := platform.write_config(&config, config_path, allocator)
+	if write_err != nil {
+		fmt.eprintfln("mimir add: %s", platform.error_msg(write_err))
+		os.exit(1)
+	}
+
+	// Lock
+	python, py_ok := platform.find_python("", allocator)
+	if !py_ok {
+		fmt.eprintln("mimir add: python3 not found on PATH")
+		os.exit(1)
+	}
+
+	if !platform.detect_pip(python, allocator) {
+		fmt.eprintfln("mimir add: pip not available for '%s'", python)
+		os.exit(1)
+	}
+
+	fmt.println("  resolving dependencies...")
+	locked, resolve_err := platform.resolve(python, config.dependencies[:], allocator)
+	if resolve_err != nil {
+		fmt.eprintfln("mimir add: %s", platform.error_msg(resolve_err))
+		os.exit(1)
+	}
+
+	lf := platform.Lockfile{
+		packages = make([dynamic]platform.Locked_Package, len(locked), allocator),
+	}
+	copy(lf.packages[:], locked)
+
+	lock_path := platform.lockfile_path(config_path, allocator)
+	lf_write_err := platform.write_lockfile(&lf, lock_path, allocator)
+	if lf_write_err != nil {
+		fmt.eprintfln("mimir add: %s", platform.error_msg(lf_write_err))
+		os.exit(1)
+	}
+	fmt.printfln("  wrote %s (%d packages)", lock_path, len(lf.packages))
+
+	// Install
+	cache, cache_err := platform.init_cache(allocator)
+	if cache_err != nil {
+		fmt.eprintfln("mimir add: %s", platform.error_msg(cache_err))
+		os.exit(1)
+	}
+
+	install_err := platform.install_from_lockfile(python, &lf, &cache, allocator)
+	if install_err != nil {
+		fmt.eprintfln("mimir add: %s", platform.error_msg(install_err))
+		os.exit(1)
+	}
+}
+
+cmd_lock :: proc(args: []string) {
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+	allocator := arena.allocator
+
+	// Find mimir.toml
+	cwd, cwd_err := os.get_working_directory(allocator)
+	if cwd_err != nil {
+		cwd = "."
+	}
+	config_path, config_found := platform.find_config(cwd, allocator)
+	if !config_found {
+		fmt.eprintln("mimir lock: no mimir.toml found")
+		fmt.eprintln("  run 'mimir add <package>' to create one")
+		os.exit(1)
+	}
+
+	config, read_err := platform.read_config(config_path, allocator)
+	if read_err != nil {
+		fmt.eprintfln("mimir lock: %s", platform.error_msg(read_err))
+		os.exit(1)
+	}
+
+	if len(config.dependencies) == 0 {
+		fmt.println("  no dependencies to resolve")
+		// Write empty lockfile
+		lf := platform.Lockfile{
+			packages = make([dynamic]platform.Locked_Package, 0, allocator),
+		}
+		lock_path := platform.lockfile_path(config_path, allocator)
+		platform.write_lockfile(&lf, lock_path, allocator)
+		fmt.printfln("  wrote %s (0 packages)", lock_path)
+		return
+	}
+
+	python, py_ok := platform.find_python("", allocator)
+	if !py_ok {
+		fmt.eprintln("mimir lock: python3 not found on PATH")
+		os.exit(1)
+	}
+
+	if !platform.detect_pip(python, allocator) {
+		fmt.eprintfln("mimir lock: pip not available for '%s'", python)
+		os.exit(1)
+	}
+
+	fmt.println("  resolving dependencies...")
+	locked, resolve_err := platform.resolve(python, config.dependencies[:], allocator)
+	if resolve_err != nil {
+		fmt.eprintfln("mimir lock: %s", platform.error_msg(resolve_err))
+		os.exit(1)
+	}
+
+	lf := platform.Lockfile{
+		packages = make([dynamic]platform.Locked_Package, len(locked), allocator),
+	}
+	copy(lf.packages[:], locked)
+
+	lock_path := platform.lockfile_path(config_path, allocator)
+	lf_write_err := platform.write_lockfile(&lf, lock_path, allocator)
+	if lf_write_err != nil {
+		fmt.eprintfln("mimir lock: %s", platform.error_msg(lf_write_err))
+		os.exit(1)
+	}
+	fmt.printfln("  wrote %s (%d packages)", lock_path, len(lf.packages))
+}
+
+cmd_install :: proc(args: []string) {
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+	allocator := arena.allocator
+
+	// Find mimir.lock
+	cwd, cwd_err := os.get_working_directory(allocator)
+	if cwd_err != nil {
+		cwd = "."
+	}
+	config_path, config_found := platform.find_config(cwd, allocator)
+	if !config_found {
+		fmt.eprintln("mimir install: no mimir.toml found")
+		fmt.eprintln("  run 'mimir add <package>' to create one")
+		os.exit(1)
+	}
+
+	lock_path := platform.lockfile_path(config_path, allocator)
+	if !os.is_file(lock_path) {
+		fmt.eprintln("mimir install: no mimir.lock found")
+		fmt.eprintln("  run 'mimir lock' to generate a lockfile")
+		os.exit(1)
+	}
+
+	lf, lf_err := platform.read_lockfile(lock_path, allocator)
+	if lf_err != nil {
+		fmt.eprintfln("mimir install: %s", platform.error_msg(lf_err))
+		os.exit(1)
+	}
+
+	if len(lf.packages) == 0 {
+		fmt.println("  no packages to install")
+		return
+	}
+
+	python, py_ok := platform.find_python("", allocator)
+	if !py_ok {
+		fmt.eprintln("mimir install: python3 not found on PATH")
+		os.exit(1)
+	}
+
+	if !platform.detect_pip(python, allocator) {
+		fmt.eprintfln("mimir install: pip not available for '%s'", python)
+		os.exit(1)
+	}
+
+	cache, cache_err := platform.init_cache(allocator)
+	if cache_err != nil {
+		fmt.eprintfln("mimir install: %s", platform.error_msg(cache_err))
+		os.exit(1)
+	}
+
+	install_err := platform.install_from_lockfile(python, &lf, &cache, allocator)
+	if install_err != nil {
+		fmt.eprintfln("mimir install: %s", platform.error_msg(install_err))
+		os.exit(1)
+	}
+}
+
 print_usage :: proc() {
 	fmt.println("mimir — Python development platform")
 	fmt.println()
 	fmt.println("Usage: mimir <command> [options]")
 	fmt.println()
 	fmt.println("Commands:")
-	fmt.println("  check <path>    Analyze Python source files")
-	fmt.println("  run <script>    Run a Python script with automatic dependency resolution")
-	fmt.println("  conform [path]  Run conformance tests (default: tests/conformance/)")
-	fmt.println("  version         Print version")
-	fmt.println("  help            Show this message")
+	fmt.println("  check <path>      Analyze Python source files")
+	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
+	fmt.println("  add <packages>    Add dependencies to mimir.toml, lock, and install")
+	fmt.println("  lock              Resolve dependencies and generate mimir.lock")
+	fmt.println("  install           Install dependencies from mimir.lock")
+	fmt.println("  conform [path]    Run conformance tests (default: tests/conformance/)")
+	fmt.println("  version           Print version")
+	fmt.println("  help              Show this message")
 }

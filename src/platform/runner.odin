@@ -70,26 +70,103 @@ run :: proc(config: Run_Config, allocator: mem.Allocator) -> int {
 
 	// 5. Resolve dependencies (unless --no-deps)
 	package_paths: [dynamic]string
-	if !config.skip_deps && len(metadata.dependencies) > 0 {
-		// Check pip availability
-		if !detect_pip(python, allocator) {
-			fmt.eprintfln("mimir run: pip not available for '%s'", python)
-			fmt.eprintfln("  install pip: %s -m ensurepip", python)
-			return 1
-		}
+	if !config.skip_deps {
+		if len(metadata.dependencies) > 0 {
+			// PEP 723 path — Phase 8 behavior, unchanged
+			if !detect_pip(python, allocator) {
+				fmt.eprintfln("mimir run: pip not available for '%s'", python)
+				fmt.eprintfln("  install pip: %s -m ensurepip", python)
+				return 1
+			}
 
-		cache, cache_err := init_cache(allocator)
-		if cache_err != nil {
-			fmt.eprintfln("mimir run: %s", error_msg(cache_err))
-			return 1
-		}
+			cache, cache_err := init_cache(allocator)
+			if cache_err != nil {
+				fmt.eprintfln("mimir run: %s", error_msg(cache_err))
+				return 1
+			}
 
-		paths, dep_err := ensure_dependencies(python, metadata.dependencies[:], &cache, allocator)
-		if dep_err != nil {
-			fmt.eprintfln("mimir run: %s", error_msg(dep_err))
-			return 1
+			paths, dep_err := ensure_dependencies(python, metadata.dependencies[:], &cache, allocator)
+			if dep_err != nil {
+				fmt.eprintfln("mimir run: %s", error_msg(dep_err))
+				return 1
+			}
+			package_paths = paths
+		} else {
+			// No PEP 723 metadata — try mimir.toml project mode
+			script_dir := parent_dir(config.script)
+			config_path, config_found := find_config(script_dir, allocator)
+
+			if config_found {
+				lock_path := lockfile_path(config_path, allocator)
+
+				if os.is_file(lock_path) {
+					// Has lockfile — use locked versions from cache
+					lf, lf_err := read_lockfile(lock_path, allocator)
+					if lf_err != nil {
+						fmt.eprintfln("mimir run: %s", error_msg(lf_err))
+						return 1
+					}
+
+					cache, cache_err := init_cache(allocator)
+					if cache_err != nil {
+						fmt.eprintfln("mimir run: %s", error_msg(cache_err))
+						return 1
+					}
+
+					// Collect cached paths, install missing
+					package_paths = make([dynamic]string, 0, len(lf.packages), allocator)
+					for pkg in lf.packages {
+						dir, found := find_package_version(&cache, pkg.name, pkg.version)
+						if found {
+							append(&package_paths, dir)
+						} else {
+							// Install missing package
+							if !detect_pip(python, allocator) {
+								fmt.eprintfln("mimir run: pip not available for '%s'", python)
+								return 1
+							}
+							target := package_version_dir(&cache, pkg.name, pkg.version)
+							fmt.printfln("  installing %s==%s...", pkg.name, pkg.version)
+							inst_err := install_package_pinned(python, pkg.name, pkg.version, target, allocator)
+							if inst_err != nil {
+								fmt.eprintfln("mimir run: %s", error_msg(inst_err))
+								return 1
+							}
+							append(&package_paths, target)
+						}
+					}
+				} else {
+					// Has mimir.toml but no lockfile — resolve on the fly
+					proj_config, proj_err := read_config(config_path, allocator)
+					if proj_err != nil {
+						fmt.eprintfln("mimir run: %s", error_msg(proj_err))
+						return 1
+					}
+
+					if len(proj_config.dependencies) > 0 {
+						fmt.eprintln("  hint: run 'mimir lock' to create a lockfile for reproducible builds")
+
+						if !detect_pip(python, allocator) {
+							fmt.eprintfln("mimir run: pip not available for '%s'", python)
+							return 1
+						}
+
+						cache, cache_err := init_cache(allocator)
+						if cache_err != nil {
+							fmt.eprintfln("mimir run: %s", error_msg(cache_err))
+							return 1
+						}
+
+						paths, dep_err := ensure_dependencies(python, proj_config.dependencies[:], &cache, allocator)
+						if dep_err != nil {
+							fmt.eprintfln("mimir run: %s", error_msg(dep_err))
+							return 1
+						}
+						package_paths = paths
+					}
+				}
+			}
 		}
-		package_paths = paths
 	}
 
 	// 6. Build PYTHONPATH
@@ -143,7 +220,7 @@ build_pythonpath :: proc(package_paths: []string, script: string, allocator: mem
 	}
 
 	// Add script's parent directory
-	project_root := _parent_dir(script)
+	project_root := parent_dir(script)
 	if project_root != "" {
 		append(&parts, project_root)
 	}
@@ -200,8 +277,7 @@ _extract_version :: proc(constraint: string) -> string {
 }
 
 // Get parent directory of a file path.
-@(private = "file")
-_parent_dir :: proc(path: string) -> string {
+parent_dir :: proc(path: string) -> string {
 	for i := len(path) - 1; i >= 0; i -= 1 {
 		if path[i] == '/' {
 			return path[:i] if i > 0 else "/"
