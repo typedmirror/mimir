@@ -2,6 +2,7 @@ package mimir
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 
 import "core"
 import "parser"
@@ -10,6 +11,7 @@ import "flow"
 import "checker"
 import "conform"
 import "modules"
+import "platform"
 
 main :: proc() {
 	args := os.args
@@ -25,6 +27,8 @@ main :: proc() {
 		cmd_check(args[2:])
 	case "conform":
 		conform.cmd_conform(args[2:])
+	case "run":
+		cmd_run(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -241,6 +245,68 @@ cmd_check_multi :: proc(
 	}
 }
 
+cmd_run :: proc(args: []string) {
+	config := platform.Run_Config{}
+
+	// Parse flags and find script path
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--python" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir run: --python requires a version argument")
+				os.exit(1)
+			}
+			config.python_version = args[i + 1]
+			i += 2
+		} else if arg == "--check" {
+			config.check_first = true
+			i += 1
+		} else if arg == "--no-deps" {
+			config.skip_deps = true
+			i += 1
+		} else if arg == "--" {
+			// Everything after -- goes to the script
+			if i + 1 < len(args) {
+				config.script_args = args[i + 1:]
+			}
+			break
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir run: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir run [--python <ver>] [--check] [--no-deps] <script> [-- args...]")
+			os.exit(1)
+		} else {
+			// Script path
+			config.script = arg
+			i += 1
+			// Check for -- after script
+			if i < len(args) && args[i] == "--" {
+				if i + 1 < len(args) {
+					config.script_args = args[i + 1:]
+				}
+			}
+			break
+		}
+	}
+
+	if config.script == "" {
+		fmt.eprintln("mimir run: no script specified")
+		fmt.eprintln("Usage: mimir run [--python <ver>] [--check] [--no-deps] <script> [-- args...]")
+		os.exit(1)
+	}
+
+	// Run with arena allocator
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	exit_code := platform.run(config, arena.allocator)
+	core.arena_destroy(&arena)
+	os.exit(exit_code)
+}
+
 print_usage :: proc() {
 	fmt.println("mimir — Python development platform")
 	fmt.println()
@@ -248,6 +314,7 @@ print_usage :: proc() {
 	fmt.println()
 	fmt.println("Commands:")
 	fmt.println("  check <path>    Analyze Python source files")
+	fmt.println("  run <script>    Run a Python script with automatic dependency resolution")
 	fmt.println("  conform [path]  Run conformance tests (default: tests/conformance/)")
 	fmt.println("  version         Print version")
 	fmt.println("  help            Show this message")
