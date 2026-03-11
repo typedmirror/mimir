@@ -14,6 +14,7 @@ import "modules"
 import "platform"
 import "lint"
 import "security"
+import "concurrency"
 
 main :: proc() {
 	args := os.args
@@ -152,6 +153,15 @@ cmd_check_single :: proc(
 		if d.severity == .Error { error_count += 1 }
 	}
 
+	// Concurrency analysis
+	source_data, src_err := os.read_entire_file(file, arena.allocator)
+	source_str := string(source_data) if src_err == nil else ""
+	conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, source_str, file, arena.allocator)
+	for d in conc_diagnostics {
+		core.diagnostic_print(d)
+		if d.severity == .Error { error_count += 1 }
+	}
+
 	fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards, %d types)",
 		file, len(module.body),
 		len(bind_result.symbols), len(bind_result.scopes),
@@ -248,10 +258,20 @@ cmd_check_multi :: proc(
 			if d.severity == .Error { error_count += 1 }
 		}
 
-		// d. Collect exports
+		// d. Concurrency analysis
+		conc_source_data, conc_src_err := os.read_entire_file(info.file_path, arena.allocator)
+		conc_source := string(conc_source_data) if conc_src_err == nil else ""
+		conc_diagnostics := concurrency.analyze_concurrency(
+			info.parse_result, &info.bind_result, conc_source, info.file_path, arena.allocator)
+		for d in conc_diagnostics {
+			core.diagnostic_print(d)
+			if d.severity == .Error { error_count += 1 }
+		}
+
+		// e. Collect exports
 		modules.collect_exports(info, &check_result, &res_ctx)
 
-		// e. Print summary
+		// f. Print summary
 		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d types)",
 			info.file_path, len(info.parse_result.body),
 			len(info.bind_result.symbols), len(info.bind_result.scopes),

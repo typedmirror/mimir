@@ -8,6 +8,7 @@ import "mimir:parser"
 import "mimir:binder"
 import "mimir:flow"
 import "mimir:checker"
+import "mimir:concurrency"
 
 Conform_File_Result :: struct {
 	file:            string,
@@ -89,6 +90,15 @@ run_conform_file :: proc(
 		// Check
 		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
 		for d in check_result.diagnostics {
+			if d.severity == .Error {
+				error_lines[d.location.line] = true
+			}
+		}
+
+		// Concurrency
+		source_str := string(source)
+		conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, source_str, file, arena.allocator)
+		for d in conc_diagnostics {
 			if d.severity == .Error {
 				error_lines[d.location.line] = true
 			}
