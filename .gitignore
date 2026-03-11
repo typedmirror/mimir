@@ -4,3 +4,5 @@ build/
 *.exe
 *.pdb
 .DS_Store
+.claude/state/subagent_telemetry.jsonl
+__pycache__/
