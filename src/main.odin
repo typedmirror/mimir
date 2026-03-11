@@ -19,6 +19,7 @@ import "perf"
 import "safety"
 import "lsp"
 import "migration"
+import "codegen"
 
 main :: proc() {
 	args := os.args
@@ -70,6 +71,12 @@ main :: proc() {
 		cmd_import_config(args[2:])
 	case "python":
 		cmd_python(args[2:])
+	case "stubs":
+		cmd_stubs(args[2:])
+	case "generate-contracts":
+		cmd_generate_contracts(args[2:])
+	case "generate-tests":
+		cmd_generate_tests(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -1695,6 +1702,9 @@ print_usage :: proc() {
 	fmt.println("  install           Install dependencies from mimir.lock")
 	fmt.println("  migrate [path]    Detect Python version migration opportunities")
 	fmt.println("  import-config <f> Import mypy configuration to mimir.toml format")
+	fmt.println("  stubs <path>      Generate .pyi stub files from type analysis")
+	fmt.println("  generate-contracts <path>  Generate runtime type-checking decorators")
+	fmt.println("  generate-tests <path>      Generate hypothesis test skeletons")
 	fmt.println("  conform [path]    Run conformance tests (default: tests/conformance/)")
 	fmt.println("  version           Print version")
 	fmt.println("  help              Show this message")
@@ -1866,4 +1876,351 @@ cmd_import_config :: proc(args: []string) {
 	}
 
 	migration.print_import_result(&result)
+}
+
+// ==================== stubs command ====================
+
+cmd_stubs :: proc(args: []string) {
+	target := ""
+	output_dir := ""
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--output-dir" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir stubs: --output-dir requires a directory argument")
+				os.exit(1)
+			}
+			output_dir = args[i + 1]
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir stubs: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir stubs <path> [--output-dir <dir>]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	if target == "" {
+		fmt.eprintln("mimir stubs: no input path specified")
+		fmt.eprintln("Usage: mimir stubs <path> [--output-dir <dir>]")
+		os.exit(1)
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir stubs: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir stubs: no Python files found in '%s'", target)
+		return
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		#partial switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	generated := 0
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			#partial switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir stubs: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, file, arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+
+		// Compute output path: foo.py → foo.pyi
+		out_path := ""
+		if output_dir != "" {
+			base := file_basename(file)
+			out_path = fmt.aprintf("%s/%si", output_dir, base, allocator = arena.allocator)
+		} else {
+			out_path = fmt.aprintf("%si", file, allocator = arena.allocator)
+		}
+
+		gen_err := codegen.generate_stubs(module, &bind_result, &check_result, out_path, arena.allocator)
+		if gen_err != nil {
+			#partial switch e in gen_err {
+			case codegen.Error_Data:
+				fmt.eprintfln("mimir stubs: %s", e.msg)
+			}
+		} else {
+			fmt.printfln("  generated %s", out_path)
+			generated += 1
+		}
+	}
+
+	fmt.printfln("mimir stubs: generated %d stub file(s)", generated)
+}
+
+// ==================== generate-contracts command ====================
+
+cmd_generate_contracts :: proc(args: []string) {
+	target := ""
+	output_dir := ""
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--output-dir" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir generate-contracts: --output-dir requires a directory argument")
+				os.exit(1)
+			}
+			output_dir = args[i + 1]
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir generate-contracts: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir generate-contracts <path> [--output-dir <dir>]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	if target == "" {
+		fmt.eprintln("mimir generate-contracts: no input path specified")
+		fmt.eprintln("Usage: mimir generate-contracts <path> [--output-dir <dir>]")
+		os.exit(1)
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir generate-contracts: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir generate-contracts: no Python files found in '%s'", target)
+		return
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		#partial switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	generated := 0
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			#partial switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir generate-contracts: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, file, arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+
+		// Compute output path: foo.py → foo_contracts.py
+		base := file_stem(file)
+		out_path := ""
+		if output_dir != "" {
+			out_path = fmt.aprintf("%s/%s_contracts.py", output_dir, base, allocator = arena.allocator)
+		} else {
+			dir := file_dir(file)
+			out_path = fmt.aprintf("%s%s_contracts.py", dir, base, allocator = arena.allocator)
+		}
+
+		gen_err := codegen.generate_contracts(module, &bind_result, &check_result, out_path, arena.allocator)
+		if gen_err != nil {
+			#partial switch e in gen_err {
+			case codegen.Error_Data:
+				fmt.eprintfln("mimir generate-contracts: %s", e.msg)
+			}
+		} else {
+			fmt.printfln("  generated %s", out_path)
+			generated += 1
+		}
+	}
+
+	fmt.printfln("mimir generate-contracts: generated %d contract file(s)", generated)
+}
+
+// ==================== generate-tests command ====================
+
+cmd_generate_tests :: proc(args: []string) {
+	target := ""
+	output_dir := ""
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--output-dir" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir generate-tests: --output-dir requires a directory argument")
+				os.exit(1)
+			}
+			output_dir = args[i + 1]
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir generate-tests: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir generate-tests <path> [--output-dir <dir>]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	if target == "" {
+		fmt.eprintln("mimir generate-tests: no input path specified")
+		fmt.eprintln("Usage: mimir generate-tests <path> [--output-dir <dir>]")
+		os.exit(1)
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir generate-tests: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir generate-tests: no Python files found in '%s'", target)
+		return
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		#partial switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	generated := 0
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			#partial switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir generate-tests: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, file, arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+
+		// Compute module name and output path
+		mod_name := file_stem(file)
+		out_path := ""
+		if output_dir != "" {
+			out_path = fmt.aprintf("%s/test_%s.py", output_dir, mod_name, allocator = arena.allocator)
+		} else {
+			dir := file_dir(file)
+			out_path = fmt.aprintf("%stest_%s.py", dir, mod_name, allocator = arena.allocator)
+		}
+
+		gen_err := codegen.generate_tests(module, &bind_result, &check_result, mod_name, out_path, arena.allocator)
+		if gen_err != nil {
+			#partial switch e in gen_err {
+			case codegen.Error_Data:
+				fmt.eprintfln("mimir generate-tests: %s", e.msg)
+			}
+		} else {
+			fmt.printfln("  generated %s", out_path)
+			generated += 1
+		}
+	}
+
+	fmt.printfln("mimir generate-tests: generated %d test file(s)", generated)
+}
+
+// ==================== Path Helpers ====================
+
+// Returns filename from path (e.g., "dir/foo.py" → "foo.py")
+file_basename :: proc(path: string) -> string {
+	last := -1
+	for i := len(path) - 1; i >= 0; i -= 1 {
+		if path[i] == '/' || path[i] == '\\' {
+			last = i
+			break
+		}
+	}
+	if last < 0 { return path }
+	return path[last + 1:]
+}
+
+// Returns filename without extension (e.g., "dir/foo.py" → "foo")
+file_stem :: proc(path: string) -> string {
+	base := file_basename(path)
+	for i := len(base) - 1; i >= 0; i -= 1 {
+		if base[i] == '.' {
+			return base[:i]
+		}
+	}
+	return base
+}
+
+// Returns directory part with trailing slash (e.g., "dir/foo.py" → "dir/")
+file_dir :: proc(path: string) -> string {
+	for i := len(path) - 1; i >= 0; i -= 1 {
+		if path[i] == '/' || path[i] == '\\' {
+			return path[:i + 1]
+		}
+	}
+	return ""
 }
