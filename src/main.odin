@@ -13,6 +13,7 @@ import "conform"
 import "modules"
 import "platform"
 import "lint"
+import "security"
 
 main :: proc() {
 	args := os.args
@@ -36,6 +37,8 @@ main :: proc() {
 		cmd_lock(args[2:])
 	case "install":
 		cmd_install(args[2:])
+	case "audit":
+		cmd_audit(args[2:])
 	case "lint":
 		cmd_lint(args[2:])
 	case "test":
@@ -780,6 +783,126 @@ cmd_lint :: proc(args: []string) {
 	}
 }
 
+cmd_audit :: proc(args: []string) {
+	config := security.default_config()
+
+	// Parse flags
+	target := "."
+	verbose := false
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--ignore" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir audit: --ignore requires a code list (e.g. SEC001,SEC003)")
+				os.exit(1)
+			}
+			config.ignore = security.parse_code_list(args[i + 1])
+			i += 2
+		} else if arg == "--select" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir audit: --select requires a code list (e.g. SEC001,SEC002)")
+				os.exit(1)
+			}
+			config.select_only = security.parse_code_list(args[i + 1])
+			i += 2
+		} else if arg == "-v" || arg == "--verbose" {
+			verbose = true
+			i += 1
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir audit: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir audit [--ignore <codes>] [--select <codes>] [-v] [path]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	// Find Python files
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir audit: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir audit: no Python files found in '%s'", target)
+		return
+	}
+
+	// Start parser bridge
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	// Arena
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	total_issues := 0
+	files_with_issues := 0
+
+	for file in files {
+		if verbose {
+			fmt.printfln("  scanning %s", file)
+		}
+
+		// Read source
+		source_data, read_err := os.read_entire_file(file, arena.allocator)
+		if read_err != nil {
+			fmt.eprintfln("mimir audit: cannot read '%s': %v", file, read_err)
+			continue
+		}
+		source := string(source_data)
+
+		// Parse
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir audit: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		// Bind (needed for import resolution)
+		bind_result := binder.bind(module, file, arena.allocator)
+
+		// Security scan
+		diagnostics := security.scan_file(module, &bind_result, source, file, &config, arena.allocator)
+
+		if len(diagnostics) > 0 {
+			files_with_issues += 1
+			total_issues += len(diagnostics)
+			for d in diagnostics {
+				core.diagnostic_print(d)
+			}
+		}
+	}
+
+	if total_issues > 0 {
+		fmt.printfln("mimir audit: %d security issue(s) in %d file(s)", total_issues, files_with_issues)
+		os.exit(1)
+	} else {
+		fmt.printfln("mimir audit: %d file(s) clean", len(files))
+	}
+}
+
 cmd_remove :: proc(args: []string) {
 	if len(args) == 0 {
 		fmt.eprintln("mimir remove: no packages specified")
@@ -965,6 +1088,7 @@ print_usage :: proc() {
 	fmt.println()
 	fmt.println("Commands:")
 	fmt.println("  check <path>      Analyze Python source files")
+	fmt.println("  audit [path]      Scan Python files for security vulnerabilities (default: \".\")")
 	fmt.println("  lint [path]       Lint Python files for common issues (default: \".\")")
 	fmt.println("  test [path]       Run tests (discovers test_*.py and *_test.py files)")
 	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
