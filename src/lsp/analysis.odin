@@ -14,6 +14,7 @@ import lint       "mimir:lint"
 import security   "mimir:security"
 import concurrency "mimir:concurrency"
 import perf       "mimir:perf"
+import safety     "mimir:safety"
 
 // ==================== Analysis Results ====================
 
@@ -97,11 +98,15 @@ analyze_document :: proc(
 	perf_config := perf.default_config()
 	perf_diags := perf.analyze_performance(module, &result.bind_result, content, temp_path, &perf_config, server.allocator)
 
+	// 9. Safety check
+	safety_config := safety.default_config()
+	safety_diags := safety.analyze_safety(module, &result.bind_result, temp_path, &safety_config, server.allocator)
+
 	// Collect all diagnostics
 	total := len(result.bind_result.diagnostics) +
 	         len(result.flow_result.diagnostics) +
 	         len(result.check_result.diagnostics) +
-	         len(lint_diags) + len(sec_diags) + len(conc_diags) + len(perf_diags)
+	         len(lint_diags) + len(sec_diags) + len(conc_diags) + len(perf_diags) + len(safety_diags)
 
 	result.all_diags = make([dynamic]core.Diagnostic, 0, total, server.allocator)
 
@@ -124,6 +129,9 @@ analyze_document :: proc(
 		append(&result.all_diags, d)
 	}
 	for d in perf_diags {
+		append(&result.all_diags, d)
+	}
+	for d in safety_diags {
 		append(&result.all_diags, d)
 	}
 

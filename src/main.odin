@@ -16,6 +16,7 @@ import "lint"
 import "security"
 import "concurrency"
 import "perf"
+import "safety"
 import "lsp"
 
 main :: proc() {
@@ -50,6 +51,8 @@ main :: proc() {
 		cmd_test(args[2:])
 	case "repl":
 		cmd_repl(args[2:])
+	case "safety":
+		cmd_safety(args[2:])
 	case "lsp":
 		cmd_lsp()
 	case "remove":
@@ -1224,6 +1227,103 @@ cmd_update :: proc(args: []string) {
 	}
 }
 
+cmd_safety :: proc(args: []string) {
+	config := safety.default_config()
+
+	target := "."
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--ignore" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir safety: --ignore requires a code list (e.g. SAF001,SAF003)")
+				os.exit(1)
+			}
+			config.ignore = safety.parse_code_list(args[i + 1])
+			i += 2
+		} else if arg == "--select" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir safety: --select requires a code list (e.g. SAF001,SAF002)")
+				os.exit(1)
+			}
+			config.select_only = safety.parse_code_list(args[i + 1])
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir safety: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir safety [--ignore <codes>] [--select <codes>] [path]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir safety: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir safety: no Python files found in '%s'", target)
+		return
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	total_issues := 0
+	files_with_issues := 0
+
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir safety: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, file, arena.allocator)
+
+		diagnostics := safety.analyze_safety(module, &bind_result, file, &config, arena.allocator)
+
+		if len(diagnostics) > 0 {
+			files_with_issues += 1
+			total_issues += len(diagnostics)
+			for d in diagnostics {
+				core.diagnostic_print(d)
+			}
+		}
+	}
+
+	if total_issues > 0 {
+		fmt.printfln("mimir safety: %d safety issue(s) in %d file(s)", total_issues, files_with_issues)
+		os.exit(1)
+	} else {
+		fmt.printfln("mimir safety: %d file(s) clean", len(files))
+	}
+}
+
 cmd_lsp :: proc() {
 	bridge, bridge_err := parser.bridge_start()
 	if bridge_err != nil {
@@ -1286,6 +1386,7 @@ print_usage :: proc() {
 	fmt.println("  check <path>      Analyze Python source files")
 	fmt.println("  audit [path]      Scan Python files for security vulnerabilities (default: \".\")")
 	fmt.println("  lint [path]       Lint Python files for common issues (default: \".\")")
+	fmt.println("  safety [path]     Detect Python safety issues (default: \".\")")
 	fmt.println("  perf [path]       Detect Python performance anti-patterns (default: \".\")")
 	fmt.println("  test [path]       Run tests (discovers test_*.py and *_test.py files)")
 	fmt.println("  repl              Start type-aware interactive Python REPL")
