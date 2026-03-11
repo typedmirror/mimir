@@ -75,7 +75,27 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 
 	case ^parser.Attribute_Expr:
 		receiver := infer_expr(e.value, ctx)
-		return lookup_attribute(receiver, e.attr, ctx.reg)
+		result := lookup_attribute(receiver, e.attr, ctx.reg)
+		// T007: flag undefined attributes on user-defined types
+		if result == TYPE_UNKNOWN && receiver != TYPE_UNKNOWN && receiver != TYPE_ANY {
+			rt := get_type(ctx.reg, receiver)
+			should_flag := false
+			#partial switch _ in rt.info {
+			case Instance_Type, Class_Type, Module_Type, Protocol_Type, TypedDict_Type:
+				should_flag = true
+			}
+			// Skip dunder attrs — implicit object methods not tracked yet
+			if should_flag && !(len(e.attr) > 4 && e.attr[:2] == "__" && e.attr[len(e.attr)-2:] == "__") {
+				emit_diagnostic(ctx, e.loc, "T007", .Error,
+					"Undefined attribute",
+					fmt.aprintf("Type '%s' has no attribute '%s'",
+						type_to_string(ctx.reg, receiver),
+						e.attr,
+						allocator = ctx.reg.allocator),
+					"Check the attribute name or class definition")
+			}
+		}
+		return result
 
 	case ^parser.Subscript_Expr:
 		container := infer_expr(e.value, ctx)

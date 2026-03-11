@@ -299,6 +299,28 @@ resolve_annotation :: proc(
 		if _, is_none := e.value.(parser.Const_None); is_none {
 			return TYPE_NONE
 		}
+		// String annotation (forward reference): "Foo" → look up class name
+		if str_val, is_str := e.value.(string); is_str {
+			// Try built-in type names
+			switch str_val {
+			case "int":   return TYPE_INT
+			case "str":   return TYPE_STR
+			case "float": return TYPE_FLOAT
+			case "bool":  return TYPE_BOOL
+			case "bytes": return TYPE_BYTES
+			case "None":  return TYPE_NONE
+			}
+			// Try class name lookup in registry
+			for _, class_type_id in reg.class_types {
+				ct := get_type(reg, class_type_id)
+				#partial switch cls in ct.info {
+				case Class_Type:
+					if cls.name == str_val {
+						return make_instance_type(reg, class_type_id)
+					}
+				}
+			}
+		}
 		return TYPE_UNKNOWN
 
 	case ^parser.Attribute_Expr:

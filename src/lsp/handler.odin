@@ -312,19 +312,7 @@ handle_references :: proc(server: ^Server, id: json.Value, params: json.Value) {
 		append(&locations, loc_str)
 	}
 
-	// Also include the definition location
-	sym := binder.result_get_symbol(&result.bind_result, target_sym_id)
-	if sym != nil {
-		def_range := src_loc_to_range(sym.def_loc)
-		def_str := fmt.aprintf(
-			"{{\"uri\":\"%s\",\"range\":{{\"start\":{{\"line\":%d,\"character\":%d}},\"end\":{{\"line\":%d,\"character\":%d}}}}}}",
-			escaped_uri,
-			def_range.start.line, def_range.start.character,
-			def_range.end.line, def_range.end.character,
-			allocator = server.allocator,
-		)
-		append(&locations, def_str)
-	}
+	// Definition is already included via binder refs (both Load and Store Name_Exprs are registered)
 
 	result_json := fmt.aprintf("[%s]", strings.join(locations[:], ",", server.allocator), allocator = server.allocator)
 	send_response(server, id, result_json)

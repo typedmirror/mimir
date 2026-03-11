@@ -642,6 +642,19 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		}
 	}
 
+	// Inherit attributes from base classes (own attrs take precedence)
+	for base_type_id in bases {
+		base_t := get_type(ctx.reg, base_type_id)
+		#partial switch base_cls in base_t.info {
+		case Class_Type:
+			for name, attr_type in base_cls.attrs {
+				if name not_in attrs {
+					attrs[name] = attr_type
+				}
+			}
+		}
+	}
+
 	// @dataclass: auto-generate __init__, __repr__, __eq__
 	if is_dataclass {
 		init_params := make([dynamic]Param_Type, 0, 8, ctx.reg.allocator)
