@@ -203,7 +203,7 @@ check_scope :: proc(
 
 		// Initialize parameter types for the entry block (after merge to avoid overwrite)
 		if block_id == cfg.entry && scope != nil && (scope.kind == .Function || scope.kind == .Lambda) {
-			init_param_types(scope, bind_result, &env, reg, builtins, func_args)
+			init_param_types(scope, bind_result, &env, reg, builtins, func_args, current_class)
 		}
 
 		// Apply narrowing guards
@@ -1060,6 +1060,7 @@ init_param_types :: proc(
 	reg: ^Type_Registry,
 	builtins: ^Builtin_Names,
 	func_args: ^parser.Arguments = nil,
+	current_class: Type_ID = INVALID_TYPE,
 ) {
 	// Build param name → annotation map from function args
 	param_annotations: map[string]parser.Expr
@@ -1081,6 +1082,11 @@ init_param_types :: proc(
 		sym := binder.result_get_symbol(bind_result, sym_id)
 		if sym == nil { continue }
 		if .Is_Param in sym.flags {
+			// self parameter → Instance_Type of enclosing class
+			if sym.name == "self" && current_class != INVALID_TYPE {
+				env.types[sym_id] = make_instance_type(reg, current_class)
+				continue
+			}
 			if ann, ok := param_annotations[sym.name]; ok {
 				resolved := resolve_annotation(ann, reg, bind_result, builtins)
 				env.types[sym_id] = resolved != TYPE_UNKNOWN ? resolved : TYPE_UNKNOWN
