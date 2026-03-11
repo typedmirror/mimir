@@ -529,6 +529,49 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	// Find the scope for this class in binder
 	scope_id := find_scope_for_def(cd.name, cd.loc, ctx.bind_result, .Class)
 
+	// Check for special typing bases: TypedDict, Protocol
+	is_typeddict := false
+	is_protocol := false
+	for base in cd.bases {
+		base_name := ""
+		#partial switch b in base {
+		case ^parser.Name_Expr: base_name = b.id
+		case ^parser.Subscript_Expr: base_name = get_annotation_name(b.value)
+		}
+		if orig, is_typing := ctx.bind_result.typing_names[base_name]; is_typing {
+			if orig == "TypedDict" { is_typeddict = true }
+			if orig == "Protocol" { is_protocol = true }
+		}
+	}
+
+	// TypedDict class syntax
+	if is_typeddict {
+		return build_typeddict_class(cd, ctx, scope_id)
+	}
+
+	// Protocol class syntax
+	if is_protocol {
+		return build_protocol_class(cd, ctx, scope_id)
+	}
+
+	// Check for @dataclass decorator
+	is_dataclass := false
+	for dec in cd.decorator_list {
+		#partial switch d in dec {
+		case ^parser.Name_Expr:
+			if d.id == "dataclass" { is_dataclass = true }
+		case ^parser.Call_Expr:
+			#partial switch f in d.func {
+			case ^parser.Name_Expr:
+				if f.id == "dataclass" { is_dataclass = true }
+			case ^parser.Attribute_Expr:
+				if f.attr == "dataclass" { is_dataclass = true }
+			}
+		case ^parser.Attribute_Expr:
+			if d.attr == "dataclass" { is_dataclass = true }
+		}
+	}
+
 	// Resolve base classes, detecting Generic[T] for type_params
 	bases_dyn := make([dynamic]Type_ID, 0, len(cd.bases), ctx.reg.allocator)
 	type_params_dyn := make([dynamic]Type_ID, 0, 4, ctx.reg.allocator)
@@ -599,6 +642,27 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		}
 	}
 
+	// @dataclass: auto-generate __init__, __repr__, __eq__
+	if is_dataclass {
+		init_params := make([dynamic]Param_Type, 0, 8, ctx.reg.allocator)
+		for stmt in cd.body {
+			#partial switch s in stmt {
+			case ^parser.Ann_Assign:
+				if name_expr, ok := s.target.(^parser.Name_Expr); ok {
+					field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					has_default := s.value != nil
+					append(&init_params, Param_Type{name = name_expr.id, type_id = field_type, has_default = has_default})
+				}
+			}
+		}
+		attrs["__init__"] = make_callable_type(ctx.reg, init_params[:], TYPE_NONE)
+		no_params := make([]Param_Type, 0, ctx.reg.allocator)
+		attrs["__repr__"] = make_callable_type(ctx.reg, no_params, TYPE_STR)
+		eq_params := make([]Param_Type, 1, ctx.reg.allocator)
+		eq_params[0] = Param_Type{name = "other", type_id = TYPE_OBJECT}
+		attrs["__eq__"] = make_callable_type(ctx.reg, eq_params, TYPE_BOOL)
+	}
+
 	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
 	class_type_id := register_type(ctx.reg, Class_Type{
 		name        = cd.name,
@@ -615,6 +679,66 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	}
 
 	return class_type_id
+}
+
+// TypedDict class syntax: class Movie(TypedDict): name: str; year: int
+build_typeddict_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_id: binder.Scope_ID) -> Type_ID {
+	fields := make(map[string]Type_ID, 16, ctx.reg.allocator)
+
+	for stmt in cd.body {
+		#partial switch s in stmt {
+		case ^parser.Ann_Assign:
+			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
+				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+				fields[name_expr.id] = field_type
+			}
+		}
+	}
+
+	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
+	td_type_id := register_type(ctx.reg, TypedDict_Type{
+		name   = cd.name,
+		fields = fields,
+		total  = true,
+	})
+
+	if sym_id != binder.INVALID_SYMBOL {
+		ctx.reg.class_types[sym_id] = td_type_id
+	}
+
+	return td_type_id
+}
+
+// Protocol class syntax: class Drawable(Protocol): def draw(self) -> None: ...
+build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_id: binder.Scope_ID) -> Type_ID {
+	methods := make(map[string]Type_ID, 8, ctx.reg.allocator)
+	attrs := make(map[string]Type_ID, 8, ctx.reg.allocator)
+
+	for stmt in cd.body {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			ft := build_func_type(s, ctx)
+			methods[s.name] = ft
+		case ^parser.Ann_Assign:
+			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
+				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+				attrs[name_expr.id] = field_type
+			}
+		}
+	}
+
+	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
+	proto_type_id := register_type(ctx.reg, Protocol_Type{
+		name    = cd.name,
+		methods = methods,
+		attrs   = attrs,
+	})
+
+	if sym_id != binder.INVALID_SYMBOL {
+		ctx.reg.class_types[sym_id] = proto_type_id
+	}
+
+	return proto_type_id
 }
 
 // Scan __init__ body for self.attr = value patterns

@@ -183,14 +183,22 @@ resolve_annotation :: proc(
 		// Look up as a symbol reference (user-defined class)
 		if sym_id, ok := binder.get_ref(bind_result, rawptr(e)); ok {
 			if class_type_id, found := reg.class_types[sym_id]; found {
-				return make_instance_type(reg, class_type_id)
+				ct := get_type(reg, class_type_id)
+				#partial switch _ in ct.info {
+				case TypedDict_Type, Protocol_Type:
+					return class_type_id
+				case:
+					return make_instance_type(reg, class_type_id)
+				}
 			}
-			// Check if symbol maps to a TypeVar in environment
+			// Check if symbol maps to a TypeVar/TypedDict/Protocol in environment
 			if env != nil {
-				if tv_type, tv_found := env.types[sym_id]; tv_found {
-					tv := get_type(reg, tv_type)
-					if _, is_tv := tv.info.(TypeVar_Type); is_tv {
-						return tv_type
+				if env_type, env_found := env.types[sym_id]; env_found {
+					et := get_type(reg, env_type)
+					#partial switch _ in et.info {
+					case TypeVar_Type:    return env_type
+					case TypedDict_Type:  return env_type
+					case Protocol_Type:   return env_type
 					}
 				}
 			}
@@ -239,8 +247,26 @@ resolve_annotation :: proc(
 			args := resolve_tuple_args(e.slice, reg, bind_result, builtins, env)
 			return make_union_type(reg, args)
 		case "Callable":
-			// Simplified: Callable[[params], return_type]
-			return TYPE_ANY // Detailed callable parsing deferred
+			// Callable[[param_types...], return_type]
+			#partial switch slice in e.slice {
+			case ^parser.Tuple_Expr:
+				if len(slice.elts) == 2 {
+					ret_type := resolve_annotation(slice.elts[1], reg, bind_result, builtins, env)
+					#partial switch params_list in slice.elts[0] {
+					case ^parser.List_Expr:
+						param_types := make([]Param_Type, len(params_list.elts), reg.allocator)
+						for p, i in params_list.elts {
+							pt := resolve_annotation(p, reg, bind_result, builtins, env)
+							param_types[i] = Param_Type{name = "", type_id = pt}
+						}
+						return make_callable_type(reg, param_types, ret_type)
+					case:
+						// Callable[..., ret] — Ellipsis or unparseable params
+						return make_callable_type(reg, {}, ret_type)
+					}
+				}
+			}
+			return TYPE_ANY
 		}
 		// User-defined generic class: MyClass[int]
 		base_type := resolve_annotation(e.value, reg, bind_result, builtins, env)

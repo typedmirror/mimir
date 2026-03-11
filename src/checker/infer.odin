@@ -80,6 +80,26 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 	case ^parser.Subscript_Expr:
 		container := infer_expr(e.value, ctx)
 		infer_expr(e.slice, ctx) // type-check the index
+		// TypedDict key access validation
+		ct := get_type(ctx.reg, container)
+		#partial switch td in ct.info {
+		case TypedDict_Type:
+			#partial switch key_expr in e.slice {
+			case ^parser.Constant_Expr:
+				if key_str, ok := key_expr.value.(string); ok {
+					if field_type, found := td.fields[key_str]; found {
+						return field_type
+					}
+					emit_diagnostic(ctx, e.loc, "T001", .Error,
+						"Invalid TypedDict key",
+						fmt.aprintf("TypedDict '%s' has no key '%s'", td.name, key_str,
+							allocator = ctx.reg.allocator),
+						"Use a valid key")
+					return TYPE_UNKNOWN
+				}
+			}
+			return TYPE_UNKNOWN
+		}
 		return get_subscript_type(container, ctx.reg)
 
 	case ^parser.List_Expr:
@@ -391,6 +411,25 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 		check_call_args(e, &info, ctx)
 		return info.return_type
 
+	case TypedDict_Type:
+		// TypedDict constructor — validate keyword args against fields
+		for arg in e.args { infer_expr(arg, ctx) }
+		for kw in e.keywords {
+			kw_type := infer_expr(kw.value, ctx)
+			if field_type, ok := info.fields[kw.arg]; ok {
+				if kw_type != TYPE_UNKNOWN && kw_type != TYPE_ANY &&
+				   field_type != TYPE_UNKNOWN && field_type != TYPE_ANY {
+					if !is_assignable(ctx.reg, kw_type, field_type) {
+						emit_diagnostic(ctx, e.loc, "T002", .Error,
+							"Incompatible TypedDict field type",
+							fmt_type_mismatch(kw_type, field_type, ctx.reg),
+							"Use the correct type")
+					}
+				}
+			}
+		}
+		return func_type
+
 	case Class_Type:
 		// Generic class — infer TypeVar bindings from __init__ args
 		if len(info.type_params) > 0 {
@@ -426,20 +465,21 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		if !p.has_default { required += 1 }
 	}
 
-	// Check arg count
+	// Check arg count (positional + keyword)
 	n_args := len(e.args)
+	n_total := n_args + len(e.keywords)
 	n_params := len(func_info.params)
 
-	if n_args < required {
+	if n_total < required {
 		emit_diagnostic(ctx, e.loc, "T004", .Error,
 			"Too few arguments",
-			fmt_arg_count_error(required, n_args, ctx.reg),
+			fmt_arg_count_error(required, n_total, ctx.reg),
 			"Add missing arguments")
-	} else if n_args > n_params {
+	} else if n_total > n_params {
 		if n_params == 0 {
 			emit_diagnostic(ctx, e.loc, "T004", .Error,
 				"Too many arguments",
-				fmt_arg_count_error(n_params, n_args, ctx.reg),
+				fmt_arg_count_error(n_params, n_total, ctx.reg),
 				"Remove extra arguments")
 		} else {
 			// Check if last param is *args (has_default used as approximation)
@@ -447,13 +487,13 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 			if last.type_id != TYPE_ANY { // non-variadic
 				emit_diagnostic(ctx, e.loc, "T004", .Error,
 					"Too many arguments",
-					fmt_arg_count_error(n_params, n_args, ctx.reg),
+					fmt_arg_count_error(n_params, n_total, ctx.reg),
 					"Remove extra arguments")
 			}
 		}
 	}
 
-	// Check arg types against param types
+	// Check positional arg types against param types
 	for i := 0; i < min(n_args, n_params); i += 1 {
 		param_type := func_info.params[i].type_id
 		arg_type := infer_expr(e.args[i], ctx, param_type)
@@ -468,7 +508,26 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		}
 	}
 
-	// Infer remaining args not checked
+	// Check keyword arg types against matching param types
+	for kw in e.keywords {
+		kw_type := infer_expr(kw.value, ctx)
+		for p in func_info.params {
+			if p.name == kw.arg {
+				if p.type_id != TYPE_ANY && p.type_id != TYPE_UNKNOWN &&
+				   kw_type != TYPE_UNKNOWN && kw_type != TYPE_ANY {
+					if !is_assignable(ctx.reg, kw_type, p.type_id) {
+						emit_diagnostic(ctx, e.loc, "T002", .Error,
+							"Incompatible argument type",
+							fmt_type_mismatch(kw_type, p.type_id, ctx.reg),
+							"Use the correct type")
+					}
+				}
+				break
+			}
+		}
+	}
+
+	// Infer remaining positional args not checked
 	for i := n_params; i < n_args; i += 1 {
 		infer_expr(e.args[i], ctx)
 	}
@@ -643,6 +702,17 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 		}
 	case Module_Type:
 		if attr_type, ok := info.exports[attr]; ok {
+			return attr_type
+		}
+	case Protocol_Type:
+		if attr_type, ok := info.methods[attr]; ok {
+			return attr_type
+		}
+		if attr_type, ok := info.attrs[attr]; ok {
+			return attr_type
+		}
+	case TypedDict_Type:
+		if attr_type, ok := info.fields[attr]; ok {
 			return attr_type
 		}
 	}
@@ -826,6 +896,8 @@ try_typing_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> (Type_ID, 
 		case "cast":        return handle_cast(e, ctx), true
 		case "TypeVar":
 			return handle_typevar(e, ctx), true
+		case "TypedDict":
+			return handle_typeddict_call(e, ctx), true
 		case:
 			// Unknown typing form — infer args, don't error
 			for arg in e.args { infer_expr(arg, ctx) }
@@ -981,6 +1053,58 @@ handle_typevar :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 		bound       = bound,
 		constraints = constraint_slice,
 	})
+}
+
+// ==================== TypedDict Functional Syntax ====================
+
+handle_typeddict_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	name := ""
+	// First arg: name string
+	if len(e.args) >= 1 {
+		#partial switch arg in e.args[0] {
+		case ^parser.Constant_Expr:
+			if s, ok := arg.value.(string); ok {
+				name = s
+			}
+		}
+	}
+
+	fields := make(map[string]Type_ID, 8, ctx.reg.allocator)
+	total := true
+
+	// Second arg: dict of field_name: type
+	if len(e.args) >= 2 {
+		#partial switch arg in e.args[1] {
+		case ^parser.Dict_Expr:
+			for i in 0..<len(arg.keys) {
+				key_name := ""
+				#partial switch k in arg.keys[i] {
+				case ^parser.Constant_Expr:
+					if s, ok := k.value.(string); ok {
+						key_name = s
+					}
+				}
+				if len(key_name) > 0 {
+					field_type := resolve_annotation(arg.values[i], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					fields[key_name] = field_type
+				}
+			}
+		}
+	}
+
+	// Check keywords for total=False
+	for kw in e.keywords {
+		if kw.arg == "total" {
+			#partial switch v in kw.value {
+			case ^parser.Constant_Expr:
+				if b, ok := v.value.(bool); ok {
+					total = b
+				}
+			}
+		}
+	}
+
+	return register_type(ctx.reg, TypedDict_Type{name = name, fields = fields, total = total})
 }
 
 // ==================== Generic Call Inference ====================

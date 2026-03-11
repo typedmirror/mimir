@@ -52,6 +52,8 @@ Type_Info :: union {
 	Literal_Bool_Type,
 	Module_Type,
 	TypeVar_Type,
+	TypedDict_Type,
+	Protocol_Type,
 }
 
 Primitive_Kind :: enum u8 {
@@ -114,6 +116,18 @@ TypeVar_Type :: struct {
 	name:        string,
 	bound:       Type_ID,
 	constraints: []Type_ID,
+}
+
+TypedDict_Type :: struct {
+	name:   string,
+	fields: map[string]Type_ID,
+	total:  bool,
+}
+
+Protocol_Type :: struct {
+	name:    string,
+	methods: map[string]Type_ID,
+	attrs:   map[string]Type_ID,
 }
 
 // ==================== Type Environment ====================
@@ -278,6 +292,10 @@ make_instance_type :: proc(reg: ^Type_Registry, class_type: Type_ID) -> Type_ID 
 	return register_type(reg, Instance_Type{class_type = class_type})
 }
 
+make_typeddict_type :: proc(reg: ^Type_Registry, name: string, fields: map[string]Type_ID, total: bool) -> Type_ID {
+	return register_type(reg, TypedDict_Type{name = name, fields = fields, total = total})
+}
+
 // ==================== Subtype Checking ====================
 
 is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> bool {
@@ -369,6 +387,19 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		}
 	}
 
+	// Callable structural comparison
+	#partial switch src in src_type.info {
+	case Callable_Type:
+		#partial switch tgt in tgt_type.info {
+		case Callable_Type:
+			if len(src.params) != len(tgt.params) { return false }
+			for i in 0..<len(src.params) {
+				if !is_assignable(reg, src.params[i].type_id, tgt.params[i].type_id) { return false }
+			}
+			return is_assignable(reg, src.return_type, tgt.return_type)
+		}
+	}
+
 	// Instance subtyping via inheritance
 	#partial switch src in src_type.info {
 	case Instance_Type:
@@ -376,6 +407,44 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		case Instance_Type:
 			return is_class_subtype(reg, src.class_type, tgt.class_type)
 		}
+	}
+
+	// TypedDict subtyping: source TypedDict must have all target TypedDict fields
+	#partial switch src in src_type.info {
+	case TypedDict_Type:
+		#partial switch tgt in tgt_type.info {
+		case TypedDict_Type:
+			for name, tgt_field_type in tgt.fields {
+				src_field_type, ok := src.fields[name]
+				if !ok { return false }
+				if !is_assignable(reg, src_field_type, tgt_field_type) { return false }
+			}
+			return true
+		case Dict_Type:
+			// TypedDict is a dict subtype
+			if tgt.key != TYPE_STR && tgt.key != TYPE_ANY && tgt.key != TYPE_UNKNOWN { return false }
+			return true
+		}
+	}
+
+	// Protocol structural subtyping: any Instance with matching methods/attrs satisfies Protocol
+	#partial switch tgt in tgt_type.info {
+	case Protocol_Type:
+		#partial switch src in src_type.info {
+		case Instance_Type:
+			cls := get_type(reg, src.class_type)
+			#partial switch cls_info in cls.info {
+			case Class_Type:
+				for method_name, _ in tgt.methods {
+					if _, ok := cls_info.attrs[method_name]; !ok { return false }
+				}
+				for attr_name, _ in tgt.attrs {
+					if _, ok := cls_info.attrs[attr_name]; !ok { return false }
+				}
+				return true
+			}
+		}
+		return false
 	}
 
 	return false
@@ -487,7 +556,18 @@ type_to_string :: proc(reg: ^Type_Registry, id: Type_ID) -> string {
 		}
 		return string(buf[:])
 	case Callable_Type:
-		return fmt.aprintf("Callable[..., %s]", type_to_string(reg, info.return_type), allocator = reg.allocator)
+		buf := make([dynamic]u8, 0, 64, reg.allocator)
+		for c in "Callable[[" { append(&buf, u8(c)) }
+		for p, i in info.params {
+			if i > 0 { append(&buf, ','); append(&buf, ' ') }
+			ps := type_to_string(reg, p.type_id)
+			for c in ps { append(&buf, u8(c)) }
+		}
+		for c in "], " { append(&buf, u8(c)) }
+		rs := type_to_string(reg, info.return_type)
+		for c in rs { append(&buf, u8(c)) }
+		append(&buf, ']')
+		return string(buf[:])
 	case List_Type:
 		return fmt.aprintf("list[%s]", type_to_string(reg, info.element), allocator = reg.allocator)
 	case Dict_Type:
@@ -527,6 +607,10 @@ type_to_string :: proc(reg: ^Type_Registry, id: Type_ID) -> string {
 		return "<module>"
 	case TypeVar_Type:
 		return info.name
+	case TypedDict_Type:
+		return fmt.aprintf("TypedDict('%s')", info.name, allocator = reg.allocator)
+	case Protocol_Type:
+		return fmt.aprintf("Protocol('%s')", info.name, allocator = reg.allocator)
 	}
 	return "<unknown>"
 }
@@ -559,6 +643,17 @@ contains_typevar :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
 			if contains_typevar(reg, p.type_id) { return true }
 		}
 		return contains_typevar(reg, info.return_type)
+	case TypedDict_Type:
+		for _, ft in info.fields {
+			if contains_typevar(reg, ft) { return true }
+		}
+	case Protocol_Type:
+		for _, mt in info.methods {
+			if contains_typevar(reg, mt) { return true }
+		}
+		for _, at in info.attrs {
+			if contains_typevar(reg, at) { return true }
+		}
 	}
 	return false
 }
