@@ -59,6 +59,10 @@ main :: proc() {
 		cmd_remove(args[2:])
 	case "update":
 		cmd_update(args[2:])
+	case "build":
+		cmd_build(args[2:])
+	case "publish":
+		cmd_publish(args[2:])
 	case "python":
 		cmd_python(args[2:])
 	case "version":
@@ -1457,6 +1461,210 @@ cmd_python :: proc(args: []string) {
 	}
 }
 
+cmd_build :: proc(args: []string) {
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+	allocator := arena.allocator
+
+	wheel_only := false
+	sdist_only := false
+	cwd, cwd_err := os.get_working_directory(allocator)
+	if cwd_err != nil { cwd = "." }
+	search_dir := cwd
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--wheel" {
+			wheel_only = true
+			i += 1
+		} else if arg == "--sdist" {
+			sdist_only = true
+			i += 1
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir build: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir build [--wheel] [--sdist] [path]")
+			os.exit(1)
+		} else {
+			search_dir = arg
+			i += 1
+		}
+	}
+
+	config_path, config_found := platform.find_config(search_dir, allocator)
+	if !config_found {
+		fmt.eprintln("mimir build: no mimir.toml found")
+		fmt.eprintln("  create one with 'mimir add <package>' or manually")
+		os.exit(1)
+	}
+
+	cfg, cfg_err := platform.read_build_config(config_path, allocator)
+	if cfg_err != nil {
+		fmt.eprintfln("mimir build: %s", platform.error_msg(cfg_err))
+		os.exit(1)
+	}
+
+	val_err := platform.validate_build_config(&cfg)
+	if val_err != nil {
+		fmt.eprintfln("mimir build: %s", platform.error_msg(val_err))
+		os.exit(1)
+	}
+
+	sources, src_err := platform.discover_sources(cfg.project_dir, allocator)
+	if src_err != nil {
+		fmt.eprintfln("mimir build: %s", platform.error_msg(src_err))
+		os.exit(1)
+	}
+
+	fmt.printfln("mimir build: %s %s (%d files, %d packages)",
+		cfg.name, cfg.version, len(sources.files), len(sources.packages))
+
+	output_dir := strings.concatenate({cfg.project_dir, "/dist"}, allocator)
+
+	if sdist_only {
+		// sdist doesn't need Python
+		sdist_path, sdist_err := platform.build_sdist(&cfg, &sources, output_dir, allocator)
+		if sdist_err != nil {
+			fmt.eprintfln("mimir build: %s", platform.error_msg(sdist_err))
+			os.exit(1)
+		}
+		fmt.printfln("  built %s", sdist_path)
+	} else {
+		// Wheel needs Python for RECORD hash generation
+		python, py_ok := platform.find_managed_python("", allocator)
+		if !py_ok {
+			python, py_ok = platform.find_python("", allocator)
+		}
+		if !py_ok {
+			fmt.eprintln("mimir build: python3 not found (needed for RECORD generation)")
+			os.exit(1)
+		}
+
+		if wheel_only {
+			whl_path, whl_err := platform.build_wheel(&cfg, &sources, python, output_dir, allocator)
+			if whl_err != nil {
+				fmt.eprintfln("mimir build: %s", platform.error_msg(whl_err))
+				os.exit(1)
+			}
+			fmt.printfln("  built %s", whl_path)
+		} else {
+			err := platform.build_all(&cfg, &sources, python, output_dir, allocator)
+			if err != nil {
+				fmt.eprintfln("mimir build: %s", platform.error_msg(err))
+				os.exit(1)
+			}
+		}
+	}
+}
+
+cmd_publish :: proc(args: []string) {
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+	allocator := arena.allocator
+
+	index_url := ""
+	cwd, cwd_err := os.get_working_directory(allocator)
+	if cwd_err != nil { cwd = "." }
+	search_dir := cwd
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--index" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir publish: --index requires a URL")
+				os.exit(1)
+			}
+			index_url = args[i + 1]
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir publish: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir publish [--index <url>] [path]")
+			os.exit(1)
+		} else {
+			search_dir = arg
+			i += 1
+		}
+	}
+
+	// Find credentials
+	pub_cfg, cred_err := platform.find_credentials(allocator)
+	if cred_err != nil {
+		fmt.eprintfln("mimir publish: %s", platform.error_msg(cred_err))
+		os.exit(1)
+	}
+	if index_url != "" {
+		pub_cfg.index_url = index_url
+	}
+
+	// Find project directory
+	config_path, config_found := platform.find_config(search_dir, allocator)
+	project_dir := search_dir
+	if config_found {
+		project_dir = platform.parent_dir(config_path)
+	}
+
+	dist_dir := strings.concatenate({project_dir, "/dist"}, allocator)
+
+	// Auto-build if dist/ doesn't exist
+	if !os.is_directory(dist_dir) {
+		if !config_found {
+			fmt.eprintln("mimir publish: no dist/ directory and no mimir.toml found")
+			fmt.eprintln("  run 'mimir build' first")
+			os.exit(1)
+		}
+
+		fmt.println("  dist/ not found, building first...")
+		cfg, cfg_err := platform.read_build_config(config_path, allocator)
+		if cfg_err != nil {
+			fmt.eprintfln("mimir publish: %s", platform.error_msg(cfg_err))
+			os.exit(1)
+		}
+		val_err := platform.validate_build_config(&cfg)
+		if val_err != nil {
+			fmt.eprintfln("mimir publish: %s", platform.error_msg(val_err))
+			os.exit(1)
+		}
+		sources, src_err := platform.discover_sources(cfg.project_dir, allocator)
+		if src_err != nil {
+			fmt.eprintfln("mimir publish: %s", platform.error_msg(src_err))
+			os.exit(1)
+		}
+		python, py_ok := platform.find_managed_python("", allocator)
+		if !py_ok {
+			python, py_ok = platform.find_python("", allocator)
+		}
+		if !py_ok {
+			fmt.eprintln("mimir publish: python3 not found (needed for building)")
+			os.exit(1)
+		}
+		build_err := platform.build_all(&cfg, &sources, python, dist_dir, allocator)
+		if build_err != nil {
+			fmt.eprintfln("mimir publish: %s", platform.error_msg(build_err))
+			os.exit(1)
+		}
+	}
+
+	// Upload
+	pub_err := platform.publish_dist(&pub_cfg, dist_dir, allocator)
+	if pub_err != nil {
+		fmt.eprintfln("mimir publish: %s", platform.error_msg(pub_err))
+		os.exit(1)
+	}
+
+	fmt.println("mimir publish: done")
+}
+
 print_usage :: proc() {
 	fmt.println("mimir — Python development platform")
 	fmt.println()
@@ -1472,6 +1680,8 @@ print_usage :: proc() {
 	fmt.println("  repl              Start type-aware interactive Python REPL")
 	fmt.println("  lsp               Start LSP server for editor integration")
 	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
+	fmt.println("  build [path]      Build wheel + sdist package (output to dist/)")
+	fmt.println("  publish [path]    Publish package to PyPI (builds if needed)")
 	fmt.println("  python <cmd>      Manage Python versions (install, list, remove)")
 	fmt.println("  add <packages>    Add dependencies to mimir.toml, lock, and install")
 	fmt.println("  remove <packages> Remove dependencies from mimir.toml and re-lock")
