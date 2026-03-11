@@ -16,6 +16,7 @@ import "lint"
 import "security"
 import "concurrency"
 import "perf"
+import "lsp"
 
 main :: proc() {
 	args := os.args
@@ -49,6 +50,8 @@ main :: proc() {
 		cmd_test(args[2:])
 	case "repl":
 		cmd_repl(args[2:])
+	case "lsp":
+		cmd_lsp()
 	case "remove":
 		cmd_remove(args[2:])
 	case "update":
@@ -1221,6 +1224,31 @@ cmd_update :: proc(args: []string) {
 	}
 }
 
+cmd_lsp :: proc() {
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	server := lsp.init_server(&bridge, arena.allocator)
+	lsp.run_server(&server)
+}
+
 cmd_repl :: proc(args: []string) {
 	// Start parser bridge
 	bridge, bridge_err := parser.bridge_start()
@@ -1261,6 +1289,7 @@ print_usage :: proc() {
 	fmt.println("  perf [path]       Detect Python performance anti-patterns (default: \".\")")
 	fmt.println("  test [path]       Run tests (discovers test_*.py and *_test.py files)")
 	fmt.println("  repl              Start type-aware interactive Python REPL")
+	fmt.println("  lsp               Start LSP server for editor integration")
 	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
 	fmt.println("  add <packages>    Add dependencies to mimir.toml, lock, and install")
 	fmt.println("  remove <packages> Remove dependencies from mimir.toml and re-lock")
