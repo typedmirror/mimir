@@ -57,13 +57,16 @@ run :: proc(config: Run_Config, allocator: mem.Allocator) -> int {
 		py_version = _extract_version(metadata.python_version)
 	}
 
-	// 4. Find Python interpreter
-	python, py_ok := find_python(py_version, allocator)
+	// 4. Find Python interpreter (managed first, then PATH)
+	python, py_ok := find_managed_python(py_version, allocator)
+	if !py_ok {
+		python, py_ok = find_python(py_version, allocator)
+	}
 	if !py_ok {
 		if py_version != "" {
-			fmt.eprintfln("mimir run: python%s not found on PATH", py_version)
+			fmt.eprintfln("mimir run: python%s not found (managed or PATH)", py_version)
 		} else {
-			fmt.eprintfln("mimir run: python3 not found on PATH")
+			fmt.eprintfln("mimir run: python3 not found (managed or PATH)")
 		}
 		return 1
 	}

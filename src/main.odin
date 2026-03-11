@@ -59,6 +59,8 @@ main :: proc() {
 		cmd_remove(args[2:])
 	case "update":
 		cmd_update(args[2:])
+	case "python":
+		cmd_python(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -1377,6 +1379,84 @@ cmd_repl :: proc(args: []string) {
 	platform.run_repl(&state)
 }
 
+cmd_python :: proc(args: []string) {
+	if len(args) == 0 {
+		fmt.eprintln("mimir python: no subcommand specified")
+		fmt.eprintln("Usage: mimir python <install|list|remove> [args]")
+		os.exit(1)
+	}
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+	allocator := arena.allocator
+
+	switch args[0] {
+	case "install":
+		if len(args) < 2 {
+			fmt.eprintln("mimir python install: no version specified")
+			fmt.eprintln("Usage: mimir python install <version>")
+			fmt.eprintln("  Examples: mimir python install 3.12")
+			fmt.eprintln("            mimir python install 3.12.7")
+			os.exit(1)
+		}
+		err := platform.install_python(args[1], allocator)
+		if err != nil {
+			fmt.eprintfln("mimir python install: %s", platform.error_msg(err))
+			os.exit(1)
+		}
+	case "list":
+		show_available := false
+		for arg in args[1:] {
+			if arg == "--available" || arg == "-a" {
+				show_available = true
+			}
+		}
+		if show_available {
+			releases := platform.list_available_pythons()
+			fmt.println("Available Python versions:")
+			for r in releases {
+				fmt.printfln("  %s", r.version)
+			}
+		} else {
+			versions, err := platform.list_installed_pythons(allocator)
+			if err != nil {
+				fmt.eprintfln("mimir python list: %s", platform.error_msg(err))
+				os.exit(1)
+			}
+			if len(versions) == 0 {
+				fmt.println("No managed Python versions installed.")
+				fmt.println("  Run 'mimir python install <version>' to install one.")
+				fmt.println("  Run 'mimir python list --available' to see available versions.")
+				return
+			}
+			fmt.println("Installed Python versions:")
+			for v in versions {
+				fmt.printfln("  %-10s %s", v.version, v.path)
+			}
+		}
+	case "remove":
+		if len(args) < 2 {
+			fmt.eprintln("mimir python remove: no version specified")
+			fmt.eprintln("Usage: mimir python remove <version>")
+			os.exit(1)
+		}
+		err := platform.remove_python(args[1], allocator)
+		if err != nil {
+			fmt.eprintfln("mimir python remove: %s", platform.error_msg(err))
+			os.exit(1)
+		}
+	case:
+		fmt.eprintfln("mimir python: unknown subcommand '%s'", args[0])
+		fmt.eprintln("Usage: mimir python <install|list|remove>")
+		os.exit(1)
+	}
+}
+
 print_usage :: proc() {
 	fmt.println("mimir — Python development platform")
 	fmt.println()
@@ -1392,6 +1472,7 @@ print_usage :: proc() {
 	fmt.println("  repl              Start type-aware interactive Python REPL")
 	fmt.println("  lsp               Start LSP server for editor integration")
 	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
+	fmt.println("  python <cmd>      Manage Python versions (install, list, remove)")
 	fmt.println("  add <packages>    Add dependencies to mimir.toml, lock, and install")
 	fmt.println("  remove <packages> Remove dependencies from mimir.toml and re-lock")
 	fmt.println("  update            Re-resolve all dependencies to latest matching versions")
