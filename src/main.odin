@@ -18,6 +18,7 @@ import "concurrency"
 import "perf"
 import "safety"
 import "lsp"
+import "migration"
 
 main :: proc() {
 	args := os.args
@@ -63,6 +64,10 @@ main :: proc() {
 		cmd_build(args[2:])
 	case "publish":
 		cmd_publish(args[2:])
+	case "migrate":
+		cmd_migrate(args[2:])
+	case "import-config":
+		cmd_import_config(args[2:])
 	case "python":
 		cmd_python(args[2:])
 	case "version":
@@ -1688,7 +1693,177 @@ print_usage :: proc() {
 	fmt.println("  update            Re-resolve all dependencies to latest matching versions")
 	fmt.println("  lock              Resolve dependencies and generate mimir.lock")
 	fmt.println("  install           Install dependencies from mimir.lock")
+	fmt.println("  migrate [path]    Detect Python version migration opportunities")
+	fmt.println("  import-config <f> Import mypy configuration to mimir.toml format")
 	fmt.println("  conform [path]    Run conformance tests (default: tests/conformance/)")
 	fmt.println("  version           Print version")
 	fmt.println("  help              Show this message")
+}
+
+// ==================== migrate command ====================
+
+cmd_migrate :: proc(args: []string) {
+	config := migration.default_config()
+
+	target := "."
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--from" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir migrate: --from requires a version (e.g. 3.8)")
+				os.exit(1)
+			}
+			ver, ok := migration.parse_version(args[i + 1])
+			if !ok {
+				fmt.eprintfln("mimir migrate: invalid version '%s' (expected e.g. 3.8)", args[i + 1])
+				os.exit(1)
+			}
+			config.from_version = ver
+			i += 2
+		} else if arg == "--to" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir migrate: --to requires a version (e.g. 3.12)")
+				os.exit(1)
+			}
+			ver, ok := migration.parse_version(args[i + 1])
+			if !ok {
+				fmt.eprintfln("mimir migrate: invalid version '%s' (expected e.g. 3.12)", args[i + 1])
+				os.exit(1)
+			}
+			config.to_version = ver
+			i += 2
+		} else if arg == "--ignore" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir migrate: --ignore requires a code list (e.g. MIG001,MIG003)")
+				os.exit(1)
+			}
+			config.ignore = migration.parse_code_list(args[i + 1])
+			i += 2
+		} else if arg == "--select" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir migrate: --select requires a code list (e.g. MIG001,MIG002)")
+				os.exit(1)
+			}
+			config.select_only = migration.parse_code_list(args[i + 1])
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir migrate: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir migrate [--from <ver>] [--to <ver>] [--ignore <codes>] [--select <codes>] [path]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	fmt.printfln("Scanning for migration opportunities (Python %d.%d → %d.%d)...\n",
+		config.from_version.major, config.from_version.minor,
+		config.to_version.major, config.to_version.minor)
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir migrate: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir migrate: no Python files found in '%s'", target)
+		return
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		#partial switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	total_issues := 0
+	files_with_issues := 0
+	// Count per rule
+	rule_counts: [len(migration.ALL_RULES)]int
+
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			#partial switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir migrate: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, file, arena.allocator)
+
+		diagnostics := migration.analyze_migration(module, &bind_result, file, &config, arena.allocator)
+
+		if len(diagnostics) > 0 {
+			files_with_issues += 1
+			for d in diagnostics {
+				core.diagnostic_print(d)
+				total_issues += 1
+				// Count by rule
+				for idx := 0; idx < len(migration.ALL_RULES); idx += 1 {
+					if migration.ALL_RULES[idx].code == d.code {
+						rule_counts[idx] += 1
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Summary
+	fmt.println()
+	if total_issues == 0 {
+		fmt.printfln("No migration opportunities found (%d files scanned).", len(files))
+	} else {
+		fmt.println("Migration summary:")
+		for idx := 0; idx < len(migration.ALL_RULES); idx += 1 {
+			if rule_counts[idx] > 0 {
+				fmt.printfln("  %s %-28s %d occurrences",
+					migration.ALL_RULES[idx].code,
+					migration.ALL_RULES[idx].name,
+					rule_counts[idx])
+			}
+		}
+		fmt.printfln("  Total: %d migration opportunities across %d files", total_issues, files_with_issues)
+	}
+}
+
+// ==================== import-config command ====================
+
+cmd_import_config :: proc(args: []string) {
+	if len(args) == 0 {
+		fmt.eprintln("mimir import-config: requires a config file path")
+		fmt.eprintln("Usage: mimir import-config <mypy.ini|setup.cfg|pyproject.toml>")
+		os.exit(1)
+	}
+
+	config_path := args[0]
+
+	fmt.printfln("Reading %s...\n", config_path)
+
+	result, ok := migration.import_mypy_config(config_path, context.temp_allocator)
+	if !ok {
+		fmt.eprintfln("mimir import-config: could not read '%s'", config_path)
+		os.exit(1)
+	}
+
+	migration.print_import_result(&result)
 }
