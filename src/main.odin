@@ -15,6 +15,7 @@ import "platform"
 import "lint"
 import "security"
 import "concurrency"
+import "perf"
 
 main :: proc() {
 	args := os.args
@@ -42,6 +43,8 @@ main :: proc() {
 		cmd_audit(args[2:])
 	case "lint":
 		cmd_lint(args[2:])
+	case "perf":
+		cmd_perf(args[2:])
 	case "test":
 		cmd_test(args[2:])
 	case "remove":
@@ -803,6 +806,118 @@ cmd_lint :: proc(args: []string) {
 	}
 }
 
+cmd_perf :: proc(args: []string) {
+	config := perf.default_config()
+
+	// Parse flags
+	target := "."
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--ignore" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir perf: --ignore requires a code list (e.g. PERF001,PERF003)")
+				os.exit(1)
+			}
+			config.ignore = perf.parse_code_list(args[i + 1])
+			i += 2
+		} else if arg == "--select" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir perf: --select requires a code list (e.g. PERF001,PERF002)")
+				os.exit(1)
+			}
+			config.select_only = perf.parse_code_list(args[i + 1])
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir perf: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir perf [--ignore <codes>] [--select <codes>] [path]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	// Find Python files
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir perf: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir perf: no Python files found in '%s'", target)
+		return
+	}
+
+	// Start parser bridge
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	// Arena
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	total_issues := 0
+	files_with_issues := 0
+
+	for file in files {
+		// Read source
+		source_data, read_err := os.read_entire_file(file, arena.allocator)
+		if read_err != nil {
+			fmt.eprintfln("mimir perf: cannot read '%s': %v", file, read_err)
+			continue
+		}
+		source := string(source_data)
+
+		// Parse
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir perf: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		// Bind
+		bind_result := binder.bind(module, file, arena.allocator)
+
+		// Performance analysis
+		diagnostics := perf.analyze_performance(module, &bind_result, source, file, &config, arena.allocator)
+
+		if len(diagnostics) > 0 {
+			files_with_issues += 1
+			total_issues += len(diagnostics)
+			for d in diagnostics {
+				core.diagnostic_print(d)
+			}
+		}
+	}
+
+	if total_issues > 0 {
+		fmt.printfln("mimir perf: %d performance issue(s) in %d file(s)", total_issues, files_with_issues)
+		os.exit(1)
+	} else {
+		fmt.printfln("mimir perf: %d file(s) clean", len(files))
+	}
+}
+
 cmd_audit :: proc(args: []string) {
 	config := security.default_config()
 
@@ -1113,6 +1228,7 @@ print_usage :: proc() {
 	fmt.println("  check <path>      Analyze Python source files")
 	fmt.println("  audit [path]      Scan Python files for security vulnerabilities (default: \".\")")
 	fmt.println("  lint [path]       Lint Python files for common issues (default: \".\")")
+	fmt.println("  perf [path]       Detect Python performance anti-patterns (default: \".\")")
 	fmt.println("  test [path]       Run tests (discovers test_*.py and *_test.py files)")
 	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
 	fmt.println("  add <packages>    Add dependencies to mimir.toml, lock, and install")
