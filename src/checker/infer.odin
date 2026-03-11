@@ -17,6 +17,7 @@ Infer_Context :: struct {
 	diagnostics:    ^[dynamic]core.Diagnostic,
 	file_path:      string,
 	declared_types: ^map[binder.Symbol_ID]Type_ID,
+	current_class:  Type_ID,
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -410,6 +411,20 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 	// Check for typing special forms before normal dispatch
 	if typing_result, handled := try_typing_call(e, ctx); handled {
 		return typing_result
+	}
+
+	// super() → Instance of first base class in current class context
+	if name_expr, ok := e.func.(^parser.Name_Expr); ok && name_expr.id == "super" && len(e.args) == 0 {
+		if ctx.current_class != INVALID_TYPE {
+			cls := get_type(ctx.reg, ctx.current_class)
+			#partial switch cls_info in cls.info {
+			case Class_Type:
+				if len(cls_info.bases) > 0 {
+					return make_instance_type(ctx.reg, cls_info.bases[0])
+				}
+			}
+		}
+		return TYPE_OBJECT
 	}
 
 	func_type := infer_expr(e.func, ctx)

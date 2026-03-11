@@ -150,6 +150,24 @@ check_scope :: proc(
 		}
 	}
 
+	// Determine enclosing class for super() support
+	current_class := INVALID_TYPE
+	if scope != nil && scope.kind == .Function {
+		parent := binder.result_get_scope(bind_result, scope.parent_id)
+		if parent != nil && parent.kind == .Class {
+			for _, ct_id in reg.class_types {
+				ct := get_type(reg, ct_id)
+				#partial switch cls_info in ct.info {
+				case Class_Type:
+					if cls_info.scope_id == parent.id {
+						current_class = ct_id
+					}
+				}
+				if current_class != INVALID_TYPE { break }
+			}
+		}
+	}
+
 	// Collect return types for function return checking
 	return_types := make([dynamic]Type_ID, 0, 8, reg.allocator)
 
@@ -201,6 +219,7 @@ check_scope :: proc(
 			diagnostics    = &result.diagnostics,
 			file_path      = file_path,
 			declared_types = &declared_types,
+			current_class  = current_class,
 		}
 
 		// Process each statement in the block
@@ -572,6 +591,17 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		}
 	}
 
+	// Pre-register placeholder Class_Type so self-referential forward refs resolve
+	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
+	class_type_id := register_type(ctx.reg, Class_Type{
+		name      = cd.name,
+		symbol_id = sym_id,
+		scope_id  = scope_id,
+	})
+	if sym_id != binder.INVALID_SYMBOL {
+		ctx.reg.class_types[sym_id] = class_type_id
+	}
+
 	// Resolve base classes, detecting Generic[T] for type_params
 	bases_dyn := make([dynamic]Type_ID, 0, len(cd.bases), ctx.reg.allocator)
 	type_params_dyn := make([dynamic]Type_ID, 0, 4, ctx.reg.allocator)
@@ -676,19 +706,13 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		attrs["__eq__"] = make_callable_type(ctx.reg, eq_params, TYPE_BOOL)
 	}
 
-	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
-	class_type_id := register_type(ctx.reg, Class_Type{
-		name        = cd.name,
-		symbol_id   = sym_id,
-		scope_id    = scope_id,
-		bases       = bases,
-		attrs       = attrs,
-		type_params = type_params,
-	})
-
-	// Register in class_types cache for annotation resolution
-	if sym_id != binder.INVALID_SYMBOL {
-		ctx.reg.class_types[sym_id] = class_type_id
+	// Update placeholder with actual class data
+	ct := get_type(ctx.reg, class_type_id)
+	#partial switch &info in ct.info {
+	case Class_Type:
+		info.bases = bases
+		info.attrs = attrs
+		info.type_params = type_params
 	}
 
 	return class_type_id
