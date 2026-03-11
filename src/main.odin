@@ -47,6 +47,8 @@ main :: proc() {
 		cmd_perf(args[2:])
 	case "test":
 		cmd_test(args[2:])
+	case "repl":
+		cmd_repl(args[2:])
 	case "remove":
 		cmd_remove(args[2:])
 	case "update":
@@ -1219,6 +1221,34 @@ cmd_update :: proc(args: []string) {
 	}
 }
 
+cmd_repl :: proc(args: []string) {
+	// Start parser bridge
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	// Initialize arena
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	// Initialize and run REPL
+	state := platform.init_repl(&bridge, arena.allocator)
+	platform.run_repl(&state)
+}
+
 print_usage :: proc() {
 	fmt.println("mimir — Python development platform")
 	fmt.println()
@@ -1230,6 +1260,7 @@ print_usage :: proc() {
 	fmt.println("  lint [path]       Lint Python files for common issues (default: \".\")")
 	fmt.println("  perf [path]       Detect Python performance anti-patterns (default: \".\")")
 	fmt.println("  test [path]       Run tests (discovers test_*.py and *_test.py files)")
+	fmt.println("  repl              Start type-aware interactive Python REPL")
 	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
 	fmt.println("  add <packages>    Add dependencies to mimir.toml, lock, and install")
 	fmt.println("  remove <packages> Remove dependencies from mimir.toml and re-lock")
