@@ -54,10 +54,14 @@ scan_file :: proc(
 	build_import_map(&ctx)
 	run_all_rules(&ctx)
 
-	// Taint analysis: run on each CFG scope when flow results are available
+	// Taint analysis: two-pass when flow results are available
+	// Pass 1: build function taint summaries (cross-function propagation)
+	// Pass 2: analyze with summaries available at call sites
 	if flow_result != nil {
+		summaries := taint.build_summaries(flow_result.cfgs[:], bind_result, ctx.import_map, allocator)
+
 		for &cfg in flow_result.cfgs {
-			violations := taint.analyze_taint(&cfg, bind_result, ctx.import_map, allocator)
+			violations := taint.analyze_taint(&cfg, bind_result, ctx.import_map, allocator, summaries)
 			for v in violations {
 				if is_rule_enabled(v.rule_code, config) {
 					append(&ctx.diagnostics, core.Diagnostic{

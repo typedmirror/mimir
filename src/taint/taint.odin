@@ -29,6 +29,7 @@ Taint_Context :: struct {
 	import_map:  map[string]string,
 	envs:        []Taint_Env,
 	violations:  [dynamic]Taint_Violation,
+	summaries:   map[string]Taint_Summary,
 	allocator:   mem.Allocator,
 }
 
@@ -47,6 +48,7 @@ analyze_taint :: proc(
 	bind_result: ^binder.Bind_Result,
 	import_map: map[string]string,
 	allocator: mem.Allocator,
+	summaries: map[string]Taint_Summary,
 ) -> []Taint_Violation {
 	num_blocks := len(cfg.blocks)
 
@@ -56,6 +58,7 @@ analyze_taint :: proc(
 		import_map  = import_map,
 		envs        = make([]Taint_Env, num_blocks, allocator),
 		violations  = make([dynamic]Taint_Violation, 0, 8, allocator),
+		summaries   = summaries,
 		allocator   = allocator,
 	}
 

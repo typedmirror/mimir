@@ -37,6 +37,26 @@ expr_taint :: proc(ctx: ^Taint_Context, env: ^Taint_Env, expr: parser.Expr) -> T
 		if attr, ok := e.func.(^parser.Attribute_Expr); ok {
 			return expr_taint(ctx, env, attr.value)
 		}
+		// Cross-function summary lookup for direct Name_Expr calls
+		if ctx.summaries != nil {
+			if name, is_name := e.func.(^parser.Name_Expr); is_name {
+				if summary, found := ctx.summaries[name.id]; found {
+					if summary.always_tainted {
+						return {label = .Untrusted, source_loc = summary.source_loc, source_desc = summary.source_desc}
+					}
+					if summary.propagates {
+						for arg in e.args {
+							arg_info := expr_taint(ctx, env, arg)
+							if arg_info.label == .Untrusted {
+								return arg_info
+							}
+						}
+						return {label = .Trusted}
+					}
+					return {label = .Trusted}  // known function, no taint propagation
+				}
+			}
+		}
 		// Unknown function call — conservative
 		return {label = .Unknown}
 
