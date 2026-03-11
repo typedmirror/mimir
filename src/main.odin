@@ -883,8 +883,11 @@ cmd_audit :: proc(args: []string) {
 		// Bind (needed for import resolution)
 		bind_result := binder.bind(module, file, arena.allocator)
 
-		// Security scan
-		diagnostics := security.scan_file(module, &bind_result, source, file, &config, arena.allocator)
+		// Flow analysis (needed for taint tracking)
+		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+
+		// Security scan (with taint analysis via flow_result)
+		diagnostics := security.scan_file(module, &bind_result, source, file, &config, arena.allocator, &flow_result)
 
 		if len(diagnostics) > 0 {
 			files_with_issues += 1

@@ -6,6 +6,8 @@ import "core:fmt"
 import parser "mimir:parser"
 import binder "mimir:binder"
 import core "mimir:core"
+import flow "mimir:flow"
+import taint "mimir:taint"
 
 Security_Config :: struct {
 	ignore:      []string,  // codes to skip, e.g. ["SEC003"]
@@ -35,6 +37,7 @@ scan_file :: proc(
 	file_path: string,
 	config: ^Security_Config,
 	allocator: mem.Allocator,
+	flow_result: ^flow.Flow_Result = nil,
 ) -> []core.Diagnostic {
 	ctx := Security_Context{
 		source      = source,
@@ -50,6 +53,29 @@ scan_file :: proc(
 
 	build_import_map(&ctx)
 	run_all_rules(&ctx)
+
+	// Taint analysis: run on each CFG scope when flow results are available
+	if flow_result != nil {
+		for &cfg in flow_result.cfgs {
+			violations := taint.analyze_taint(&cfg, bind_result, ctx.import_map, allocator)
+			for v in violations {
+				if is_rule_enabled(v.rule_code, config) {
+					append(&ctx.diagnostics, core.Diagnostic{
+						severity = .Security,
+						location = core.Location{
+							file   = file_path,
+							line   = int(v.sink_loc.line),
+							column = int(v.sink_loc.col),
+						},
+						what = fmt.tprintf("tainted data flows to %s", v.sink_desc),
+						why  = fmt.tprintf("data from %s (line %d) reaches %s without sanitization", v.source_desc, v.source_loc.line, v.sink_desc),
+						fix  = "sanitize the input before passing it to a dangerous function, or use a safe alternative",
+						code = v.rule_code,
+					})
+				}
+			}
+		}
+	}
 
 	return ctx.diagnostics[:]
 }
