@@ -2384,6 +2384,9 @@ cmd_compile_gpu :: proc(args: []string) {
 	backend_name := "wgsl"
 	output_dir := ""
 	emit_all := false
+	fuse_flag := false
+	plan_flag := false
+	backward_flag := false
 
 	i := 0
 	for i < len(args) {
@@ -2408,9 +2411,18 @@ cmd_compile_gpu :: proc(args: []string) {
 		} else if arg == "-v" || arg == "--verbose" {
 			verbose = true
 			i += 1
+		} else if arg == "--fuse" {
+			fuse_flag = true
+			i += 1
+		} else if arg == "--plan" {
+			plan_flag = true
+			i += 1
+		} else if arg == "--backward" {
+			backward_flag = true
+			i += 1
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("mimir compile-gpu: unknown flag '%s'", arg)
-			fmt.eprintln("Usage: mimir compile-gpu [--backend <wgsl|msl|spirv|ptx|all>] [--output <dir>] [-v] [path]")
+			fmt.eprintln("Usage: mimir compile-gpu [--backend <wgsl|msl|spirv|ptx|all>] [--output <dir>] [-v] [--fuse] [--plan] [--backward] [path]")
 			os.exit(1)
 		} else {
 			target = arg
@@ -2495,39 +2507,69 @@ cmd_compile_gpu :: proc(args: []string) {
 		for func in gpu_funcs {
 			graph := gpu.extract_graph(func, &bind_result, &type_ctx, arena.allocator)
 
-			for be in backends_to_emit {
-				data, is_binary := gpu.emit_kernel(&graph, &type_ctx, be, arena.allocator)
-				if data == nil { continue }
-
-				ext := gpu.backend_extension(be)
-
-				if output_dir != "" {
-					// Write to file
-					out_path := fmt.tprintf("%s/%s.%s", output_dir, graph.func_name, ext)
-					write_err := os.write_entire_file(out_path, data)
-					if write_err != nil {
-						fmt.eprintfln("mimir compile-gpu: error writing '%s': %v", out_path, write_err)
-						continue
-					}
-					if verbose {
-						fmt.printfln("  wrote %s (%d bytes)", out_path, len(data))
-					}
-				} else {
-					// Print to stdout
-					if verbose {
-						elem, mm, red, _ := gpu.count_ops(&graph)
-						fmt.printfln("// kernel_%s (%d nodes: %d elem, %d matmul, %d reduction) [%s]",
-							graph.func_name, len(graph.nodes), elem, mm, red, ext)
-					}
-					if is_binary {
-						fmt.printfln("// SPIR-V binary: %d bytes", len(data))
-					} else {
-						text := string(data)
-						fmt.print(text)
-					}
-					fmt.println()
+			// Phase 27: Fusion
+			if fuse_flag {
+				fusion := gpu.fuse_kernels(&graph, arena.allocator)
+				if verbose {
+					gpu.print_fusion(&fusion)
 				}
-				total_kernels += 1
+
+				// Memory plan (with fusion)
+				if plan_flag {
+					mem_plan := gpu.plan_memory(&graph, &fusion, &type_ctx, arena.allocator)
+					gpu.print_memory_plan(&mem_plan)
+				}
+
+				// Build node→group map for subgraph extraction
+				node_group_map := make(map[gpu.GPU_Node_ID]int, len(graph.nodes), arena.allocator)
+				for &grp in fusion.groups {
+					for nid in grp.node_ids {
+						node_group_map[nid] = grp.id
+					}
+				}
+
+				// Emit each fusion group as a separate kernel
+				for group_idx in fusion.order {
+					grp := &fusion.groups[group_idx]
+					sub := gpu.extract_subgraph(&graph, grp, &node_group_map, arena.allocator)
+
+					for be in backends_to_emit {
+						data, is_binary := gpu.emit_kernel(&sub, &type_ctx, be, arena.allocator)
+						if data == nil { continue }
+						ext := gpu.backend_extension(be)
+						emit_gpu_output(output_dir, fmt.tprintf("%s_%d", graph.func_name, grp.id), ext, data, is_binary, verbose, &graph, be)
+						total_kernels += 1
+					}
+				}
+			} else {
+				// No fusion — emit single kernel (Phase 26 behavior)
+				if plan_flag {
+					mem_plan := gpu.plan_memory(&graph, nil, &type_ctx, arena.allocator)
+					gpu.print_memory_plan(&mem_plan)
+				}
+
+				for be in backends_to_emit {
+					data, is_binary := gpu.emit_kernel(&graph, &type_ctx, be, arena.allocator)
+					if data == nil { continue }
+					ext := gpu.backend_extension(be)
+					emit_gpu_output(output_dir, graph.func_name, ext, data, is_binary, verbose, &graph, be)
+					total_kernels += 1
+				}
+			}
+
+			// Phase 27: Backward pass generation
+			if backward_flag {
+				backward := gpu.generate_backward(&graph, &type_ctx, arena.allocator)
+				if verbose {
+					fmt.printfln("  Backward: %d nodes (forward: %d)", len(backward.nodes), len(graph.nodes))
+				}
+				for be in backends_to_emit {
+					data, is_binary := gpu.emit_kernel(&backward, &type_ctx, be, arena.allocator)
+					if data == nil { continue }
+					ext := gpu.backend_extension(be)
+					emit_gpu_output(output_dir, backward.func_name, ext, data, is_binary, verbose, &backward, be)
+					total_kernels += 1
+				}
 			}
 		}
 	}
@@ -2536,6 +2578,43 @@ cmd_compile_gpu :: proc(args: []string) {
 		fmt.printfln("mimir compile-gpu: emitted %d kernel(s)", total_kernels)
 	} else {
 		fmt.printfln("mimir compile-gpu: no @gpu functions found in %d file(s)", len(files))
+	}
+}
+
+// Helper: emit GPU kernel output (file or stdout).
+emit_gpu_output :: proc(
+	output_dir: string,
+	name: string,
+	ext: string,
+	data: []u8,
+	is_binary: bool,
+	verbose: bool,
+	graph: ^gpu.Compute_Graph,
+	be: gpu.Emit_Backend,
+) {
+	if output_dir != "" {
+		out_path := fmt.tprintf("%s/%s.%s", output_dir, name, ext)
+		write_err := os.write_entire_file(out_path, data)
+		if write_err != nil {
+			fmt.eprintfln("mimir compile-gpu: error writing '%s': %v", out_path, write_err)
+			return
+		}
+		if verbose {
+			fmt.printfln("  wrote %s (%d bytes)", out_path, len(data))
+		}
+	} else {
+		if verbose {
+			elem, mm, red, _ := gpu.count_ops(graph)
+			fmt.printfln("// kernel_%s (%d nodes: %d elem, %d matmul, %d reduction) [%s]",
+				name, len(graph.nodes), elem, mm, red, ext)
+		}
+		if is_binary {
+			fmt.printfln("// SPIR-V binary: %d bytes", len(data))
+		} else {
+			text := string(data)
+			fmt.print(text)
+		}
+		fmt.println()
 	}
 }
 

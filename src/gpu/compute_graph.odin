@@ -427,13 +427,27 @@ propagate_shapes :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
 		if len(node.inputs) == 0 { continue }
 
 		switch node.kind {
-		// Elementwise: same shape in → same shape out
+		// Elementwise: broadcast shapes for binary ops, copy for unary
 		case .Add, .Sub, .Mul, .Div, .Neg, .Abs,
 		     .Equal, .Less, .Greater, .LessEq, .GreaterEq,
 		     .ReLU, .Sigmoid, .Tanh:
 			first := get_node(graph, node.inputs[0])
 			if first != nil && first.output_shape != nil {
-				node.output_shape = first.output_shape
+				if len(node.inputs) >= 2 {
+					second := get_node(graph, node.inputs[1])
+					if second != nil && second.output_shape != nil {
+						bcast, ok := broadcast_result_shape(first.output_shape, second.output_shape, ctx.allocator)
+						if ok {
+							node.output_shape = bcast
+						} else {
+							node.output_shape = first.output_shape
+						}
+					} else {
+						node.output_shape = first.output_shape
+					}
+				} else {
+					node.output_shape = first.output_shape
+				}
 				if node.output_type == checker.INVALID_TYPE {
 					node.output_type = first.output_type
 				}
@@ -523,9 +537,14 @@ propagate_shapes :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
 			// Already set
 
 		case .Reshape:
-			// Phase 27 handles reshape validation
 			first := get_node(graph, node.inputs[0])
 			if first != nil {
+				if first.output_shape != nil && node.output_shape != nil {
+					inferred, ok := reshape_infer(first.output_shape, node.output_shape, ctx.allocator)
+					if ok {
+						node.output_shape = inferred
+					}
+				}
 				if node.output_type == checker.INVALID_TYPE {
 					node.output_type = first.output_type
 				}

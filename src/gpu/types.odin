@@ -139,6 +139,96 @@ expr_from_name :: proc(n: ^parser.Name_Expr) -> parser.Expr {
 	return parser.Expr(n)
 }
 
+// Product of all dimensions. Returns -1 if any dim is symbolic.
+shape_product :: proc(shape: []int) -> int {
+	if shape == nil { return 0 }
+	prod := 1
+	for d in shape {
+		if d < 0 { return -1 }
+		prod *= d
+	}
+	return prod
+}
+
+// Numpy-style broadcasting: right-align shapes, take max dim where compatible.
+broadcast_result_shape :: proc(a, b: []int, allocator: mem.Allocator) -> ([]int, bool) {
+	if a == nil || b == nil { return nil, false }
+	max_rank := max(len(a), len(b))
+	result := make([]int, max_rank, allocator)
+	for i := 0; i < max_rank; i += 1 {
+		ai := a[len(a) - 1 - i] if i < len(a) else 1
+		bi := b[len(b) - 1 - i] if i < len(b) else 1
+		if ai == bi {
+			result[max_rank - 1 - i] = ai
+		} else if ai == 1 || ai == -1 {
+			result[max_rank - 1 - i] = bi
+		} else if bi == 1 || bi == -1 {
+			result[max_rank - 1 - i] = ai
+		} else {
+			return nil, false // incompatible
+		}
+	}
+	return result, true
+}
+
+// Resolve -1 wildcard in target shape. product(from) == product(to).
+reshape_infer :: proc(from_shape, to_shape: []int, allocator: mem.Allocator) -> ([]int, bool) {
+	if from_shape == nil || to_shape == nil { return nil, false }
+	from_prod := shape_product(from_shape)
+	if from_prod <= 0 { return to_shape, true } // symbolic — can't infer
+
+	neg_idx := -1
+	known_prod := 1
+	for d, i in to_shape {
+		if d == -1 {
+			if neg_idx >= 0 { return nil, false } // multiple -1s
+			neg_idx = i
+		} else if d <= 0 {
+			return nil, false // invalid dim
+		} else {
+			known_prod *= d
+		}
+	}
+
+	if neg_idx < 0 {
+		// No wildcard — just check products match
+		if known_prod != from_prod { return nil, false }
+		return to_shape, true
+	}
+
+	// Infer the -1 dim
+	if from_prod % known_prod != 0 { return nil, false }
+	result := make([]int, len(to_shape), allocator)
+	copy(result, to_shape)
+	result[neg_idx] = from_prod / known_prod
+	return result, true
+}
+
+// Map a type to byte width: float32→4, float16→2, bfloat16→2, int32→4, int64→8.
+element_byte_size :: proc(type_id: checker.Type_ID, ctx: ^GPU_Type_Context) -> int {
+	if type_id == ctx.float16_id || type_id == ctx.bfloat16_id { return 2 }
+	if type_id == ctx.float32_id { return 4 }
+	if type_id == ctx.int32_id { return 4 }
+	if type_id == ctx.int64_id { return 8 }
+	if type_id == checker.TYPE_FLOAT { return 4 }
+	if type_id == checker.TYPE_INT { return 4 }
+	if type_id == checker.TYPE_BOOL { return 1 }
+	// Resolve tensor element type
+	t := checker.get_type(ctx.reg, type_id)
+	#partial switch info in t.info {
+	case checker.Tensor_Type:
+		return element_byte_size(info.element_type, ctx)
+	}
+	return 4 // default float32
+}
+
+// Total byte size for a shaped buffer.
+shape_byte_size :: proc(shape: []int, element_bytes: int) -> int {
+	prod := shape_product(shape)
+	if prod < 0 { return -1 }
+	return prod * element_bytes
+}
+
 // Check if two shapes are compatible for elementwise operations.
 shape_compatible :: proc(a: []int, b: []int) -> bool {
 	if len(a) != len(b) { return false }
