@@ -21,6 +21,7 @@ import "lsp"
 import "migration"
 import "codegen"
 import "gpu"
+import "wasm"
 
 main :: proc() {
 	args := os.args
@@ -82,6 +83,8 @@ main :: proc() {
 		cmd_gpu(args[2:])
 	case "compile-gpu":
 		cmd_compile_gpu(args[2:])
+	case "compile-wasm":
+		cmd_compile_wasm(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -1721,6 +1724,7 @@ print_usage :: proc() {
 	fmt.println("  generate-tests <path>      Generate hypothesis test skeletons")
 	fmt.println("  gpu [path]        Validate @gpu functions and extract compute graphs")
 	fmt.println("  compile-gpu [path] Emit GPU compute shaders (--backend wgsl|msl|spirv|ptx|all)")
+	fmt.println("  compile-wasm [path] Compile @wasm functions to WebAssembly (--format wat|wasm|all)")
 	fmt.println("  conform [path]    Run conformance tests (default: tests/conformance/)")
 	fmt.println("  version           Print version")
 	fmt.println("  help              Show this message")
@@ -2615,6 +2619,179 @@ emit_gpu_output :: proc(
 			fmt.print(text)
 		}
 		fmt.println()
+	}
+}
+
+// ==================== compile-wasm command ====================
+
+cmd_compile_wasm :: proc(args: []string) {
+	config := wasm.default_wasm_config()
+
+	target := "."
+	verbose := false
+	format_name := "wat"
+	output_dir := ""
+	emit_all := false
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--format" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir compile-wasm: --format requires a value (wat|wasm|all)")
+				os.exit(1)
+			}
+			format_name = args[i + 1]
+			if format_name == "all" {
+				emit_all = true
+			}
+			i += 2
+		} else if arg == "--output" || arg == "-o" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir compile-wasm: --output requires a directory path")
+				os.exit(1)
+			}
+			output_dir = args[i + 1]
+			i += 2
+		} else if arg == "-v" || arg == "--verbose" {
+			verbose = true
+			i += 1
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir compile-wasm: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir compile-wasm [--format <wat|wasm|all>] [--output <dir>] [-v] [path]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	// Validate format
+	if !emit_all && format_name != "wat" && format_name != "wasm" {
+		fmt.eprintfln("mimir compile-wasm: unknown format '%s'", format_name)
+		fmt.eprintln("Valid formats: wat, wasm, all")
+		os.exit(1)
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir compile-wasm: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir compile-wasm: no Python files found in '%s'", target)
+		return
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		#partial switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	type_ctx := wasm.init_wasm_types(arena.allocator)
+	total_modules := 0
+	has_errors := false
+
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			#partial switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir compile-wasm: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, file, arena.allocator)
+		diags, wasm_funcs := wasm.validate_file(module, &bind_result, &type_ctx, file, &config, arena.allocator)
+
+		// Print restriction diagnostics
+		for d in diags {
+			core.diagnostic_print(d)
+			if d.severity == .Error { has_errors = true }
+		}
+
+		if has_errors || len(wasm_funcs) == 0 { continue }
+
+		// Extract WASM module
+		wasm_module := wasm.extract_wasm_module(module, wasm_funcs, &bind_result, &type_ctx, arena.allocator)
+
+		if verbose {
+			fmt.printfln("  %s: %d @wasm function(s)", file, len(wasm_funcs))
+			for &func in wasm_module.functions {
+				fmt.printfln("    $%s: %d params, %d locals, %d instructions",
+					func.name, len(func.type.params), len(func.locals), len(func.body))
+			}
+		}
+
+		// Emit WAT
+		if format_name == "wat" || emit_all {
+			wat_output := wasm.emit_wat(&wasm_module, arena.allocator)
+			if output_dir != "" {
+				stem := file_stem(file)
+				out_path := fmt.tprintf("%s/%s.wat", output_dir, stem)
+				write_err := os.write_entire_file(out_path, transmute([]u8)wat_output)
+				if write_err != nil {
+					fmt.eprintfln("mimir compile-wasm: error writing '%s': %v", out_path, write_err)
+					continue
+				}
+				if verbose {
+					fmt.printfln("  wrote %s (%d bytes)", out_path, len(wat_output))
+				}
+			} else {
+				fmt.print(wat_output)
+			}
+			total_modules += 1
+		}
+
+		// Emit WASM binary
+		if format_name == "wasm" || emit_all {
+			wasm_bytes := wasm.emit_wasm_binary(&wasm_module, arena.allocator)
+			if output_dir != "" {
+				stem := file_stem(file)
+				out_path := fmt.tprintf("%s/%s.wasm", output_dir, stem)
+				write_err := os.write_entire_file(out_path, wasm_bytes)
+				if write_err != nil {
+					fmt.eprintfln("mimir compile-wasm: error writing '%s': %v", out_path, write_err)
+					continue
+				}
+				if verbose {
+					fmt.printfln("  wrote %s (%d bytes)", out_path, len(wasm_bytes))
+				}
+			} else {
+				// Binary to stdout: print size info
+				fmt.printfln("// WASM binary: %d bytes (magic: %02x %02x %02x %02x)",
+					len(wasm_bytes),
+					wasm_bytes[0] if len(wasm_bytes) > 0 else 0,
+					wasm_bytes[1] if len(wasm_bytes) > 1 else 0,
+					wasm_bytes[2] if len(wasm_bytes) > 2 else 0,
+					wasm_bytes[3] if len(wasm_bytes) > 3 else 0)
+			}
+			total_modules += 1
+		}
+	}
+
+	if total_modules > 0 {
+		fmt.printfln("mimir compile-wasm: emitted %d module(s)", total_modules)
+	} else if !has_errors {
+		fmt.printfln("mimir compile-wasm: no @wasm functions found in %d file(s)", len(files))
 	}
 }
 
