@@ -54,6 +54,7 @@ Type_Info :: union {
 	TypeVar_Type,
 	TypedDict_Type,
 	Protocol_Type,
+	Tensor_Type,
 }
 
 Primitive_Kind :: enum u8 {
@@ -130,6 +131,12 @@ Protocol_Type :: struct {
 	attrs:   map[string]Type_ID,
 }
 
+Tensor_Type :: struct {
+	element_type: Type_ID,     // float32, float16, int32, etc.
+	shape:        []int,       // concrete dimensions (-1 = symbolic/unknown)
+	ndim:         int,         // number of dimensions (len(shape), cached)
+}
+
 // ==================== Type Environment ====================
 
 Type_Env :: struct {
@@ -147,6 +154,7 @@ Type_Registry :: struct {
 	class_types:    map[binder.Symbol_ID]Type_ID,
 	instance_cache: map[Type_ID]Type_ID,
 	spec_cache:     map[u64]Type_ID,
+	tensor_cache:   map[u64]Type_ID,
 	allocator:      mem.Allocator,
 }
 
@@ -161,6 +169,7 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.class_types = make(map[binder.Symbol_ID]Type_ID, 16, allocator)
 	reg.instance_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.spec_cache = make(map[u64]Type_ID, 8, allocator)
+	reg.tensor_cache = make(map[u64]Type_ID, 8, allocator)
 
 	// Slot 0: INVALID
 	append(&reg.types, Type{id = INVALID_TYPE})
@@ -310,6 +319,31 @@ make_instance_type :: proc(reg: ^Type_Registry, class_type: Type_ID) -> Type_ID 
 
 make_typeddict_type :: proc(reg: ^Type_Registry, name: string, fields: map[string]Type_ID, total: bool) -> Type_ID {
 	return register_type(reg, TypedDict_Type{name = name, fields = fields, total = total})
+}
+
+make_tensor_type :: proc(reg: ^Type_Registry, element_type: Type_ID, shape: []int) -> Type_ID {
+	// Hash: element_type + shape dims
+	h: u64 = u64(element_type) * 31
+	for d in shape {
+		h = h * 31 + u64(u32(d))
+	}
+	if cached, ok := reg.tensor_cache[h]; ok {
+		ct := get_type(reg, cached)
+		if tt, is_tensor := ct.info.(Tensor_Type); is_tensor {
+			if tt.element_type == element_type && len(tt.shape) == len(shape) {
+				match := true
+				for i := 0; i < len(shape); i += 1 {
+					if tt.shape[i] != shape[i] { match = false; break }
+				}
+				if match { return cached }
+			}
+		}
+	}
+	s := make([]int, len(shape), reg.allocator)
+	copy(s, shape)
+	id := register_type(reg, Tensor_Type{element_type = element_type, shape = s, ndim = len(shape)})
+	reg.tensor_cache[h] = id
+	return id
 }
 
 // ==================== Subtype Checking ====================
@@ -462,6 +496,24 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			}
 		}
 		return false
+	}
+
+	// Tensor assignability: exact match or shape-erased
+	#partial switch src in src_type.info {
+	case Tensor_Type:
+		#partial switch tgt in tgt_type.info {
+		case Tensor_Type:
+			if src.element_type != tgt.element_type { return false }
+			// Shape-erased target (ndim == 0) accepts any shape
+			if tgt.ndim == 0 { return true }
+			if src.ndim != tgt.ndim { return false }
+			for i := 0; i < src.ndim; i += 1 {
+				// -1 = symbolic/unknown matches anything
+				if src.shape[i] == -1 || tgt.shape[i] == -1 { continue }
+				if src.shape[i] != tgt.shape[i] { return false }
+			}
+			return true
+		}
 	}
 
 	return false
@@ -628,6 +680,21 @@ type_to_string :: proc(reg: ^Type_Registry, id: Type_ID) -> string {
 		return fmt.aprintf("TypedDict('%s')", info.name, allocator = reg.allocator)
 	case Protocol_Type:
 		return fmt.aprintf("Protocol('%s')", info.name, allocator = reg.allocator)
+	case Tensor_Type:
+		elem_str := type_to_string(reg, info.element_type)
+		if info.ndim == 0 {
+			return fmt.aprintf("Tensor[%s]", elem_str, allocator = reg.allocator)
+		}
+		buf := make([dynamic]u8, 0, 64, reg.allocator)
+		for c in "Tensor[" { append(&buf, u8(c)) }
+		for c in elem_str { append(&buf, u8(c)) }
+		for i := 0; i < info.ndim; i += 1 {
+			for c in ", " { append(&buf, u8(c)) }
+			dim_str := fmt.tprintf("%d", info.shape[i])
+			for c in dim_str { append(&buf, u8(c)) }
+		}
+		append(&buf, ']')
+		return string(buf[:])
 	}
 	return "<unknown>"
 }

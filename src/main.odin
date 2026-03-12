@@ -20,6 +20,7 @@ import "safety"
 import "lsp"
 import "migration"
 import "codegen"
+import "gpu"
 
 main :: proc() {
 	args := os.args
@@ -77,6 +78,8 @@ main :: proc() {
 		cmd_generate_contracts(args[2:])
 	case "generate-tests":
 		cmd_generate_tests(args[2:])
+	case "gpu":
+		cmd_gpu(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -1714,6 +1717,7 @@ print_usage :: proc() {
 	fmt.println("  stubs <path>      Generate .pyi stub files from type analysis")
 	fmt.println("  generate-contracts <path>  Generate runtime type-checking decorators")
 	fmt.println("  generate-tests <path>      Generate hypothesis test skeletons")
+	fmt.println("  gpu [path]        Validate @gpu functions and extract compute graphs")
 	fmt.println("  conform [path]    Run conformance tests (default: tests/conformance/)")
 	fmt.println("  version           Print version")
 	fmt.println("  help              Show this message")
@@ -2196,6 +2200,175 @@ cmd_generate_tests :: proc(args: []string) {
 	}
 
 	fmt.printfln("mimir generate-tests: generated %d test file(s)", generated)
+}
+
+// ==================== GPU command ====================
+
+cmd_gpu :: proc(args: []string) {
+	config := gpu.default_gpu_config()
+
+	target := "."
+	verbose := false
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--ignore" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir gpu: --ignore requires a code list (e.g. GPU001,GPU003)")
+				os.exit(1)
+			}
+			config.ignore = gpu_parse_code_list(args[i + 1])
+			i += 2
+		} else if arg == "--select" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir gpu: --select requires a code list (e.g. GPU001,GPU002)")
+				os.exit(1)
+			}
+			config.select_only = gpu_parse_code_list(args[i + 1])
+			i += 2
+		} else if arg == "-v" || arg == "--verbose" {
+			verbose = true
+			i += 1
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir gpu: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir gpu [--ignore <codes>] [--select <codes>] [-v] [path]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir gpu: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir gpu: no Python files found in '%s'", target)
+		return
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		#partial switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	// Initialize GPU type context
+	reg := checker.init_registry(arena.allocator)
+	type_ctx := gpu.init_gpu_types(&reg, arena.allocator)
+
+	total_errors := 0
+	total_funcs := 0
+	total_nodes := 0
+
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			#partial switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir gpu: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, file, arena.allocator)
+
+		// GPU validation
+		diagnostics, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, file, &config, arena.allocator)
+
+		if len(gpu_funcs) > 0 {
+			fmt.printfln("GPU analysis: %s", file)
+			fmt.println()
+		}
+
+		// Print diagnostics
+		if len(diagnostics) > 0 {
+			total_errors += len(diagnostics)
+			for d in diagnostics {
+				core.diagnostic_print(d)
+			}
+		}
+
+		// Extract and display compute graphs for valid functions
+		for func in gpu_funcs {
+			total_funcs += 1
+			// Only extract graph if no errors for this function
+			graph := gpu.extract_graph(func, &bind_result, &type_ctx, arena.allocator)
+			total_nodes += len(graph.nodes)
+
+			// Summary line
+			elem, mm, red, oth := gpu.count_ops(&graph)
+			fmt.printfln("  @gpu %s (line %d)", func.name, int(func.loc.line))
+
+			// Print param info
+			for arg in func.args.args {
+				if arg.annotation != nil {
+					tid := gpu.resolve_gpu_annotation(arg.annotation, &type_ctx)
+					if tid != checker.INVALID_TYPE {
+						fmt.printfln("    %s: %s", arg.arg, checker.type_to_string(&reg, tid))
+					}
+				}
+			}
+
+			fmt.printfln("    Graph: %d nodes (%d elementwise, %d matmul, %d reduction)",
+				len(graph.nodes), elem, mm, red)
+
+			if verbose {
+				gpu.print_graph(&graph)
+			}
+
+			// Output type from graph
+			if len(graph.outputs) > 0 {
+				out_node := gpu.get_node(&graph, graph.outputs[0])
+				if out_node != nil && out_node.output_type != checker.INVALID_TYPE {
+					fmt.printfln("    Output: %s", checker.type_to_string(&reg, out_node.output_type))
+				}
+			}
+			fmt.println()
+		}
+	}
+
+	if total_funcs > 0 {
+		if total_errors > 0 {
+			fmt.printfln("mimir gpu: %d @gpu function(s), %d error(s)", total_funcs, total_errors)
+			os.exit(1)
+		} else {
+			fmt.printfln("mimir gpu: %d @gpu function(s), %d nodes, 0 errors", total_funcs, total_nodes)
+		}
+	} else {
+		fmt.printfln("mimir gpu: no @gpu functions found in %d file(s)", len(files))
+	}
+}
+
+gpu_parse_code_list :: proc(input: string) -> []string {
+	if input == "" { return nil }
+	parts := strings.split(input, ",")
+	result := make([dynamic]string, 0, len(parts))
+	for p in parts {
+		trimmed := strings.trim_space(p)
+		if trimmed != "" {
+			append(&result, trimmed)
+		}
+	}
+	return result[:]
 }
 
 // ==================== Path Helpers ====================
