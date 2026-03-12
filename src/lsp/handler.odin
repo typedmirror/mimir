@@ -86,6 +86,12 @@ handle_did_change :: proc(server: ^Server, params: json.Value) {
 
 	text := get_json_string(change, "text")
 
+	// Free old document strings before overwriting to prevent memory leak
+	if old_doc, has_old := server.documents[uri]; has_old {
+		delete(old_doc.uri, server.allocator)
+		delete(old_doc.content, server.allocator)
+	}
+
 	server.documents[uri] = Document{
 		uri     = strings.clone(uri, server.allocator),
 		content = strings.clone(text, server.allocator),

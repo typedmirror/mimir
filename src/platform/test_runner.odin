@@ -62,6 +62,23 @@ discover_test_files :: proc(root: string, allocator: mem.Allocator) -> ([]string
 	return files[:], nil
 }
 
+// Escape a string for embedding in a Python double-quoted string literal.
+@(private = "file")
+_escape_python_string :: proc(s: string, allocator: mem.Allocator) -> string {
+	buf: [dynamic]byte
+	buf.allocator = allocator
+	for c in s {
+		switch c {
+		case '\\': append(&buf, '\\'); append(&buf, '\\')
+		case '"':  append(&buf, '\\'); append(&buf, '"')
+		case '\n': append(&buf, '\\'); append(&buf, 'n')
+		case '\r': append(&buf, '\\'); append(&buf, 'r')
+		case:      append(&buf, u8(c))
+		}
+	}
+	return string(buf[:])
+}
+
 // Generate Python harness script with test file list and filter baked in.
 generate_harness :: proc(test_files: []string, filter: string, allocator: mem.Allocator) -> string {
 	parts: [dynamic]string
@@ -74,14 +91,14 @@ generate_harness :: proc(test_files: []string, filter: string, allocator: mem.Al
 			append(&parts, ", ")
 		}
 		append(&parts, "\"")
-		append(&parts, file)
+		append(&parts, _escape_python_string(file, allocator))
 		append(&parts, "\"")
 	}
 	append(&parts, "]\n")
 
 	// filter_str = "pattern"
 	append(&parts, "filter_str = \"")
-	append(&parts, filter)
+	append(&parts, _escape_python_string(filter, allocator))
 	append(&parts, "\"\n")
 
 	// Template body

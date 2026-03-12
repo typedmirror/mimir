@@ -55,7 +55,7 @@ BUILTIN_NAMES := [?]string{
 	"SyntaxWarning", "SystemError", "SystemExit",
 	"TabError", "TimeoutError", "TypeError",
 	"UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError",
-	"UnicodeError", "UnicodeTranslationError", "UnicodeWarning",
+	"UnicodeError", "UnicodeTranslateError", "UnicodeWarning",
 	"UserWarning",
 	"ValueError",
 	"Warning",

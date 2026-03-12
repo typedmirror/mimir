@@ -36,6 +36,7 @@ Symbol :: struct {
 add_symbol :: proc(b: ^Binder, name: string, kind: Symbol_Kind, flags: Symbol_Flags, loc: parser.Src_Loc) -> Symbol_ID {
 	scope_id := current_scope(b)
 	scope := get_scope(b, scope_id)
+	if scope == nil { return Symbol_ID(0) }
 
 	// If symbol already exists in this scope, return existing
 	if existing, ok := scope.symbols[name]; ok {

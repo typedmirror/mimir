@@ -83,12 +83,12 @@ bridge_parse :: proc(b: ^Bridge, path: string, allocator: mem.Allocator) -> (^Mo
 	is_err := strings.has_prefix(header, "ERR ")
 
 	if !is_ok && !is_err {
-		return nil, Bridge_Error{fmt.tprintf("unexpected bridge response: %s", header)}
+		return nil, Bridge_Error{fmt.aprintf("unexpected bridge response: %s", header, allocator = allocator)}
 	}
 
 	len_start := 3 if is_ok else 4
 	body_len, parse_ok := strconv.parse_int(strings.trim_space(header[len_start:]))
-	if !parse_ok {
+	if !parse_ok || body_len < 0 {
 		return nil, Bridge_Error{"invalid response length in bridge header"}
 	}
 
@@ -100,7 +100,7 @@ bridge_parse :: proc(b: ^Bridge, path: string, allocator: mem.Allocator) -> (^Mo
 	}
 
 	if is_err {
-		return nil, _parse_error_response(body, path)
+		return nil, _parse_error_response(body, path, allocator)
 	}
 
 	// Convert JSON to AST
@@ -159,16 +159,16 @@ _read_exact :: proc(f: ^os.File, buf: []byte) -> Parse_Error {
 
 // Parse an error response JSON into a Syntax_Error.
 @(private = "file")
-_parse_error_response :: proc(body: []byte, path: string) -> Parse_Error {
+_parse_error_response :: proc(body: []byte, path: string, allocator: mem.Allocator) -> Parse_Error {
 	val, err := json.parse(body, .JSON, true)
 	if err != .None {
-		return Bridge_Error{fmt.tprintf("parse error in file: %s", path)}
+		return Bridge_Error{fmt.aprintf("parse error in file: %s", path, allocator = allocator)}
 	}
 	defer json.destroy_value(val)
 
 	obj, is_obj := val.(json.Object)
 	if !is_obj {
-		return Bridge_Error{fmt.tprintf("parse error in file: %s", path)}
+		return Bridge_Error{fmt.aprintf("parse error in file: %s", path, allocator = allocator)}
 	}
 
 	msg_val := obj["msg"]
@@ -181,8 +181,8 @@ _parse_error_response :: proc(body: []byte, path: string) -> Parse_Error {
 	col_int, _ := col_val.(json.Integer)
 
 	return Syntax_Error{
-		msg  = fmt.tprintf("%s", msg_str),
-		file = fmt.tprintf("%s", path),
+		msg  = strings.clone(msg_str, allocator),
+		file = strings.clone(path, allocator),
 		line = int(line_int),
 		col  = int(col_int),
 	}

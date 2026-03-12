@@ -144,9 +144,10 @@ Type_Registry :: struct {
 	list_cache:  map[Type_ID]Type_ID,
 	dict_cache:  map[[2]Type_ID]Type_ID,
 	set_cache:   map[Type_ID]Type_ID,
-	class_types: map[binder.Symbol_ID]Type_ID,
-	spec_cache:  map[u64]Type_ID,
-	allocator:   mem.Allocator,
+	class_types:    map[binder.Symbol_ID]Type_ID,
+	instance_cache: map[Type_ID]Type_ID,
+	spec_cache:     map[u64]Type_ID,
+	allocator:      mem.Allocator,
 }
 
 init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
@@ -158,6 +159,7 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.dict_cache = make(map[[2]Type_ID]Type_ID, 16, allocator)
 	reg.set_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.class_types = make(map[binder.Symbol_ID]Type_ID, 16, allocator)
+	reg.instance_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.spec_cache = make(map[u64]Type_ID, 8, allocator)
 
 	// Slot 0: INVALID
@@ -237,7 +239,16 @@ make_union_type :: proc(reg: ^Type_Registry, members_in: []Type_ID) -> Type_ID {
 	}
 
 	if cached, ok := reg.union_cache[h]; ok {
-		return cached
+		// Verify cache hit — collision detection
+		ct := get_type(reg, cached)
+		if ut, is_union := ct.info.(Union_Type); is_union && len(ut.members) == len(flat) {
+			match := true
+			for i := 0; i < len(flat); i += 1 {
+				if flat[i] != ut.members[i] { match = false; break }
+			}
+			if match { return cached }
+		}
+		// Hash collision — fall through to register new type
 	}
 
 	// Register
@@ -289,7 +300,12 @@ make_callable_type :: proc(reg: ^Type_Registry, params: []Param_Type, return_typ
 }
 
 make_instance_type :: proc(reg: ^Type_Registry, class_type: Type_ID) -> Type_ID {
-	return register_type(reg, Instance_Type{class_type = class_type})
+	if cached, ok := reg.instance_cache[class_type]; ok {
+		return cached
+	}
+	id := register_type(reg, Instance_Type{class_type = class_type})
+	reg.instance_cache[class_type] = id
+	return id
 }
 
 make_typeddict_type :: proc(reg: ^Type_Registry, name: string, fields: map[string]Type_ID, total: bool) -> Type_ID {
@@ -387,14 +403,15 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		}
 	}
 
-	// Callable structural comparison
+	// Callable structural comparison (params are contravariant, return is covariant)
 	#partial switch src in src_type.info {
 	case Callable_Type:
 		#partial switch tgt in tgt_type.info {
 		case Callable_Type:
 			if len(src.params) != len(tgt.params) { return false }
 			for i in 0..<len(src.params) {
-				if !is_assignable(reg, src.params[i].type_id, tgt.params[i].type_id) { return false }
+				// Contravariant: target param must be assignable TO source param
+				if !is_assignable(reg, tgt.params[i].type_id, src.params[i].type_id) { return false }
 			}
 			return is_assignable(reg, src.return_type, tgt.return_type)
 		}
@@ -787,7 +804,21 @@ specialize_class :: proc(reg: ^Type_Registry, class_type_id: Type_ID, type_args:
 		h = h * 31 + u64(arg)
 	}
 	if cached, ok := reg.spec_cache[h]; ok {
-		return cached
+		// Verify cache hit — collision detection
+		// Check that cached result is an Instance_Type wrapping a class with same name+args
+		cached_t := get_type(reg, cached)
+		if inst, is_inst := cached_t.info.(Instance_Type); is_inst {
+			inner := get_type(reg, inst.class_type)
+			if inner_cls, is_cls := inner.info.(Class_Type); is_cls {
+				orig := get_type(reg, class_type_id)
+				if orig_cls, orig_ok := orig.info.(Class_Type); orig_ok {
+					if inner_cls.symbol_id == orig_cls.symbol_id && len(inner_cls.type_params) == 0 {
+						return cached
+					}
+				}
+			}
+		}
+		// Hash collision — fall through to register new specialization
 	}
 
 	ct := get_type(reg, class_type_id)

@@ -349,9 +349,9 @@ build_wheel :: proc(
 
 	// Create wheel via zip (run inside staging directory)
 	whl_path := strings.concatenate({output_dir, "/", whl_name}, allocator)
-	zip_cmd := fmt.tprintf("cd '%s' && zip -r -q '%s' .", stage_dir, whl_path)
 	zip_state, _, zip_stderr, zip_err := os.process_exec({
-		command = {"bash", "-c", zip_cmd},
+		command = {"zip", "-r", "-q", whl_path, "."},
+		working_dir = stage_dir,
 	}, allocator)
 	if zip_err != nil || zip_state.exit_code != 0 {
 		err_msg := string(zip_stderr) if len(zip_stderr) > 0 else "unknown error"

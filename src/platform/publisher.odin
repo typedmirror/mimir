@@ -59,13 +59,23 @@ publish_file :: proc(cfg: ^Publish_Config, file_path: string, allocator: mem.All
 
 	fmt.printfln("  uploading %s...", file_path)
 
-	auth_header := fmt.tprintf("Authorization: Bearer %s", cfg.token)
+	// Write auth header to temp config file to avoid exposing token in process args
+	tmp_dir, tmp_err := os.temp_directory(allocator)
+	if tmp_err != nil { tmp_dir = "/tmp" }
+	curl_cfg_path := strings.concatenate({tmp_dir, "/mimir_curl_cfg"}, allocator)
+	curl_cfg_content := fmt.tprintf("header = \"Authorization: Bearer %s\"", cfg.token)
+	cfg_write_err := os.write_entire_file(curl_cfg_path, transmute([]byte)curl_cfg_content)
+	if cfg_write_err != nil {
+		return Platform_Error_Data{msg = fmt.tprintf("failed to write curl config: %v", cfg_write_err)}
+	}
+	defer os.remove(curl_cfg_path)
+
 	content_field := fmt.tprintf("content=@%s", file_path)
 
 	state, _, stderr_data, exec_err := os.process_exec({
 		command = {
 			"curl", "-X", "POST", cfg.index_url,
-			"-H", auth_header,
+			"-K", curl_cfg_path,
 			"-F", ":action=file_upload",
 			"-F", "protocol_version=1",
 			"-F", content_field,

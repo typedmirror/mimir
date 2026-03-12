@@ -135,12 +135,14 @@ cmd_check :: proc(args: []string) {
 	defer core.arena_destroy(&arena)
 
 	// Single file: fast path (existing behavior)
+	errors := 0
 	if len(files) == 1 {
-		cmd_check_single(files[0], &bridge, &arena)
+		errors = cmd_check_single(files[0], &bridge, &arena)
 	} else {
 		// Multi-module: shared registry + module graph
-		cmd_check_multi(target, files, &bridge, &arena)
+		errors = cmd_check_multi(target, files, &bridge, &arena)
 	}
+	if errors > 0 { os.exit(1) }
 }
 
 // Single-file check — original behavior, unchanged
@@ -212,7 +214,7 @@ cmd_check_multi :: proc(
 	files: []string,
 	bridge: ^parser.Bridge,
 	arena: ^core.Analysis_Arena,
-) {
+) -> int {
 	// 1. Init shared registry + builtins
 	registry := checker.init_registry(arena.allocator)
 	builtins := checker.init_builtins(&registry)
@@ -312,6 +314,7 @@ cmd_check_multi :: proc(
 	} else {
 		fmt.printfln("mimir: successfully checked %d file(s)", len(files))
 	}
+	return error_count
 }
 
 cmd_run :: proc(args: []string) {
@@ -1537,6 +1540,12 @@ cmd_build :: proc(args: []string) {
 		cfg.name, cfg.version, len(sources.files), len(sources.packages))
 
 	output_dir := strings.concatenate({cfg.project_dir, "/dist"}, allocator)
+
+	if wheel_only && sdist_only {
+		fmt.eprintln("mimir build: --wheel and --sdist are mutually exclusive")
+		fmt.eprintln("  omit both flags to build wheel + sdist")
+		os.exit(1)
+	}
 
 	if sdist_only {
 		// sdist doesn't need Python

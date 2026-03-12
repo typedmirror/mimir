@@ -11,6 +11,11 @@ import "core:strings"
 // Install a single package via pip into the target directory.
 // Uses atomic install: pip installs to temp dir, then rename to target.
 install_package :: proc(python: string, dep: Dep_Spec, target_dir: string, allocator: mem.Allocator) -> Platform_Error {
+	// Reject dependency specs that look like flags (prevents pip flag injection)
+	if len(dep.raw) > 0 && dep.raw[0] == '-' {
+		return Platform_Error_Data{msg = fmt.tprintf("invalid dependency spec '%s': must not start with '-'", dep.raw)}
+	}
+
 	temp_dir := strings.concatenate({target_dir, ".tmp"}, allocator)
 
 	// Clean up any previous partial install

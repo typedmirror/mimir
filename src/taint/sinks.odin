@@ -69,7 +69,7 @@ is_sanitizer :: proc(ctx: ^Taint_Context, call: ^parser.Call_Expr) -> bool {
 	#partial switch f in call.func {
 	case ^parser.Name_Expr:
 		switch f.id {
-		case "int", "float", "bool", "str", "bytes", "chr", "ord":
+		case "int", "float", "bool", "bytes", "chr", "ord":
 			return true
 		}
 		// os.path.basename via from import

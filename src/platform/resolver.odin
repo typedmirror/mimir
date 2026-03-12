@@ -41,6 +41,10 @@ resolve :: proc(python: string, deps: []Dep_Spec, allocator: mem.Allocator) -> (
 	append(&cmd, report_path)
 	append(&cmd, "--quiet")
 	for dep in deps {
+		// Reject dependency specs that look like flags (prevents pip flag injection)
+		if len(dep.raw) > 0 && dep.raw[0] == '-' {
+			return nil, Platform_Error_Data{msg = fmt.tprintf("invalid dependency spec '%s': must not start with '-'", dep.raw)}
+		}
 		append(&cmd, dep.raw)
 	}
 

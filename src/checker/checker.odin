@@ -73,6 +73,7 @@ check_with_imports :: proc(
 	allocator: mem.Allocator,
 ) -> Check_Result {
 	result: Check_Result
+	result.registry = registry^
 	result.symbol_types = make(map[binder.Symbol_ID]Type_ID, 128, allocator)
 	result.expr_types = make(map[rawptr]Type_ID, 256, allocator)
 	result.diagnostics = make([dynamic]core.Diagnostic, 0, 32, allocator)
@@ -472,17 +473,15 @@ apply_positive_guard :: proc(
 ) {
 	#partial switch guard.kind {
 	case .Is_Instance, .Is_Not_Instance, .Type_Is, .Type_Is_Not:
-		// Narrow to the guard type (inverted kinds come from unary `not` with block swap,
-		// so double inversion cancels → same semantics as non-inverted)
+		// Narrow to the guard type. Inverted kinds (Is_Not_Instance) come from
+		// unary `not` with block swap — double inversion cancels, same semantics.
 		narrow_type := resolve_annotation(guard.type_expr, reg, bind_result, builtins)
 		if narrow_type != TYPE_UNKNOWN {
 			env.types[guard.symbol_id] = narrow_type
 		}
 	case .Is_None, .Is_Not_None:
-		// Is_Not_None only from unary `not` inversion with block swap → same as Is_None
 		env.types[guard.symbol_id] = TYPE_NONE
 	case .Is_Truthy, .Is_Falsy:
-		// Is_Falsy only from unary `not` inversion with block swap → same as Is_Truthy
 		current, ok := env.types[guard.symbol_id]
 		if ok {
 			env.types[guard.symbol_id] = remove_none(reg, current)
@@ -499,15 +498,14 @@ apply_negative_guard :: proc(
 ) {
 	#partial switch guard.kind {
 	case .Is_Instance, .Is_Not_Instance, .Type_Is, .Type_Is_Not:
-		// Subtract the guard type from the union (inverted kinds come from unary `not`
-		// with block swap, so double inversion cancels → same semantics as non-inverted)
+		// Subtract the guard type. Inverted kinds come from unary `not`
+		// with block swap — double inversion cancels, same semantics.
 		narrow_type := resolve_annotation(guard.type_expr, reg, bind_result, builtins)
 		current, ok := env.types[guard.symbol_id]
 		if ok && narrow_type != TYPE_UNKNOWN {
 			env.types[guard.symbol_id] = subtract_type(reg, current, narrow_type)
 		}
 	case .Is_None, .Is_Not_None:
-		// Is_Not_None only from unary `not` inversion with block swap → same as Is_None
 		current, ok := env.types[guard.symbol_id]
 		if ok {
 			env.types[guard.symbol_id] = remove_none(reg, current)
