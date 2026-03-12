@@ -80,6 +80,8 @@ main :: proc() {
 		cmd_generate_tests(args[2:])
 	case "gpu":
 		cmd_gpu(args[2:])
+	case "compile-gpu":
+		cmd_compile_gpu(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -1718,6 +1720,7 @@ print_usage :: proc() {
 	fmt.println("  generate-contracts <path>  Generate runtime type-checking decorators")
 	fmt.println("  generate-tests <path>      Generate hypothesis test skeletons")
 	fmt.println("  gpu [path]        Validate @gpu functions and extract compute graphs")
+	fmt.println("  compile-gpu [path] Emit GPU compute shaders (--backend wgsl|msl|spirv|ptx|all)")
 	fmt.println("  conform [path]    Run conformance tests (default: tests/conformance/)")
 	fmt.println("  version           Print version")
 	fmt.println("  help              Show this message")
@@ -2369,6 +2372,171 @@ gpu_parse_code_list :: proc(input: string) -> []string {
 		}
 	}
 	return result[:]
+}
+
+// ==================== compile-gpu command ====================
+
+cmd_compile_gpu :: proc(args: []string) {
+	config := gpu.default_gpu_config()
+
+	target := "."
+	verbose := false
+	backend_name := "wgsl"
+	output_dir := ""
+	emit_all := false
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--backend" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir compile-gpu: --backend requires a value (wgsl|msl|spirv|ptx|all)")
+				os.exit(1)
+			}
+			backend_name = args[i + 1]
+			if backend_name == "all" {
+				emit_all = true
+			}
+			i += 2
+		} else if arg == "--output" || arg == "-o" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir compile-gpu: --output requires a directory path")
+				os.exit(1)
+			}
+			output_dir = args[i + 1]
+			i += 2
+		} else if arg == "-v" || arg == "--verbose" {
+			verbose = true
+			i += 1
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir compile-gpu: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir compile-gpu [--backend <wgsl|msl|spirv|ptx|all>] [--output <dir>] [-v] [path]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	// Validate backend
+	backend: gpu.Emit_Backend
+	if !emit_all {
+		ok: bool
+		backend, ok = gpu.parse_backend(backend_name)
+		if !ok {
+			fmt.eprintfln("mimir compile-gpu: unknown backend '%s'", backend_name)
+			fmt.eprintln("Valid backends: wgsl, msl, spirv, ptx, all")
+			os.exit(1)
+		}
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir compile-gpu: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir compile-gpu: no Python files found in '%s'", target)
+		return
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		#partial switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize analysis arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	reg := checker.init_registry(arena.allocator)
+	type_ctx := gpu.init_gpu_types(&reg, arena.allocator)
+
+	total_kernels := 0
+
+	backends_to_emit: [dynamic]gpu.Emit_Backend
+	if emit_all {
+		backends_to_emit = make([dynamic]gpu.Emit_Backend, 0, 4, arena.allocator)
+		append(&backends_to_emit, gpu.Emit_Backend.WGSL)
+		append(&backends_to_emit, gpu.Emit_Backend.MSL)
+		append(&backends_to_emit, gpu.Emit_Backend.SPIRV)
+		append(&backends_to_emit, gpu.Emit_Backend.PTX)
+	} else {
+		backends_to_emit = make([dynamic]gpu.Emit_Backend, 0, 1, arena.allocator)
+		append(&backends_to_emit, backend)
+	}
+
+	for file in files {
+		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
+		if parse_err != nil {
+			#partial switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("mimir compile-gpu: %s: %s", file, e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, file, arena.allocator)
+		_, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, file, &config, arena.allocator)
+
+		for func in gpu_funcs {
+			graph := gpu.extract_graph(func, &bind_result, &type_ctx, arena.allocator)
+
+			for be in backends_to_emit {
+				data, is_binary := gpu.emit_kernel(&graph, &type_ctx, be, arena.allocator)
+				if data == nil { continue }
+
+				ext := gpu.backend_extension(be)
+
+				if output_dir != "" {
+					// Write to file
+					out_path := fmt.tprintf("%s/%s.%s", output_dir, graph.func_name, ext)
+					write_err := os.write_entire_file(out_path, data)
+					if write_err != nil {
+						fmt.eprintfln("mimir compile-gpu: error writing '%s': %v", out_path, write_err)
+						continue
+					}
+					if verbose {
+						fmt.printfln("  wrote %s (%d bytes)", out_path, len(data))
+					}
+				} else {
+					// Print to stdout
+					if verbose {
+						elem, mm, red, _ := gpu.count_ops(&graph)
+						fmt.printfln("// kernel_%s (%d nodes: %d elem, %d matmul, %d reduction) [%s]",
+							graph.func_name, len(graph.nodes), elem, mm, red, ext)
+					}
+					if is_binary {
+						fmt.printfln("// SPIR-V binary: %d bytes", len(data))
+					} else {
+						text := string(data)
+						fmt.print(text)
+					}
+					fmt.println()
+				}
+				total_kernels += 1
+			}
+		}
+	}
+
+	if total_kernels > 0 {
+		fmt.printfln("mimir compile-gpu: emitted %d kernel(s)", total_kernels)
+	} else {
+		fmt.printfln("mimir compile-gpu: no @gpu functions found in %d file(s)", len(files))
+	}
 }
 
 // ==================== Path Helpers ====================
