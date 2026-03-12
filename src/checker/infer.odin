@@ -413,8 +413,8 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 		return typing_result
 	}
 
-	// super() → Instance of first base class in current class context
-	if name_expr, ok := e.func.(^parser.Name_Expr); ok && name_expr.id == "super" && len(e.args) == 0 {
+	// super() or super(Cls, self) → Instance of first base class in current class context
+	if name_expr, ok := e.func.(^parser.Name_Expr); ok && name_expr.id == "super" && (len(e.args) == 0 || len(e.args) == 2) && len(e.keywords) == 0 {
 		if ctx.current_class != INVALID_TYPE {
 			cls := get_type(ctx.reg, ctx.current_class)
 			#partial switch cls_info in cls.info {
@@ -524,6 +524,20 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 					"Too many arguments",
 					fmt_arg_count_error(n_params, n_total, ctx.reg),
 					"Remove extra arguments")
+			}
+		}
+	}
+
+	// Check for duplicate positional + keyword arguments
+	for kw in e.keywords {
+		if kw.arg == "" { continue } // **kwargs unpacking
+		for j := 0; j < min(n_args, n_params); j += 1 {
+			if func_info.params[j].name == kw.arg {
+				emit_diagnostic(ctx, e.loc, "T004", .Error,
+					"Duplicate argument",
+					fmt.tprintf("parameter '%s' already supplied as positional argument %d", kw.arg, j + 1),
+					"Remove the duplicate keyword argument")
+				break
 			}
 		}
 	}

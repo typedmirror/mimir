@@ -15,6 +15,7 @@ ALL_RULES := [?]Safety_Rule{
 	{code = "SAF006", name = "regex-catastrophic-backtrack", check = check_regex_catastrophic},
 	{code = "SAF007", name = "sensitive-log-data",           check = check_sensitive_log_data},
 	{code = "SAF008", name = "expensive-log-format",         check = check_expensive_log_format},
+	{code = "SAF009", name = "mutable-default-argument",     check = check_mutable_default},
 }
 
 is_rule_enabled :: proc(code: string, config: ^Safety_Config) -> bool {

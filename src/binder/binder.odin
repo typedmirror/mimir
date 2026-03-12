@@ -117,9 +117,7 @@ collect_defs_stmt :: proc(b: ^Binder, stmt: parser.Stmt) {
 		scan_expr_for_scopes(b, s.value)
 
 	case ^parser.Ann_Assign:
-		if s.simple {
-			collect_def_target_annotated(b, s.target)
-		}
+		collect_def_target_annotated(b, s.target)
 		scan_expr_for_scopes(b, s.annotation)
 		if s.value != nil { scan_expr_for_scopes(b, s.value) }
 
@@ -759,7 +757,13 @@ resolve_refs_expr :: proc(b: ^Binder, expr: parser.Expr) {
 
 	case ^parser.Named_Expr:
 		resolve_refs_expr(b, e.value)
-		// target is a Store — already bound in pass 1
+		// Register target ref for type propagation (target is a Store)
+		if target, ok := e.target.(^parser.Name_Expr); ok {
+			sym_id, found := resolve_name(b, target.id, current_scope(b))
+			if found {
+				b.result.refs[rawptr(target)] = sym_id
+			}
+		}
 
 	case ^parser.Lambda_Expr:
 		resolve_param_defaults(b, &e.args)

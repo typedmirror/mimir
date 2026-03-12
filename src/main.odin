@@ -85,6 +85,8 @@ main :: proc() {
 		cmd_compile_gpu(args[2:])
 	case "compile-wasm":
 		cmd_compile_wasm(args[2:])
+	case "explain":
+		platform.cmd_explain(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -1726,6 +1728,7 @@ print_usage :: proc() {
 	fmt.println("  compile-gpu [path] Emit GPU compute shaders (--backend wgsl|msl|spirv|ptx|all)")
 	fmt.println("  compile-wasm [path] Compile @wasm functions to WebAssembly (--format wat|wasm|all)")
 	fmt.println("  conform [path]    Run conformance tests (default: tests/conformance/)")
+	fmt.println("  explain <code>    Show detailed explanation for a diagnostic code")
 	fmt.println("  version           Print version")
 	fmt.println("  help              Show this message")
 }

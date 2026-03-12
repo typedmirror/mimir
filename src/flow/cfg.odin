@@ -157,9 +157,9 @@ build_cfg_for_stmts :: proc(
 process_stmts :: proc(b: ^CFG_Builder, stmts: []parser.Stmt) -> Block_ID {
 	for stmt in stmts {
 		if b.current == INVALID_BLOCK {
-			// Dead code after terminator
+			// Dead code after terminator — report ALL unreachable stmts, not just first
 			emit_unreachable(b, stmt)
-			return INVALID_BLOCK
+			continue
 		}
 		b.current = process_stmt(b, stmt)
 	}
