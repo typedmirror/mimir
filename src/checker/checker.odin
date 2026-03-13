@@ -481,7 +481,7 @@ apply_positive_guard :: proc(
 	case .Is_Instance, .Is_Not_Instance, .Type_Is, .Type_Is_Not:
 		// Narrow to the guard type. Inverted kinds (Is_Not_Instance) come from
 		// unary `not` with block swap — double inversion cancels, same semantics.
-		narrow_type := resolve_annotation(guard.type_expr, reg, bind_result, builtins)
+		narrow_type := resolve_isinstance_type(guard.type_expr, reg, bind_result, builtins)
 		if narrow_type != TYPE_UNKNOWN {
 			env.types[guard.symbol_id] = narrow_type
 		}
@@ -506,7 +506,7 @@ apply_negative_guard :: proc(
 	case .Is_Instance, .Is_Not_Instance, .Type_Is, .Type_Is_Not:
 		// Subtract the guard type. Inverted kinds come from unary `not`
 		// with block swap — double inversion cancels, same semantics.
-		narrow_type := resolve_annotation(guard.type_expr, reg, bind_result, builtins)
+		narrow_type := resolve_isinstance_type(guard.type_expr, reg, bind_result, builtins)
 		current, ok := env.types[guard.symbol_id]
 		if ok && narrow_type != TYPE_UNKNOWN {
 			env.types[guard.symbol_id] = subtract_type(reg, current, narrow_type)
@@ -521,6 +521,27 @@ apply_negative_guard :: proc(
 		// Conservative: don't narrow
 		break
 	}
+}
+
+// Resolve isinstance type arg — handles both single type and tuple (int, str) → union
+resolve_isinstance_type :: proc(
+	type_expr: parser.Expr,
+	reg: ^Type_Registry,
+	bind_result: ^binder.Bind_Result,
+	builtins: ^Builtin_Names,
+) -> Type_ID {
+	// Check for tuple type arg: isinstance(x, (int, str))
+	#partial switch te in type_expr {
+	case ^parser.Tuple_Expr:
+		if len(te.elts) > 0 {
+			members := make([]Type_ID, len(te.elts), reg.allocator)
+			for elt, i in te.elts {
+				members[i] = resolve_annotation(elt, reg, bind_result, builtins)
+			}
+			return make_union_type(reg, members)
+		}
+	}
+	return resolve_annotation(type_expr, reg, bind_result, builtins)
 }
 
 // ==================== Function/Class Type Building ====================

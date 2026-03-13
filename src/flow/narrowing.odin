@@ -202,6 +202,14 @@ analyze_condition :: proc(
 				append(guards, g)
 			}
 		}
+
+	case ^parser.Bool_Op_Expr:
+		// `x and isinstance(x, T)` — all sub-conditions produce guards for same branches
+		if e.op == .And {
+			for val in e.values {
+				analyze_condition(val, bind_result, branch_block, true_block, false_block, loc, guards, allocator)
+			}
+		}
 	}
 }
 

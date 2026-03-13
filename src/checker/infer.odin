@@ -82,7 +82,7 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		return make_union_type(ctx.reg, types[:])
 
 	case ^parser.Call_Expr:
-		return infer_call(e, ctx)
+		return infer_call(e, ctx, expected)
 
 	case ^parser.Attribute_Expr:
 		receiver := infer_expr(e.value, ctx)
@@ -286,11 +286,18 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		return infer_expr(e.value, ctx)
 
 	case ^parser.List_Comp:
-		return make_list_type(ctx.reg, TYPE_UNKNOWN)
+		infer_comprehension_vars(e.generators, ctx)
+		elem := infer_expr(e.elt, ctx)
+		return make_list_type(ctx.reg, elem)
 	case ^parser.Set_Comp:
-		return make_set_type(ctx.reg, TYPE_UNKNOWN)
+		infer_comprehension_vars(e.generators, ctx)
+		elem := infer_expr(e.elt, ctx)
+		return make_set_type(ctx.reg, elem)
 	case ^parser.Dict_Comp:
-		return make_dict_type(ctx.reg, TYPE_UNKNOWN, TYPE_UNKNOWN)
+		infer_comprehension_vars(e.generators, ctx)
+		key := infer_expr(e.key, ctx)
+		val := infer_expr(e.value, ctx)
+		return make_dict_type(ctx.reg, key, val)
 	case ^parser.Generator_Expr:
 		return TYPE_ANY
 
@@ -331,6 +338,10 @@ infer_name :: proc(e: ^parser.Name_Expr, ctx: ^Infer_Context) -> Type_ID {
 		if t, found := ctx.env.types[sym_id]; found {
 			return t
 		}
+		// Fallback: check class_types registry (module-level classes visible in all scopes)
+		if class_type, found := ctx.reg.class_types[sym_id]; found {
+			return class_type
+		}
 	}
 	// Check builtins
 	if tid, ok := ctx.builtins.names[e.id]; ok {
@@ -369,6 +380,9 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 		if op == .Mult {
 			if left == TYPE_STR && right_intlike { return TYPE_STR }
 			if left_intlike && right == TYPE_STR { return TYPE_STR }
+			// list * int or int * list
+			if is_list_type(reg, left) && right_intlike { return left }
+			if left_intlike && is_list_type(reg, right) { return right }
 		}
 
 	case .Div:
@@ -417,7 +431,7 @@ infer_unaryop :: proc(op: parser.Unary_Op, operand: Type_ID, reg: ^Type_Registry
 
 // ==================== Call Inference ====================
 
-infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
 	// Check for typing special forms before normal dispatch
 	if typing_result, handled := try_typing_call(e, ctx); handled {
 		return typing_result
@@ -494,7 +508,7 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 	case Class_Type:
 		// Generic class — infer TypeVar bindings from __init__ args
 		if len(info.type_params) > 0 {
-			return infer_generic_constructor(e, &info, func_type, ctx)
+			return infer_generic_constructor(e, &info, func_type, ctx, expected)
 		}
 		// Calling a class = constructor → check __init__ args
 		if init_type_id, ok := info.attrs["__init__"]; ok {
@@ -811,6 +825,15 @@ get_subscript_type :: proc(container: Type_ID, reg: ^Type_Registry) -> Type_ID {
 	if container == TYPE_STR { return TYPE_STR }
 	if container == TYPE_BYTES { return TYPE_INT }
 	return TYPE_UNKNOWN
+}
+
+// Bind comprehension loop variables so elt/key/value expressions can infer types
+infer_comprehension_vars :: proc(generators: []parser.Comprehension, ctx: ^Infer_Context) {
+	for gen in generators {
+		iter_type := infer_expr(gen.iter, ctx)
+		elem_type := get_iterator_element_type(iter_type, ctx.reg)
+		assign_target(gen.target, elem_type, ctx)
+	}
 }
 
 get_iterator_element_type :: proc(iter_type: Type_ID, reg: ^Type_Registry) -> Type_ID {
@@ -1237,7 +1260,7 @@ infer_generic_call :: proc(e: ^parser.Call_Expr, info: ^Callable_Type, ctx: ^Inf
 	return substitute_type(ctx.reg, info.return_type, subs)
 }
 
-infer_generic_constructor :: proc(e: ^parser.Call_Expr, info: ^Class_Type, class_type_id: Type_ID, ctx: ^Infer_Context) -> Type_ID {
+infer_generic_constructor :: proc(e: ^parser.Call_Expr, info: ^Class_Type, class_type_id: Type_ID, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
 	init_type_id, has_init := info.attrs["__init__"]
 	if !has_init {
 		for arg in e.args { infer_expr(arg, ctx) }
@@ -1285,8 +1308,33 @@ infer_generic_constructor :: proc(e: ^parser.Call_Expr, info: ^Class_Type, class
 
 	validate_typevar_bindings(ctx, &subs, e.loc)
 
-	// Build type_args from type_params using subs
+	// Build type_args from type_params using subs, falling back to expected annotation
 	type_args := make([]Type_ID, len(info.type_params), ctx.reg.allocator)
+
+	// Check if all type_params resolved via args
+	all_resolved := true
+	for tp in info.type_params {
+		if _, found := subs[tp]; !found {
+			all_resolved = false
+			break
+		}
+	}
+
+	// If unresolved and expected is a specialized instance of the same class, use it directly
+	if !all_resolved && expected != TYPE_UNKNOWN {
+		et := get_type(ctx.reg, expected)
+		#partial switch ei in et.info {
+		case Instance_Type:
+			ct := get_type(ctx.reg, ei.class_type)
+			#partial switch ci in ct.info {
+			case Class_Type:
+				if ci.symbol_id == info.symbol_id {
+					return expected
+				}
+			}
+		}
+	}
+
 	for tp, i in info.type_params {
 		if concrete, found := subs[tp]; found {
 			type_args[i] = concrete
