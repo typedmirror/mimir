@@ -53,7 +53,17 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 
 	case ^parser.Unary_Op_Expr:
 		operand := infer_expr(e.operand, ctx)
-		return infer_unaryop(e.op, operand, ctx.reg)
+		result := infer_unaryop(e.op, operand, ctx.reg)
+		if result == TYPE_UNKNOWN && operand != TYPE_UNKNOWN && operand != TYPE_ANY {
+			emit_diagnostic(ctx, e.loc, "T005", .Error,
+				"Unsupported operand type",
+				fmt.aprintf("Cannot apply unary '%s' to '%s'",
+					e.op == .USub ? "-" : e.op == .UAdd ? "+" : e.op == .Invert ? "~" : "not",
+					type_to_string(ctx.reg, operand),
+					allocator = ctx.reg.allocator),
+				"Check operand type or add explicit conversion")
+		}
+		return result
 
 	case ^parser.Compare_Expr:
 		// Type-check all operands, result is always bool
@@ -460,6 +470,22 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 							fmt_type_mismatch(kw_type, field_type, ctx.reg),
 							"Use the correct type")
 					}
+				}
+			}
+		}
+		// Check for missing required fields (total=True by default)
+		if info.total {
+			provided := make(map[string]bool, len(e.keywords), ctx.reg.allocator)
+			for kw in e.keywords {
+				provided[kw.arg] = true
+			}
+			for field_name in info.fields {
+				if !(field_name in provided) {
+					emit_diagnostic(ctx, e.loc, "T004", .Error,
+						"Missing required TypedDict field",
+						fmt.aprintf("Missing required field '%s'", field_name,
+							allocator = ctx.reg.allocator),
+						"Provide all required fields")
 				}
 			}
 		}

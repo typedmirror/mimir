@@ -33,6 +33,9 @@ check :: proc(
 
 	builtins := init_builtins(&result.registry)
 
+	// Pre-register all classes so return type annotations can reference them
+	pre_register_classes(module.body, bind_result, &result.registry)
+
 	// Build scope→return type map and scope→args map by scanning AST
 	return_type_map := make(map[binder.Scope_ID]Type_ID, 16, allocator)
 	func_args_map := make(map[binder.Scope_ID]^parser.Arguments, 16, allocator)
@@ -86,6 +89,9 @@ check_with_imports :: proc(
 			registry.class_types[sym_id] = type_id
 		}
 	}
+
+	// Pre-register all classes so return type annotations can reference them
+	pre_register_classes(module.body, bind_result, registry)
 
 	return_type_map := make(map[binder.Scope_ID]Type_ID, 16, allocator)
 	func_args_map := make(map[binder.Scope_ID]^parser.Arguments, 16, allocator)
@@ -522,9 +528,23 @@ apply_negative_guard :: proc(
 build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 	params := resolve_params(&fd.args, ctx)
 
-	// Skip 'self' parameter for methods
+	// Detect @staticmethod/@classmethod decorators
+	is_static := false
+	is_classmethod := false
+	for dec in fd.decorator_list {
+		#partial switch d in dec {
+		case ^parser.Name_Expr:
+			if d.id == "staticmethod" { is_static = true }
+			if d.id == "classmethod" { is_classmethod = true }
+		case ^parser.Attribute_Expr:
+			if d.attr == "staticmethod" { is_static = true }
+			if d.attr == "classmethod" { is_classmethod = true }
+		}
+	}
+
+	// Skip 'self'/'cls' parameter for methods (but not @staticmethod)
 	actual_params := params
-	if len(params) > 0 && params[0].name == "self" {
+	if !is_static && len(params) > 0 && (params[0].name == "self" || params[0].name == "cls") {
 		actual_params = params[1:]
 	}
 
@@ -589,15 +609,26 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		}
 	}
 
-	// Pre-register placeholder Class_Type so self-referential forward refs resolve
+	// Use pre-registered placeholder if exists, otherwise register new
 	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
-	class_type_id := register_type(ctx.reg, Class_Type{
-		name      = cd.name,
-		symbol_id = sym_id,
-		scope_id  = scope_id,
-	})
+	class_type_id: Type_ID
 	if sym_id != binder.INVALID_SYMBOL {
-		ctx.reg.class_types[sym_id] = class_type_id
+		if existing, found := ctx.reg.class_types[sym_id]; found {
+			class_type_id = existing
+		} else {
+			class_type_id = register_type(ctx.reg, Class_Type{
+				name      = cd.name,
+				symbol_id = sym_id,
+				scope_id  = scope_id,
+			})
+			ctx.reg.class_types[sym_id] = class_type_id
+		}
+	} else {
+		class_type_id = register_type(ctx.reg, Class_Type{
+			name      = cd.name,
+			symbol_id = sym_id,
+			scope_id  = scope_id,
+		})
 	}
 
 	// Resolve base classes, detecting Generic[T] for type_params
@@ -686,6 +717,37 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	// @dataclass: auto-generate __init__, __repr__, __eq__
 	if is_dataclass {
 		init_params := make([dynamic]Param_Type, 0, 8, ctx.reg.allocator)
+
+		// Collect parent dataclass fields first (MRO: parent fields before child)
+		child_field_names := make(map[string]bool, 8, ctx.reg.allocator)
+		for stmt in cd.body {
+			#partial switch s in stmt {
+			case ^parser.Ann_Assign:
+				if name_expr, ok := s.target.(^parser.Name_Expr); ok {
+					child_field_names[name_expr.id] = true
+				}
+			}
+		}
+		for base_type_id in bases {
+			base_t := get_type(ctx.reg, base_type_id)
+			#partial switch &base_cls in base_t.info {
+			case Class_Type:
+				if parent_init, ok := base_cls.attrs["__init__"]; ok {
+					parent_init_t := get_type(ctx.reg, parent_init)
+					#partial switch &parent_info in parent_init_t.info {
+					case Callable_Type:
+						for p in parent_info.params {
+							// Skip fields overridden by child
+							if !(p.name in child_field_names) {
+								append(&init_params, p)
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Then add child's own fields
 		for stmt in cd.body {
 			#partial switch s in stmt {
 			case ^parser.Ann_Assign:
@@ -785,13 +847,11 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 				if attr, ok := target.(^parser.Attribute_Expr); ok {
 					if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
 						if self_name.id == "self" {
-							// Check if there's a type annotation from parameter
+							// Infer attribute type from RHS
 							val_type := TYPE_UNKNOWN
 							if s.value != nil {
-								// Try to infer from RHS
-								// Simple case: self.x = x where x is a parameter
+								// First try: self.x = x where x is a parameter
 								if name, ok3 := s.value.(^parser.Name_Expr); ok3 {
-									// Look up parameter type
 									for arg in fd.args.args {
 										if arg.arg == name.id {
 											val_type = resolve_annotation(
@@ -799,6 +859,10 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 											break
 										}
 									}
+								}
+								// Fallback: infer from RHS expression (handles literals, constructors, etc.)
+								if val_type == TYPE_UNKNOWN {
+									val_type = infer_expr(s.value, ctx)
 								}
 							}
 							attrs[attr.attr] = val_type
@@ -902,6 +966,52 @@ check_return_types :: proc(
 ) {
 	// Already checked inline during stmt processing (T003)
 	// This is for additional cross-block analysis if needed
+}
+
+// ==================== Pre-registration ====================
+
+// Pre-register all class names so that return type annotations (-> MyClass) can resolve them.
+// Only registers placeholder Class_Types — full class body processing happens later in check_scope.
+pre_register_classes :: proc(stmts: []parser.Stmt, bind_result: ^binder.Bind_Result, reg: ^Type_Registry) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Class_Def:
+			sym_id := find_symbol_for_name(s.name, s.loc, bind_result)
+			// Skip if already registered (e.g., from imports)
+			if sym_id != binder.INVALID_SYMBOL {
+				if _, already := reg.class_types[sym_id]; already { continue }
+			}
+			scope_id := find_scope_for_def(s.name, s.loc, bind_result, .Class)
+			class_type_id := register_type(reg, Class_Type{
+				name      = s.name,
+				symbol_id = sym_id,
+				scope_id  = scope_id,
+			})
+			if sym_id != binder.INVALID_SYMBOL {
+				reg.class_types[sym_id] = class_type_id
+			}
+			// Recurse for nested classes
+			pre_register_classes(s.body, bind_result, reg)
+
+		case ^parser.If_Stmt:
+			pre_register_classes(s.body, bind_result, reg)
+			pre_register_classes(s.orelse, bind_result, reg)
+		case ^parser.For_Stmt:
+			pre_register_classes(s.body, bind_result, reg)
+		case ^parser.While_Stmt:
+			pre_register_classes(s.body, bind_result, reg)
+		case ^parser.Try_Stmt:
+			pre_register_classes(s.body, bind_result, reg)
+			for handler in s.handlers {
+				pre_register_classes(handler.body, bind_result, reg)
+			}
+			pre_register_classes(s.orelse, bind_result, reg)
+		case ^parser.With_Stmt:
+			pre_register_classes(s.body, bind_result, reg)
+		case ^parser.Func_Def:
+			pre_register_classes(s.body, bind_result, reg)
+		}
+	}
 }
 
 // ==================== AST Scanning for Return Types ====================

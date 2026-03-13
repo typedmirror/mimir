@@ -175,6 +175,20 @@ analyze_condition :: proc(
 			})
 		}
 
+	case ^parser.Named_Expr:
+		// if (x := value): (walrus + truthiness)
+		sym_id := expr_to_symbol(e.target, bind_result)
+		if sym_id != binder.INVALID_SYMBOL {
+			append(guards, Guard{
+				kind         = .Is_Truthy,
+				symbol_id    = sym_id,
+				branch_block = branch_block,
+				true_block   = true_block,
+				false_block  = false_block,
+				loc          = loc,
+			})
+		}
+
 	case ^parser.Unary_Op_Expr:
 		// if not x: → invert
 		if e.op == .Not {
@@ -259,6 +273,9 @@ expr_to_symbol :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result) -> b
 				return sym.id
 			}
 		}
+	case ^parser.Named_Expr:
+		// Walrus operator (x := value) — extract target symbol
+		return expr_to_symbol(e.target, bind_result)
 	}
 	return binder.INVALID_SYMBOL
 }

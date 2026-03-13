@@ -191,14 +191,22 @@ resolve_annotation :: proc(
 					return make_instance_type(reg, class_type_id)
 				}
 			}
-			// Check if symbol maps to a TypeVar/TypedDict/Protocol in environment
+			// Check if symbol maps to a TypeVar/TypedDict/Protocol/type alias in environment
 			if env != nil {
 				if env_type, env_found := env.types[sym_id]; env_found {
 					et := get_type(reg, env_type)
-					#partial switch _ in et.info {
+					#partial switch info in et.info {
 					case TypeVar_Type:    return env_type
 					case TypedDict_Type:  return env_type
 					case Protocol_Type:   return env_type
+					case Callable_Type:
+						// Type alias: MyInt = int → Callable returns int → use return type
+						if info.return_type != TYPE_UNKNOWN && info.return_type != TYPE_ANY {
+							return info.return_type
+						}
+					case Class_Type:
+						// Class alias: MyClass = Foo → use as instance type
+						return make_instance_type(reg, env_type)
 					}
 				}
 			}
