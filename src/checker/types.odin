@@ -155,6 +155,7 @@ Type_Registry :: struct {
 	instance_cache: map[Type_ID]Type_ID,
 	spec_cache:     map[u64]Type_ID,
 	tensor_cache:   map[u64]Type_ID,
+	overload_sigs:  map[binder.Symbol_ID][dynamic]Type_ID,
 	allocator:      mem.Allocator,
 }
 
@@ -170,6 +171,7 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.instance_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.spec_cache = make(map[u64]Type_ID, 8, allocator)
 	reg.tensor_cache = make(map[u64]Type_ID, 8, allocator)
+	reg.overload_sigs = make(map[binder.Symbol_ID][dynamic]Type_ID, 8, allocator)
 
 	// Slot 0: INVALID
 	append(&reg.types, Type{id = INVALID_TYPE})

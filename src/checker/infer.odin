@@ -461,6 +461,16 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 		return TYPE_UNKNOWN
 	}
 
+	// Check for overloads — if function has @overload sigs, resolve against them
+	#partial switch fn in e.func {
+	case ^parser.Name_Expr:
+		if sym_id, ok := binder.get_ref(ctx.bind_result, rawptr(fn)); ok {
+			if sigs, has := ctx.reg.overload_sigs[sym_id]; has && len(sigs) > 0 {
+				return resolve_overload(e, sigs[:], ctx)
+			}
+		}
+	}
+
 	ft := get_type(ctx.reg, func_type)
 	#partial switch &info in ft.info {
 	case Callable_Type:
@@ -1091,6 +1101,62 @@ emit_diagnostic :: proc(ctx: ^Infer_Context, loc: parser.Src_Loc, code: string, 
 		why  = why,
 		fix  = fix,
 	})
+}
+
+// ==================== Overload Resolution ====================
+
+resolve_overload :: proc(e: ^parser.Call_Expr, sigs: []Type_ID, ctx: ^Infer_Context) -> Type_ID {
+	// Infer arg types
+	arg_types := make([]Type_ID, len(e.args), ctx.reg.allocator)
+	for arg, i in e.args {
+		arg_types[i] = infer_expr(arg, ctx)
+	}
+	for kw in e.keywords {
+		infer_expr(kw.value, ctx)
+	}
+	// Try each overload signature — first match wins
+	for sig_id in sigs {
+		sig := get_type(ctx.reg, sig_id)
+		#partial switch info in sig.info {
+		case Callable_Type:
+			if overload_sig_matches(arg_types, e.keywords, info.params, ctx.reg) {
+				return info.return_type
+			}
+		}
+	}
+	// No overload matched — return TYPE_UNKNOWN
+	return TYPE_UNKNOWN
+}
+
+overload_sig_matches :: proc(arg_types: []Type_ID, keywords: []parser.Keyword, params: []Param_Type, reg: ^Type_Registry) -> bool {
+	total := len(arg_types) + len(keywords)
+	required := 0
+	for p in params {
+		if !p.has_default { required += 1 }
+	}
+	if total < required || total > len(params) { return false }
+	// Check positional args
+	for arg_type, i in arg_types {
+		if i >= len(params) { return false }
+		if arg_type != TYPE_UNKNOWN && arg_type != TYPE_ANY &&
+		   params[i].type_id != TYPE_UNKNOWN && params[i].type_id != TYPE_ANY {
+			if !is_assignable(reg, arg_type, params[i].type_id) {
+				return false
+			}
+		}
+	}
+	// Check keyword args
+	for kw in keywords {
+		found := false
+		for p in params {
+			if p.name == kw.arg {
+				found = true
+				break
+			}
+		}
+		if !found { return false }
+	}
+	return true
 }
 
 fmt_binop_error :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^Type_Registry) -> string {

@@ -349,6 +349,21 @@ check_stmt :: proc(
 	case ^parser.Func_Def:
 		func_type := build_func_type(s, ctx)
 		set_name_type(s.name, func_type, ctx)
+		// Record @overload signature if decorated (after set_name_type to ensure symbol is in env)
+		if has_overload_decorator(s.decorator_list, ctx.bind_result) {
+			for sym_id in ctx.env.types {
+				sym := binder.result_get_symbol(ctx.bind_result, sym_id)
+				if sym != nil && sym.name == s.name {
+					if sym_id not_in ctx.reg.overload_sigs {
+						ctx.reg.overload_sigs[sym_id] = make([dynamic]Type_ID, 0, 4, ctx.reg.allocator)
+					}
+					sigs := ctx.reg.overload_sigs[sym_id]
+					append(&sigs, func_type)
+					ctx.reg.overload_sigs[sym_id] = sigs
+					break
+				}
+			}
+		}
 
 	case ^parser.Async_Func_Def:
 		func_type := build_async_func_type(s, ctx)
@@ -545,6 +560,20 @@ resolve_isinstance_type :: proc(
 }
 
 // ==================== Function/Class Type Building ====================
+
+has_overload_decorator :: proc(decorators: []parser.Expr, bind_result: ^binder.Bind_Result) -> bool {
+	for dec in decorators {
+		#partial switch d in dec {
+		case ^parser.Name_Expr:
+			if orig, is_typing := bind_result.typing_names[d.id]; is_typing && orig == "overload" {
+				return true
+			}
+		case ^parser.Attribute_Expr:
+			if d.attr == "overload" { return true }
+		}
+	}
+	return false
+}
 
 build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 	params := resolve_params(&fd.args, ctx)
