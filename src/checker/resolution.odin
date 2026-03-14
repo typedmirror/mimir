@@ -149,17 +149,68 @@ resolve_single_constraint :: proc(
 		append(&result, TYPE_STR)   // str[int] → str
 		append(&result, TYPE_BYTES) // bytes[int] → int
 		// list, dict, tuple are subscriptable but Type_IDs vary
+
+	case Type_Subtype:
+		// Direct type constraint: var must be assignable to cv.type_id
+		// The candidate is the type itself (or subtypes)
+		append(&result, cv.type_id)
+		// Also add subtypes: bool <: int <: float
+		if cv.type_id == TYPE_FLOAT {
+			append(&result, TYPE_INT)
+			append(&result, TYPE_BOOL)
+		} else if cv.type_id == TYPE_INT {
+			append(&result, TYPE_BOOL)
+		}
+
+	case Supports_Op:
+		// Which types support this operation?
+		is_unary := cv.other_type == TYPE_UNKNOWN
+		#partial switch cv.op {
+		case .Add:
+			append(&result, TYPE_INT)
+			append(&result, TYPE_FLOAT)
+			append(&result, TYPE_BOOL)
+			append(&result, TYPE_COMPLEX)
+			// str + str (concatenation)
+			if cv.other_type == TYPE_STR { append(&result, TYPE_STR) }
+		case .Sub, .Div, .Mod, .Pow, .Floor_Div:
+			// Pure numeric (str doesn't support these)
+			append(&result, TYPE_INT)
+			append(&result, TYPE_FLOAT)
+			append(&result, TYPE_BOOL)
+			append(&result, TYPE_COMPLEX)
+		case .Mul:
+			append(&result, TYPE_INT)
+			append(&result, TYPE_FLOAT)
+			append(&result, TYPE_BOOL)
+			append(&result, TYPE_COMPLEX)
+			// str/bytes * int (repetition) — only if other is int-like
+			if !is_unary && (cv.other_type == TYPE_INT || cv.other_type == TYPE_BOOL) {
+				append(&result, TYPE_STR)
+				append(&result, TYPE_BYTES)
+			}
+		case .Bit_And, .Bit_Or, .Bit_Xor:
+			append(&result, TYPE_INT)
+			append(&result, TYPE_BOOL)
+		case .Eq, .Not_Eq:
+			// Everything supports ==, no narrowing
+		case .Lt, .Lt_E, .Gt, .Gt_E:
+			append(&result, TYPE_INT)
+			append(&result, TYPE_FLOAT)
+			append(&result, TYPE_BOOL)
+			append(&result, TYPE_STR)
+			append(&result, TYPE_BYTES)
+		}
 	}
 
 	return result[:]
 }
 
 // When multiple types match all constraints, pick the most specific one.
-// Heuristic: prefer primitive types over instance types, prefer str over bytes
-// when both match (str is more common in Python code).
+// Priority: int > float > str > bytes > bool. Int is the most common Python type
+// and the most likely backward inference target for arithmetic operations.
 pick_most_specific :: proc(candidates: map[Type_ID]bool, reg: ^Type_Registry) -> Type_ID {
-	// Priority: str > bytes > int > float > bool > first class instance > UNKNOWN
-	priority := [?]Type_ID{TYPE_STR, TYPE_BYTES, TYPE_INT, TYPE_FLOAT, TYPE_BOOL}
+	priority := [?]Type_ID{TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_BYTES, TYPE_BOOL}
 	for p in priority {
 		if p in candidates { return p }
 	}

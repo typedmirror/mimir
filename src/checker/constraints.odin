@@ -29,6 +29,8 @@ Constraint :: union {
 	Callable_With,
 	Iterable_Of,
 	Subscriptable,
+	Type_Subtype,    // Phase II: var <: type (from call-site argument matching)
+	Supports_Op,     // Phase II: var supports binary/unary operation
 }
 
 Has_Method :: struct {
@@ -64,6 +66,27 @@ Subscriptable :: struct {
 	key_type:   Type_ID,
 	value_type: Type_ID,
 	loc:        parser.Src_Loc,
+}
+
+// Phase II constraints
+Type_Subtype :: struct {
+	var:     Constraint_Var,
+	type_id: Type_ID,        // var must be assignable to this type
+	loc:     parser.Src_Loc,
+}
+
+Op_Kind :: enum u8 {
+	Add, Sub, Mul, Div, Mod, Pow, Floor_Div,  // arithmetic
+	Bit_And, Bit_Or, Bit_Xor,                  // bitwise
+	Eq, Not_Eq, Lt, Gt, Lt_E, Gt_E,           // comparison
+}
+
+Supports_Op :: struct {
+	var:          Constraint_Var,
+	op:           Op_Kind,
+	other_type:   Type_ID,    // the other operand's type (may be UNKNOWN)
+	result_type:  Type_ID,    // inferred result type
+	loc:          parser.Src_Loc,
 }
 
 // ==================== Constraint Set ====================
@@ -114,6 +137,8 @@ add_constraint :: proc(cs: ^Constraint_Set, c: Constraint) {
 	case Callable_With: var_id = cv.var
 	case Iterable_Of:   var_id = cv.var
 	case Subscriptable: var_id = cv.var
+	case Type_Subtype:  var_id = cv.var
+	case Supports_Op:   var_id = cv.var
 	}
 	if var_id != INVALID_CONSTRAINT_VAR {
 		if vc, ok := &cs.var_constraints[var_id]; ok {
@@ -208,6 +233,11 @@ init_method_table :: proc(reg: ^Type_Registry) -> Builtin_Method_Table {
 	add_method(&mt, "issubset",     TYPE_ANY, {}, TYPE_BOOL, reg.allocator)
 	add_method(&mt, "issuperset",   TYPE_ANY, {}, TYPE_BOOL, reg.allocator)
 
+	// Dunder methods for builtin function constraints
+	add_method(&mt, "__len__", TYPE_STR,   {}, TYPE_INT, reg.allocator)
+	add_method(&mt, "__len__", TYPE_BYTES, {}, TYPE_INT, reg.allocator)
+	// list, dict, set, tuple also have __len__ but are TYPE_ANY-keyed above
+
 	return mt
 }
 
@@ -239,7 +269,8 @@ Collect_Context :: struct {
 	bind_result:  ^binder.Bind_Result,
 	reg:          ^Type_Registry,
 	expr_types:   ^map[rawptr]Type_ID,
-	unknown_syms: map[binder.Symbol_ID]bool, // symbols to track
+	symbol_types: ^map[binder.Symbol_ID]Type_ID, // for looking up function signatures
+	unknown_syms: map[binder.Symbol_ID]bool,
 	scope_id:     binder.Scope_ID,
 }
 
@@ -249,6 +280,7 @@ collect_scope_constraints :: proc(
 	reg: ^Type_Registry,
 	envs: []Type_Env,
 	expr_types: ^map[rawptr]Type_ID,
+	symbol_types: ^map[binder.Symbol_ID]Type_ID,
 	unknown_params: []binder.Symbol_ID,
 	allocator: mem.Allocator,
 ) -> Constraint_Set {
@@ -267,6 +299,7 @@ collect_scope_constraints :: proc(
 		bind_result  = bind_result,
 		reg          = reg,
 		expr_types   = expr_types,
+		symbol_types = symbol_types,
 		unknown_syms = unknown_syms,
 		scope_id     = cfg.scope_id,
 	}
@@ -359,6 +392,9 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 			}
 		}
 
+		// f(x) where f has typed params → Type_Subtype(x, param_type)
+		collect_callsite_constraints(e, ctx)
+
 		// x(args) → Callable_With (when x is an unknown param called directly)
 		if name, ok := e.func.(^parser.Name_Expr); ok {
 			sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name))
@@ -425,6 +461,279 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 				loc        = e.loc,
 			})
 		}
+
+	case ^parser.Bin_Op_Expr:
+		// x + 1 → Supports_Op(x, Add, int)
+		collect_binop_constraint(e, ctx)
+
+	case ^parser.Unary_Op_Expr:
+		// -x → Supports_Op(x, Sub, UNKNOWN) — numeric unary
+		collect_unaryop_constraint(e, ctx)
+
+	case ^parser.Compare_Expr:
+		// x > 0 → Supports_Op(x, Gt, int)
+		collect_compare_constraint(e, ctx)
+	}
+}
+
+// Phase II: UnaryOp constraint generation — -x, ~x → numeric
+collect_unaryop_constraint :: proc(e: ^parser.Unary_Op_Expr, ctx: ^Collect_Context) {
+	sym_id := resolve_to_symbol(e.operand, ctx.bind_result)
+	if sym_id == binder.INVALID_SYMBOL { return }
+	if sym_id not_in ctx.unknown_syms { return }
+
+	cv := get_or_create_var(ctx.cs, sym_id, ctx.scope_id, TYPE_UNKNOWN)
+
+	switch e.op {
+	case .USub, .UAdd:
+		// -x, +x → numeric (int, float, complex)
+		add_constraint(ctx.cs, Supports_Op{
+			var         = cv,
+			op          = .Sub,
+			other_type  = TYPE_UNKNOWN, // unary, no other operand
+			result_type = TYPE_UNKNOWN,
+			loc         = e.loc,
+		})
+	case .Invert:
+		// ~x → int only
+		add_constraint(ctx.cs, Supports_Op{
+			var         = cv,
+			op          = .Bit_And,
+			other_type  = TYPE_UNKNOWN,
+			result_type = TYPE_UNKNOWN,
+			loc         = e.loc,
+		})
+	case .Not:
+		// not x → no type constraint (any type can be truthiness-tested)
+	}
+}
+
+// Phase II: BinOp constraint generation
+collect_binop_constraint :: proc(e: ^parser.Bin_Op_Expr, ctx: ^Collect_Context) {
+	// Check if left operand is an unknown param
+	left_sym := resolve_to_symbol(e.left, ctx.bind_result)
+	if left_sym != binder.INVALID_SYMBOL && left_sym in ctx.unknown_syms {
+		other_type := TYPE_UNKNOWN
+		if t, found := ctx.expr_types[rawptr_from_expr(e.right)]; found {
+			other_type = t
+		}
+		result_type := TYPE_UNKNOWN
+		if t, found := ctx.expr_types[rawptr_from_expr(parser.Expr(e))]; found {
+			result_type = t
+		}
+		op_kind := binop_to_op_kind(e.op)
+		cv := get_or_create_var(ctx.cs, left_sym, ctx.scope_id, TYPE_UNKNOWN)
+		add_constraint(ctx.cs, Supports_Op{
+			var         = cv,
+			op          = op_kind,
+			other_type  = other_type,
+			result_type = result_type,
+			loc         = e.loc,
+		})
+	}
+
+	// Check if right operand is an unknown param
+	right_sym := resolve_to_symbol(e.right, ctx.bind_result)
+	if right_sym != binder.INVALID_SYMBOL && right_sym in ctx.unknown_syms {
+		other_type := TYPE_UNKNOWN
+		if t, found := ctx.expr_types[rawptr_from_expr(e.left)]; found {
+			other_type = t
+		}
+		result_type := TYPE_UNKNOWN
+		if t, found := ctx.expr_types[rawptr_from_expr(parser.Expr(e))]; found {
+			result_type = t
+		}
+		op_kind := binop_to_op_kind(e.op)
+		cv := get_or_create_var(ctx.cs, right_sym, ctx.scope_id, TYPE_UNKNOWN)
+		add_constraint(ctx.cs, Supports_Op{
+			var         = cv,
+			op          = op_kind,
+			other_type  = other_type,
+			result_type = result_type,
+			loc         = e.loc,
+		})
+	}
+}
+
+binop_to_op_kind :: proc(op: parser.Binary_Op) -> Op_Kind {
+	switch op {
+	case .Add:       return .Add
+	case .Sub:       return .Sub
+	case .Mult:      return .Mul
+	case .Div:       return .Div
+	case .Mod:       return .Mod
+	case .Pow:       return .Pow
+	case .Floor_Div: return .Floor_Div
+	case .Bit_And:   return .Bit_And
+	case .Bit_Or:    return .Bit_Or
+	case .Bit_Xor:   return .Bit_Xor
+	case .Mat_Mult:  return .Mul
+	case .LShift:    return .Bit_And  // approximate
+	case .RShift:    return .Bit_And  // approximate
+	}
+	return .Add
+}
+
+// Phase II: Compare constraint generation
+collect_compare_constraint :: proc(e: ^parser.Compare_Expr, ctx: ^Collect_Context) {
+	// Check left operand
+	left_sym := resolve_to_symbol(e.left, ctx.bind_result)
+	if left_sym != binder.INVALID_SYMBOL && left_sym in ctx.unknown_syms {
+		// Use first comparator's type as the other_type
+		if len(e.comparators) > 0 && len(e.ops) > 0 {
+			other_type := TYPE_UNKNOWN
+			if t, found := ctx.expr_types[rawptr_from_expr(e.comparators[0])]; found {
+				other_type = t
+			}
+			op_kind := cmpop_to_op_kind(e.ops[0])
+			cv := get_or_create_var(ctx.cs, left_sym, ctx.scope_id, TYPE_UNKNOWN)
+			add_constraint(ctx.cs, Supports_Op{
+				var         = cv,
+				op          = op_kind,
+				other_type  = other_type,
+				result_type = TYPE_BOOL,
+				loc         = e.loc,
+			})
+		}
+	}
+
+	// Check comparators that are unknown params
+	for comp, i in e.comparators {
+		comp_sym := resolve_to_symbol(comp, ctx.bind_result)
+		if comp_sym != binder.INVALID_SYMBOL && comp_sym in ctx.unknown_syms {
+			// The "other" is the previous expression in the chain
+			prev_expr: parser.Expr = e.left if i == 0 else e.comparators[i - 1]
+			other_type := TYPE_UNKNOWN
+			if t, found := ctx.expr_types[rawptr_from_expr(prev_expr)]; found {
+				other_type = t
+			}
+			op_kind := cmpop_to_op_kind(e.ops[i])
+			cv := get_or_create_var(ctx.cs, comp_sym, ctx.scope_id, TYPE_UNKNOWN)
+			add_constraint(ctx.cs, Supports_Op{
+				var         = cv,
+				op          = op_kind,
+				other_type  = other_type,
+				result_type = TYPE_BOOL,
+				loc         = e.loc,
+			})
+		}
+	}
+}
+
+cmpop_to_op_kind :: proc(op: parser.Cmp_Op) -> Op_Kind {
+	switch op {
+	case .Eq:     return .Eq
+	case .Not_Eq: return .Not_Eq
+	case .Lt:     return .Lt
+	case .Lt_E:   return .Lt_E
+	case .Gt:     return .Gt
+	case .Gt_E:   return .Gt_E
+	case .Is, .Is_Not, .In, .Not_In:
+		return .Eq  // approximate — these don't constrain type much
+	}
+	return .Eq
+}
+
+// Phase II: Call-site argument constraints
+// When calling f(x) and f has param annotation int → Type_Subtype(x, int)
+collect_callsite_constraints :: proc(e: ^parser.Call_Expr, ctx: ^Collect_Context) {
+	// Get the function being called
+	func_name: ^parser.Name_Expr
+	if name, ok := e.func.(^parser.Name_Expr); ok {
+		func_name = name
+	} else {
+		return // Only handle direct name calls for now
+	}
+
+	// Look up function's symbol and callable type
+	func_sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(func_name))
+	if !ref_ok { return }
+
+	func_type_id, has_type := ctx.symbol_types[func_sym_id]
+	if !has_type { return }
+
+	t := get_type(ctx.reg, func_type_id)
+	callable, is_callable := t.info.(Callable_Type)
+	if !is_callable { return }
+
+	// For each positional argument that is an unknown param,
+	// generate Type_Subtype if the corresponding param has a known type
+	for arg, i in e.args {
+		if i >= len(callable.params) { break }
+		param_type := callable.params[i].type_id
+		if param_type == TYPE_UNKNOWN || param_type == TYPE_ANY { continue }
+
+		arg_sym := resolve_to_symbol(arg, ctx.bind_result)
+		if arg_sym == binder.INVALID_SYMBOL { continue }
+		if arg_sym not_in ctx.unknown_syms { continue }
+
+		cv := get_or_create_var(ctx.cs, arg_sym, ctx.scope_id, TYPE_UNKNOWN)
+		add_constraint(ctx.cs, Type_Subtype{
+			var     = cv,
+			type_id = param_type,
+			loc     = get_expr_loc(arg),
+		})
+	}
+
+	// Also check builtin functions: len(x) → x has __len__, etc.
+	collect_builtin_call_constraints(func_name.id, e, ctx)
+}
+
+// Phase II: Builtin function constraints
+collect_builtin_call_constraints :: proc(func_name: string, e: ^parser.Call_Expr, ctx: ^Collect_Context) {
+	if len(e.args) == 0 { return }
+
+	// Only constrain the first argument
+	arg_sym := resolve_to_symbol(e.args[0], ctx.bind_result)
+	if arg_sym == binder.INVALID_SYMBOL { return }
+	if arg_sym not_in ctx.unknown_syms { return }
+
+	cv := get_or_create_var(ctx.cs, arg_sym, ctx.scope_id, TYPE_UNKNOWN)
+
+	switch func_name {
+	case "len":
+		// len(x) → x has __len__ → x is str, bytes, list, dict, set, tuple
+		add_constraint(ctx.cs, Has_Method{
+			var         = cv,
+			method_name = "__len__",
+			arg_types   = {},
+			return_type = TYPE_INT,
+			loc         = get_expr_loc(parser.Expr(e)),
+		})
+	case "iter", "next":
+		// iter(x) → x is iterable
+		add_constraint(ctx.cs, Iterable_Of{
+			var          = cv,
+			element_type = TYPE_UNKNOWN,
+			loc          = get_expr_loc(parser.Expr(e)),
+		})
+	case "sorted", "reversed", "list", "tuple", "set", "frozenset":
+		// These all take iterables
+		add_constraint(ctx.cs, Iterable_Of{
+			var          = cv,
+			element_type = TYPE_UNKNOWN,
+			loc          = get_expr_loc(parser.Expr(e)),
+		})
+	case "str":
+		// str(x) → no strong constraint (anything can be str'd)
+	case "int":
+		// int(x) → x is str, float, int, bool
+		add_constraint(ctx.cs, Supports_Op{
+			var         = cv,
+			op          = .Add,
+			other_type  = TYPE_INT,
+			result_type = TYPE_UNKNOWN,
+			loc         = get_expr_loc(parser.Expr(e)),
+		})
+	case "float":
+		// float(x) → x is str, int, float
+		add_constraint(ctx.cs, Supports_Op{
+			var         = cv,
+			op          = .Add,
+			other_type  = TYPE_FLOAT,
+			result_type = TYPE_UNKNOWN,
+			loc         = get_expr_loc(parser.Expr(e)),
+		})
 	}
 }
 
