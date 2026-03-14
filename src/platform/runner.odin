@@ -74,7 +74,12 @@ run :: proc(config: Run_Config, allocator: mem.Allocator) -> int {
 	// 5. Resolve dependencies (unless --no-deps)
 	package_paths: [dynamic]string
 	if !config.skip_deps {
-		if len(metadata.dependencies) > 0 {
+		// Try import map first (Layer 4 — structured package resolution)
+		script_dir := parent_dir(config.script)
+		im_paths, im_ok := read_import_map_paths(script_dir, allocator)
+		if im_ok {
+			package_paths = im_paths
+		} else if len(metadata.dependencies) > 0 {
 			// PEP 723 path — Phase 8 behavior, unchanged
 			if !detect_pip(python, allocator) {
 				fmt.eprintfln("mimir run: pip not available for '%s'", python)

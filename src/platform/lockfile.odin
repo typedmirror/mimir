@@ -12,6 +12,7 @@ import "core:strings"
 Locked_Package :: struct {
 	name:    string,
 	version: string,
+	hash:    string, // CAS hash (FNV-64a of "name==version")
 }
 
 Lockfile :: struct {
@@ -50,6 +51,17 @@ read_lockfile :: proc(path: string, allocator: mem.Allocator) -> (Lockfile, Plat
 		}
 	}
 
+	// Read [hashes] section (Layer 4)
+	if hash_table, has_hashes := doc.tables["hashes"]; has_hashes {
+		for &pkg in lf.packages {
+			if val, val_ok := hash_table.entries[pkg.name]; val_ok {
+				if s, is_str := val.(string); is_str {
+					pkg.hash = s
+				}
+			}
+		}
+	}
+
 	return lf, nil
 }
 
@@ -72,6 +84,22 @@ write_lockfile :: proc(lf: ^Lockfile, path: string, allocator: mem.Allocator) ->
 	// Build [packages] section
 	for pkg in lf.packages {
 		toml_set(&doc, "packages", pkg.name, pkg.version, allocator)
+	}
+
+	// Build [hashes] section (Layer 4 — CAS integrity)
+	has_hashes := false
+	for pkg in lf.packages {
+		if len(pkg.hash) > 0 {
+			has_hashes = true
+			break
+		}
+	}
+	if has_hashes {
+		for pkg in lf.packages {
+			if len(pkg.hash) > 0 {
+				toml_set(&doc, "hashes", pkg.name, pkg.hash, allocator)
+			}
+		}
 	}
 
 	// Serialize with header comment

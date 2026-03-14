@@ -136,7 +136,8 @@ install_package_pinned :: proc(
 }
 
 // Install all packages from a lockfile into the cache.
-// Skips packages that are already cached at the correct version.
+// Uses CAS (content-addressed storage) if hashes are present, falls back to versioned dirs.
+// Populates hashes on lockfile entries for newly installed packages.
 install_from_lockfile :: proc(
 	python: string,
 	lf: ^Lockfile,
@@ -146,19 +147,32 @@ install_from_lockfile :: proc(
 	installed := 0
 	skipped := 0
 
-	for pkg in lf.packages {
-		_, found := find_package_version(cache, pkg.name, pkg.version)
-		if found {
+	for &pkg in lf.packages {
+		// Try CAS path first (Layer 4)
+		cas_path, cas_key, cas_found := find_cas_package(cache, pkg.name, pkg.version)
+		if cas_found {
+			pkg.hash = cas_key
 			skipped += 1
 			continue
 		}
 
-		target := package_version_dir(cache, pkg.name, pkg.version)
+		// Fall back to legacy versioned dir
+		_, legacy_found := find_package_version(cache, pkg.name, pkg.version)
+		if legacy_found {
+			// Compute hash for legacy package (for import map generation)
+			pkg.hash = cas_hash(pkg.name, pkg.version, allocator)
+			skipped += 1
+			continue
+		}
+
+		// Install to CAS dir
+		target, key := cas_target_dir(cache, pkg.name, pkg.version)
 		fmt.printfln("  installing %s==%s...", pkg.name, pkg.version)
 		install_err := install_package_pinned(python, pkg.name, pkg.version, target, allocator)
 		if install_err != nil {
 			return install_err
 		}
+		pkg.hash = key
 		installed += 1
 	}
 

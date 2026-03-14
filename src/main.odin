@@ -556,6 +556,22 @@ cmd_lock :: proc(args: []string) {
 	}
 	copy(lf.packages[:], locked)
 
+	// Compute CAS hashes for all packages
+	cache, cache_err := platform.init_cache(allocator)
+	if cache_err == nil {
+		for &pkg in lf.packages {
+			pkg.hash = platform.cas_hash(pkg.name, pkg.version, allocator)
+		}
+
+		// Generate import map
+		im := platform.generate_import_map(&lf, &cache, allocator)
+		project_dir := platform.parent_dir(config_path)
+		im_err := platform.write_import_map(&im, project_dir, allocator)
+		if im_err == nil {
+			fmt.printfln("  wrote .mimir/import_map.json (%d packages)", len(im.packages))
+		}
+	}
+
 	lock_path := platform.lockfile_path(config_path, allocator)
 	lf_write_err := platform.write_lockfile(&lf, lock_path, allocator)
 	if lf_write_err != nil {
@@ -627,6 +643,17 @@ cmd_install :: proc(args: []string) {
 		fmt.eprintfln("mimir install: %s", platform.error_msg(install_err))
 		os.exit(1)
 	}
+
+	// Generate import map after install
+	im := platform.generate_import_map(&lf, &cache, allocator)
+	project_dir := platform.parent_dir(config_path)
+	im_err := platform.write_import_map(&im, project_dir, allocator)
+	if im_err == nil && len(im.packages) > 0 {
+		fmt.printfln("  wrote .mimir/import_map.json (%d packages)", len(im.packages))
+	}
+
+	// Update lockfile with hashes from install
+	platform.write_lockfile(&lf, lock_path, allocator)
 }
 
 cmd_test :: proc(args: []string) {
