@@ -41,8 +41,11 @@ check :: proc(
 	// Initialize method table once (shared across all check_scope calls)
 	mt := init_method_table(&result.registry)
 
+	// Initialize shape registry for mimir.array shape analysis
+	shape_reg := init_shape_registry(allocator)
+
 	// Resolve virtual imports (mimir.array, etc.) for single-file mode
-	virtual_imports := resolve_virtual_imports(&vreg, bind_result, &result.registry)
+	virtual_imports := resolve_virtual_imports(&vreg, bind_result, &result.registry, &shape_reg)
 
 	// Pre-register all classes so return type annotations can reference them
 	pre_register_classes(module.body, bind_result, &result.registry)
@@ -59,11 +62,22 @@ check :: proc(
 		virtual_import_ptr = &virtual_imports
 	}
 
+	// Build shape_reg pointer (nil if no shape semantics registered)
+	shape_reg_ptr: ^Shape_Registry = nil
+	if len(shape_reg.semantics) > 0 {
+		shape_reg_ptr = &shape_reg
+	}
+
 	// Process each scope's CFG
 	for &cfg in flow_result.cfgs {
 		declared_return := TYPE_UNKNOWN
 		if ret, ok := return_type_map[cfg.scope_id]; ok {
 			declared_return = ret
+		}
+		// Get const_map for this scope
+		cm: ^flow.Const_Map = nil
+		if scope_cm, ok := &flow_result.const_maps[cfg.scope_id]; ok {
+			cm = scope_cm
 		}
 		check_scope(
 			&cfg,
@@ -76,6 +90,8 @@ check :: proc(
 			func_args_map = &func_args_map,
 			import_types = virtual_import_ptr,
 			method_table = &mt,
+			shape_reg = shape_reg_ptr,
+			const_map = cm,
 		)
 	}
 
@@ -99,6 +115,10 @@ check :: proc(
 			// Skip functions with explicit return annotations — they don't benefit
 			if declared_return != TYPE_UNKNOWN { continue }
 
+			fixpoint_cm: ^flow.Const_Map = nil
+			if scope_cm, ok := &flow_result.const_maps[cfg.scope_id]; ok {
+				fixpoint_cm = scope_cm
+			}
 			check_scope(
 				&cfg,
 				bind_result,
@@ -109,6 +129,8 @@ check :: proc(
 				declared_return = declared_return,
 				func_args_map = &func_args_map,
 				method_table = &mt,
+				shape_reg = shape_reg_ptr,
+				const_map = fixpoint_cm,
 			)
 		}
 
@@ -120,6 +142,14 @@ check :: proc(
 	if len(result.inferred_returns) > 0 {
 		revalidate_module_calls(module.body, &result, bind_result, &builtins, file_path)
 	}
+
+	// Shape analysis pass — validate tensor operation shapes
+	if len(shape_reg.semantics) > 0 {
+		analyze_shapes(flow_result, &result, bind_result, &shape_reg, file_path, allocator)
+	}
+
+	// D001: unused variable detection (DFG-backed)
+	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
 	return result
 }
@@ -163,10 +193,23 @@ check_with_imports :: proc(
 	local_import_types := import_types
 	mt := init_method_table(registry)
 
+	// Shape analysis support for multi-module mode
+	shape_reg := init_shape_registry(allocator)
+	vreg := init_virtual_registry(registry)
+	resolve_virtual_imports(&vreg, bind_result, registry, &shape_reg)
+	shape_reg_ptr: ^Shape_Registry = nil
+	if len(shape_reg.semantics) > 0 {
+		shape_reg_ptr = &shape_reg
+	}
+
 	for &cfg in flow_result.cfgs {
 		declared_return := TYPE_UNKNOWN
 		if ret, ok := return_type_map[cfg.scope_id]; ok {
 			declared_return = ret
+		}
+		cm: ^flow.Const_Map = nil
+		if scope_cm, ok := &flow_result.const_maps[cfg.scope_id]; ok {
+			cm = scope_cm
 		}
 		check_scope(
 			&cfg,
@@ -180,6 +223,8 @@ check_with_imports :: proc(
 			reg_override  = registry,
 			method_table  = &mt,
 			import_types  = &local_import_types,
+			shape_reg     = shape_reg_ptr,
+			const_map     = cm,
 		)
 	}
 
@@ -198,6 +243,10 @@ check_with_imports :: proc(
 			}
 			if declared_return != TYPE_UNKNOWN { continue }
 
+			fp_cm: ^flow.Const_Map = nil
+			if scope_cm, ok := &flow_result.const_maps[cfg.scope_id]; ok {
+				fp_cm = scope_cm
+			}
 			check_scope(
 				&cfg,
 				bind_result,
@@ -210,6 +259,8 @@ check_with_imports :: proc(
 				reg_override  = registry,
 				import_types  = &local_import_types,
 				method_table  = &mt,
+				shape_reg     = shape_reg_ptr,
+				const_map     = fp_cm,
 			)
 		}
 
@@ -219,6 +270,14 @@ check_with_imports :: proc(
 	if len(result.inferred_returns) > 0 {
 		revalidate_module_calls(module.body, &result, bind_result, builtins, file_path, registry)
 	}
+
+	// Shape analysis pass
+	if len(shape_reg.semantics) > 0 {
+		analyze_shapes(flow_result, &result, bind_result, &shape_reg, file_path, allocator)
+	}
+
+	// D001: unused variable detection (DFG-backed)
+	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
 	// Refresh registry snapshot — now includes all types registered during checking
 	result.registry = registry^
@@ -240,6 +299,8 @@ check_scope :: proc(
 	reg_override: ^Type_Registry = nil,
 	import_types: ^map[binder.Symbol_ID]Type_ID = nil,
 	method_table: ^Builtin_Method_Table = nil,
+	shape_reg: ^Shape_Registry = nil,
+	const_map: ^flow.Const_Map = nil,
 ) {
 	// Use shared registry if provided, otherwise use result's own
 	reg := reg_override if reg_override != nil else &result.registry
@@ -344,6 +405,8 @@ check_scope :: proc(
 			current_class  = current_class,
 			scope_id       = cfg.scope_id,
 			global_types   = global_types_ptr,
+			shape_reg      = shape_reg,
+			const_map      = const_map,
 		}
 
 		// Process each statement in the block

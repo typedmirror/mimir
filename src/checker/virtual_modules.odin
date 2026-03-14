@@ -12,8 +12,9 @@ import binder "mimir:binder"
 // (resolve_imports()) paths consult this registry.
 
 Virtual_Module :: struct {
-	name:    string,
-	exports: map[string]Type_ID,
+	name:             string,
+	exports:          map[string]Type_ID,
+	shape_semantics:  map[string]Shape_Semantic,
 }
 
 Virtual_Registry :: struct {
@@ -47,10 +48,12 @@ get_virtual_exports :: proc(vreg: ^Virtual_Registry, module_name: string) -> (ma
 
 // Resolve virtual imports for a module's bind_result.
 // Scans import records for mimir.* modules, returns symbol_id → type_id map.
+// Also populates shape_reg with shape semantics for imported symbols.
 resolve_virtual_imports :: proc(
 	vreg: ^Virtual_Registry,
 	bind_result: ^binder.Bind_Result,
 	reg: ^Type_Registry,
+	shape_reg: ^Shape_Registry = nil,
 ) -> map[binder.Symbol_ID]Type_ID {
 	result := make(map[binder.Symbol_ID]Type_ID, 8, reg.allocator)
 
@@ -60,8 +63,8 @@ resolve_virtual_imports :: proc(
 	for &imp in bind_result.imports {
 		if !is_virtual_module(vreg, imp.module_name) { continue }
 
-		exports, ok := get_virtual_exports(vreg, imp.module_name)
-		if !ok { continue }
+		vm, vm_ok := vreg.modules[imp.module_name]
+		if !vm_ok { continue }
 
 		if len(imp.names) == 0 {
 			// "import mimir.array" — create Module_Type
@@ -79,7 +82,7 @@ resolve_virtual_imports :: proc(
 			if sym_id, found := mod_scope.symbols[bound_name]; found {
 				module_type_id := register_type(reg, Module_Type{
 					name    = imp.module_name,
-					exports = exports,
+					exports = vm.exports,
 				})
 				result[sym_id] = module_type_id
 			}
@@ -89,8 +92,14 @@ resolve_virtual_imports :: proc(
 				local_name := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
 
 				if sym_id, found := mod_scope.symbols[local_name]; found {
-					if type_id, has := exports[imp_name.name]; has {
+					if type_id, has := vm.exports[imp_name.name]; has {
 						result[sym_id] = type_id
+					}
+					// Register shape semantic for this symbol
+					if shape_reg != nil {
+						if sem, has_sem := vm.shape_semantics[imp_name.name]; has_sem {
+							shape_reg.semantics[sym_id] = sem
+						}
 					}
 				}
 			}
@@ -187,8 +196,22 @@ register_mimir_array :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 		tensor_f64,
 	)
 
+	// Shape semantics for each export
+	shape_sems := make(map[string]Shape_Semantic, 16, reg.allocator)
+	shape_sems["zeros"]     = .Creation
+	shape_sems["ones"]      = .Creation
+	shape_sems["array"]     = .Creation
+	shape_sems["linspace"]  = .Creation
+	shape_sems["arange"]    = .Arange
+	shape_sems["matmul"]    = .Matmul
+	shape_sems["reshape"]   = .Reshape
+	shape_sems["transpose"] = .Transpose
+	shape_sems["sum"]       = .Reduction
+	shape_sems["mean"]      = .Reduction
+
 	vreg.modules["mimir.array"] = Virtual_Module{
-		name    = "mimir.array",
-		exports = exports,
+		name             = "mimir.array",
+		exports          = exports,
+		shape_semantics  = shape_sems,
 	}
 }

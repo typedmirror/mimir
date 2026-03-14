@@ -4,7 +4,8 @@ import "core:mem"
 
 import parser "mimir:parser"
 import binder "mimir:binder"
-import core "mimir:core"
+import flow   "mimir:flow"
+import core   "mimir:core"
 
 // ==================== Expression Type Inference ====================
 
@@ -20,6 +21,8 @@ Infer_Context :: struct {
 	current_class:  Type_ID,
 	scope_id:       binder.Scope_ID,
 	global_types:   ^map[binder.Symbol_ID]Type_ID, // Module-level symbol types (LEGB "G" fallback)
+	shape_reg:      ^Shape_Registry,               // Shape semantics for mimir.array functions
+	const_map:      ^flow.Const_Map,               // Constant propagation results for shape extraction
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -50,6 +53,24 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 				"Unsupported operand types",
 				fmt_binop_error(e.op, left, right, ctx.reg),
 				"Check operand types or add explicit conversion")
+		}
+		// Refine tensor binop shapes (infer_binop returns shape-erased)
+		if result != TYPE_UNKNOWN {
+			lt := get_tensor_info(ctx.reg, left)
+			rt := get_tensor_info(ctx.reg, right)
+			if lt != nil && rt != nil && lt.ndim > 0 && rt.ndim > 0 {
+				if e.op == .Mat_Mult {
+					r_shape, ok, _ := validate_matmul(lt.shape, rt.shape, ctx.reg.allocator)
+					if ok {
+						result = make_tensor_type(ctx.reg, lt.element_type, r_shape)
+					}
+				} else {
+					r_shape, ok, _ := broadcast_shapes(lt.shape, rt.shape, ctx.reg.allocator)
+					if ok {
+						result = make_tensor_type(ctx.reg, lt.element_type, r_shape)
+					}
+				}
+			}
 		}
 		return result
 
@@ -429,7 +450,25 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 		if is_set_type(reg, left) && is_set_type(reg, right) { return left }
 
 	case .Mat_Mult:
+		// Tensor @ Tensor → Tensor (shape validated in shape pass)
+		lt := get_type(reg, left)
+		rt := get_type(reg, right)
+		if _, l_ok := lt.info.(Tensor_Type); l_ok {
+			if _, r_ok := rt.info.(Tensor_Type); r_ok {
+				return left // Shape pass validates dims; return left's type for now
+			}
+		}
 		return TYPE_UNKNOWN
+	}
+
+	// Tensor elementwise ops: Tensor + Tensor → Tensor
+	lt := get_type(reg, left)
+	rt := get_type(reg, right)
+	if l_tensor, l_ok := lt.info.(Tensor_Type); l_ok {
+		if _, r_ok := rt.info.(Tensor_Type); r_ok {
+			// Elementwise: broadcast shape computed in shape pass, return left's element type
+			return make_tensor_type(reg, l_tensor.element_type, {})
+		}
 	}
 
 	return TYPE_UNKNOWN // signals unsupported
@@ -503,6 +542,12 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			return infer_generic_call(e, &info, ctx)
 		}
 		check_call_args(e, &info, ctx)
+		// Shape-aware tensor return: if this is a mimir.array function, compute shaped result
+		if ctx.shape_reg != nil {
+			if shaped := infer_shaped_return(e, info.return_type, ctx); shaped != TYPE_UNKNOWN {
+				return shaped
+			}
+		}
 		return info.return_type
 
 	case TypedDict_Type:
@@ -976,6 +1021,95 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 	}
 
 	return params[:idx]
+}
+
+// ==================== Shape-Aware Tensor Inference ====================
+
+// For mimir.array functions, compute a shaped Tensor_Type from the call arguments.
+// Returns TYPE_UNKNOWN if this isn't a shape-relevant call or shape can't be determined.
+infer_shaped_return :: proc(e: ^parser.Call_Expr, base_return: Type_ID, ctx: ^Infer_Context) -> Type_ID {
+	// Only works for direct name calls
+	name_expr, is_name := e.func.(^parser.Name_Expr)
+	if !is_name { return TYPE_UNKNOWN }
+
+	sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name_expr))
+	if !ref_ok { return TYPE_UNKNOWN }
+
+	semantic, has := ctx.shape_reg.semantics[sym_id]
+	if !has { return TYPE_UNKNOWN }
+
+	// Get base tensor element type from the return type
+	base_tensor := get_tensor_info(ctx.reg, base_return)
+	if base_tensor == nil { return TYPE_UNKNOWN }
+	elem_type := base_tensor.element_type
+
+	switch semantic {
+	case .Creation:
+		// zeros(shape), ones(shape), array(data) — first arg is shape
+		if len(e.args) == 0 { return TYPE_UNKNOWN }
+		shape := extract_shape_from_arg(e.args[0], ctx.const_map, ctx.bind_result, ctx.reg.allocator)
+		if len(shape) > 0 {
+			return make_tensor_type(ctx.reg, elem_type, shape)
+		}
+
+	case .Arange:
+		// arange(stop) or arange(start, stop) or arange(start, stop, step)
+		shape := extract_arange_shape(e.args, ctx.reg.allocator)
+		if len(shape) > 0 {
+			return make_tensor_type(ctx.reg, elem_type, shape)
+		}
+
+	case .Matmul:
+		// matmul(a, b) — compute result shape from operand shapes
+		if len(e.args) < 2 { return TYPE_UNKNOWN }
+		a_type := TYPE_UNKNOWN
+		if t, ok := ctx.expr_types[rawptr_from_expr(e.args[0])]; ok { a_type = t }
+		b_type := TYPE_UNKNOWN
+		if t, ok := ctx.expr_types[rawptr_from_expr(e.args[1])]; ok { b_type = t }
+
+		a_tensor := get_tensor_info(ctx.reg, a_type)
+		b_tensor := get_tensor_info(ctx.reg, b_type)
+		if a_tensor == nil || b_tensor == nil { return TYPE_UNKNOWN }
+		if a_tensor.ndim == 0 || b_tensor.ndim == 0 { return TYPE_UNKNOWN }
+
+		result_shape, ok, _ := validate_matmul(a_tensor.shape, b_tensor.shape, ctx.reg.allocator)
+		if ok {
+			return make_tensor_type(ctx.reg, elem_type, result_shape)
+		}
+		// If not ok, still return shape-erased — error emitted by shape pass
+		return TYPE_UNKNOWN
+
+	case .Reshape:
+		// reshape(a, new_shape) — compute result shape
+		if len(e.args) < 2 { return TYPE_UNKNOWN }
+		new_shape := extract_shape_from_arg(e.args[1], ctx.const_map, ctx.bind_result, ctx.reg.allocator)
+		if len(new_shape) > 0 {
+			return make_tensor_type(ctx.reg, elem_type, new_shape)
+		}
+
+	case .Transpose:
+		// transpose(a) — reverse shape
+		if len(e.args) == 0 { return TYPE_UNKNOWN }
+		a_type := TYPE_UNKNOWN
+		if t, ok := ctx.expr_types[rawptr_from_expr(e.args[0])]; ok { a_type = t }
+		a_tensor := get_tensor_info(ctx.reg, a_type)
+		if a_tensor == nil || a_tensor.ndim == 0 { return TYPE_UNKNOWN }
+
+		reversed := make([]int, a_tensor.ndim, ctx.reg.allocator)
+		for i := 0; i < a_tensor.ndim; i += 1 {
+			reversed[i] = a_tensor.shape[a_tensor.ndim - 1 - i]
+		}
+		return make_tensor_type(ctx.reg, elem_type, reversed)
+
+	case .Reduction:
+		// sum(a), mean(a) — scalar result (shape-erased)
+		return TYPE_UNKNOWN // Falls through to base_return
+
+	case .None:
+		// No shape semantic
+	}
+
+	return TYPE_UNKNOWN
 }
 
 // ==================== Helpers ====================
