@@ -167,12 +167,17 @@ resolve_single_constraint :: proc(
 		is_unary := cv.other_type == TYPE_UNKNOWN
 		#partial switch cv.op {
 		case .Add:
-			append(&result, TYPE_INT)
-			append(&result, TYPE_FLOAT)
-			append(&result, TYPE_BOOL)
-			append(&result, TYPE_COMPLEX)
-			// str + str (concatenation)
-			if cv.other_type == TYPE_STR { append(&result, TYPE_STR) }
+			if cv.other_type == TYPE_STR {
+				// str + str only — int + str is TypeError
+				append(&result, TYPE_STR)
+			} else {
+				append(&result, TYPE_INT)
+				append(&result, TYPE_FLOAT)
+				append(&result, TYPE_BOOL)
+				append(&result, TYPE_COMPLEX)
+				// str + str when other is unknown
+				if cv.other_type == TYPE_UNKNOWN { append(&result, TYPE_STR) }
+			}
 		case .Sub, .Div, .Mod, .Pow, .Floor_Div:
 			// Pure numeric (str doesn't support these)
 			append(&result, TYPE_INT)

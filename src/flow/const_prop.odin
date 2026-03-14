@@ -32,7 +32,7 @@ propagate_constants :: proc(
 	dfg: ^DFG,
 	cfg: ^CFG,
 	bind_result: ^binder.Bind_Result,
-	module: ^parser.Module,
+	module: ^parser.Module,  // reserved for future inter-procedural const prop
 	allocator: mem.Allocator,
 ) -> Const_Map {
 	result := make(Const_Map, 16, allocator)

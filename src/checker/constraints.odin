@@ -788,6 +788,12 @@ get_expr_loc :: proc(expr: parser.Expr) -> parser.Src_Loc {
 	case ^parser.Attribute_Expr:  return e.loc
 	case ^parser.Subscript_Expr:  return e.loc
 	case ^parser.Constant_Expr:   return e.loc
+	case ^parser.Bin_Op_Expr:     return e.loc
+	case ^parser.Unary_Op_Expr:   return e.loc
+	case ^parser.Compare_Expr:    return e.loc
+	case ^parser.Bool_Op_Expr:    return e.loc
+	case ^parser.If_Expr:         return e.loc
+	case ^parser.Lambda_Expr:     return e.loc
 	}
 	return {}
 }

@@ -38,6 +38,9 @@ check :: proc(
 	// Initialize virtual module registry (mimir.* ecosystem stubs)
 	vreg := init_virtual_registry(&result.registry)
 
+	// Initialize method table once (shared across all check_scope calls)
+	mt := init_method_table(&result.registry)
+
 	// Resolve virtual imports (mimir.array, etc.) for single-file mode
 	virtual_imports := resolve_virtual_imports(&vreg, bind_result, &result.registry)
 
@@ -72,6 +75,7 @@ check :: proc(
 			declared_return = declared_return,
 			func_args_map = &func_args_map,
 			import_types = virtual_import_ptr,
+			method_table = &mt,
 		)
 	}
 
@@ -104,6 +108,7 @@ check :: proc(
 				file_path = file_path,
 				declared_return = declared_return,
 				func_args_map = &func_args_map,
+				method_table = &mt,
 			)
 		}
 
@@ -156,6 +161,7 @@ check_with_imports :: proc(
 	collect_func_args(module.body, bind_result, &func_args_map)
 
 	local_import_types := import_types
+	mt := init_method_table(registry)
 
 	for &cfg in flow_result.cfgs {
 		declared_return := TYPE_UNKNOWN
@@ -172,6 +178,7 @@ check_with_imports :: proc(
 			declared_return = declared_return,
 			func_args_map = &func_args_map,
 			reg_override  = registry,
+			method_table  = &mt,
 			import_types  = &local_import_types,
 		)
 	}
@@ -202,6 +209,7 @@ check_with_imports :: proc(
 				func_args_map = &func_args_map,
 				reg_override  = registry,
 				import_types  = &local_import_types,
+				method_table  = &mt,
 			)
 		}
 
@@ -228,6 +236,7 @@ check_scope :: proc(
 	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
 	reg_override: ^Type_Registry = nil,
 	import_types: ^map[binder.Symbol_ID]Type_ID = nil,
+	method_table: ^Builtin_Method_Table = nil,
 ) {
 	// Use shared registry if provided, otherwise use result's own
 	reg := reg_override if reg_override != nil else &result.registry
@@ -279,6 +288,9 @@ check_scope :: proc(
 	if scope != nil && scope.kind != .Module {
 		global_types_ptr = &result.symbol_types
 	}
+
+	// Track diagnostic count before this scope (for dedup on constraint re-inference)
+	diag_count_before_scope := len(result.diagnostics)
 
 	// BFS walk from entry
 	visited := make([]bool, n_blocks, reg.allocator)
@@ -359,16 +371,18 @@ check_scope :: proc(
 		cs := collect_scope_constraints(cfg, bind_result, reg, envs[:],
 			&result.expr_types, &result.symbol_types, unknown_params[:], reg.allocator)
 
-		// Initialize method table (cached on registry via lazy init)
-		mt := init_method_table(reg)
-
-		// Resolve constraints → param types
-		resolved := resolve_constraints(&cs, &mt, reg, reg.allocator)
+		// Resolve constraints → param types (method table passed from check())
+		mt_local: Builtin_Method_Table
+		mt_ptr := method_table
+		if mt_ptr == nil {
+			mt_local = init_method_table(reg)
+			mt_ptr = &mt_local
+		}
+		resolved := resolve_constraints(&cs, mt_ptr, reg, reg.allocator)
 
 		if len(resolved) > 0 {
-			// Re-run forward inference with resolved param types
-			// Clear existing diagnostics for this scope (avoid duplicates)
-			scope_diag_start := len(result.diagnostics)
+			// Truncate diagnostics from the first pass — re-inference reproduces valid ones
+			resize(&result.diagnostics, diag_count_before_scope)
 
 			// Reset visited and envs for re-inference
 			for i in 0..<n_blocks {
@@ -438,13 +452,7 @@ check_scope :: proc(
 				}
 			}
 
-			// Remove duplicate diagnostics from the re-inference pass
-			// Keep only the re-inferred diagnostics (they're more accurate)
-			if scope_diag_start > 0 {
-				// The re-inference may have produced fewer/better diagnostics
-				// We keep all diagnostics — duplicates are acceptable for Phase I
-				// Phase II will implement proper diagnostic scoping
-			}
+			// Diagnostics truncated before re-inference (C01 fix) — no dedup needed
 		}
 	}
 
