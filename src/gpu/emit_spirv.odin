@@ -500,7 +500,7 @@ spirv_emit_graph_node :: proc(
 			fv := get_input(m, node.inputs[2], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 			// cond > 0 as bool
 			cond_bool := spirv_alloc_id(m)
-			spirv_emit(&m.functions, SPIRV_OP_FORD_GREATER_THAN, float_id, cond_bool, cond, const_0_float)
+			spirv_emit(&m.functions, SPIRV_OP_FORD_GREATER_THAN, bool_type_id, cond_bool, cond, const_0_float)
 			result := spirv_alloc_id(m)
 			spirv_emit(&m.functions, SPIRV_OP_SELECT, float_id, result, cond_bool, tv, fv)
 			return result

@@ -95,6 +95,14 @@ install_package_pinned :: proc(
 	target_dir: string,
 	allocator: mem.Allocator,
 ) -> Platform_Error {
+	// Validate name/version to prevent pip flag injection via crafted lockfiles
+	if len(name) > 0 && name[0] == '-' {
+		return Platform_Error_Data{msg = fmt.tprintf("invalid package name '%s': must not start with '-'", name)}
+	}
+	if len(version) > 0 && version[0] == '-' {
+		return Platform_Error_Data{msg = fmt.tprintf("invalid version '%s': must not start with '-'", version)}
+	}
+
 	temp_dir := strings.concatenate({target_dir, ".tmp"}, allocator)
 
 	// Clean up any previous partial install

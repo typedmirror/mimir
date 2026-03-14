@@ -181,13 +181,31 @@ compute_gen_kill :: proc(dfg: ^DFG, cfg: ^CFG) {
 		block_idx := int(def.block_id) - 1
 		if block_idx < 0 || block_idx >= len(cfg.blocks) { continue }
 
-		// Add to GEN
+		// Add to GEN (may be overwritten by later def of same symbol below)
 		(^map[Def_ID]struct{})(&dfg.gen[block_idx])^[def.id] = {}
 
-		// Kill all other defs of the same symbol
+		// Kill all other defs of the same symbol in OTHER blocks
 		for &other in dfg.defs {
 			if other.id != def.id && other.symbol_id == def.symbol_id {
 				(^map[Def_ID]struct{})(&dfg.kill[block_idx])^[other.id] = {}
+			}
+		}
+	}
+
+	// Only the LAST def of each symbol per block should be in GEN.
+	// Remove earlier defs of the same symbol within the same block.
+	for &def in dfg.defs {
+		block_idx := int(def.block_id) - 1
+		if block_idx < 0 || block_idx >= len(cfg.blocks) { continue }
+
+		// Check if a later def of the same symbol exists in the same block
+		for &later in dfg.defs {
+			if later.symbol_id == def.symbol_id && later.block_id == def.block_id &&
+			   later.stmt_idx > def.stmt_idx {
+				// A later def kills this one within the block — remove from GEN
+				gen_map := (^map[Def_ID]struct{})(&dfg.gen[block_idx])
+				delete_key(gen_map, def.id)
+				break
 			}
 		}
 	}

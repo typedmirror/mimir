@@ -273,9 +273,7 @@ make_union_type :: proc(reg: ^Type_Registry, members_in: []Type_ID) -> Type_ID {
 	members_slice := make([]Type_ID, len(flat), reg.allocator)
 	copy(members_slice, flat[:])
 	id := register_type(reg, Union_Type{members = members_slice})
-	if h not_in reg.union_cache {
-		reg.union_cache[h] = id
-	}
+	reg.union_cache[h] = id
 	return id
 }
 

@@ -491,6 +491,14 @@ cmd_add :: proc(args: []string) {
 		fmt.eprintfln("mimir add: %s", platform.error_msg(install_err))
 		os.exit(1)
 	}
+
+	// Generate import map
+	im := platform.generate_import_map(&lf, &cache, allocator)
+	project_dir := platform.parent_dir(config_path)
+	im_err := platform.write_import_map(&im, project_dir, allocator)
+	if im_err == nil && len(im.packages) > 0 {
+		fmt.printfln("  wrote .mimir/import_map.json (%d packages)", len(im.packages))
+	}
 }
 
 cmd_lock :: proc(args: []string) {
@@ -1065,6 +1073,14 @@ cmd_remove :: proc(args: []string) {
 		os.exit(1)
 	}
 	fmt.printfln("  wrote %s (%d packages)", lock_path, len(lf.packages))
+
+	// Regenerate import map after remove
+	cache, cache_err := platform.init_cache(allocator)
+	if cache_err == nil {
+		im := platform.generate_import_map(&lf, &cache, allocator)
+		project_dir := platform.parent_dir(config_path)
+		platform.write_import_map(&im, project_dir, allocator)
+	}
 }
 
 cmd_update :: proc(args: []string) {
@@ -1143,6 +1159,14 @@ cmd_update :: proc(args: []string) {
 	if install_err != nil {
 		fmt.eprintfln("mimir update: %s", platform.error_msg(install_err))
 		os.exit(1)
+	}
+
+	// Generate import map
+	im := platform.generate_import_map(&lf, &cache, allocator)
+	project_dir := platform.parent_dir(config_path)
+	im_err := platform.write_import_map(&im, project_dir, allocator)
+	if im_err == nil && len(im.packages) > 0 {
+		fmt.printfln("  wrote .mimir/import_map.json (%d packages)", len(im.packages))
 	}
 }
 
