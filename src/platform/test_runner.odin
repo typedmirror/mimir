@@ -174,7 +174,7 @@ run_tests :: proc(config: Test_Config, allocator: mem.Allocator) -> (Test_Summar
 	// 5. Write harness to temp file
 	tmp_dir, tmp_err := os.temp_directory(allocator)
 	if tmp_err != nil { tmp_dir = "/tmp" }
-	harness_path := strings.concatenate({tmp_dir, "/mimir_test_harness.py"}, allocator)
+	harness_path := fmt.aprintf("%s/mimir_test_harness_%d.py", tmp_dir, os.get_pid(), allocator = allocator)
 
 	write_err := os.write_entire_file(harness_path, transmute([]u8)harness)
 	if write_err != nil {

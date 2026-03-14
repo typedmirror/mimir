@@ -49,7 +49,8 @@ find_package :: proc(cache: ^Cache, name: string) -> (path: string, found: bool)
 
 // Return the cache directory path for a package (unversioned — Phase 8 compat).
 package_dir :: proc(cache: ^Cache, name: string) -> string {
-	return strings.concatenate({cache.packages, "/", name}, cache.allocator)
+	safe := sanitize_path_component(name)
+	return strings.concatenate({cache.packages, "/", safe}, cache.allocator)
 }
 
 // Check if a versioned package is cached.
@@ -63,5 +64,25 @@ find_package_version :: proc(cache: ^Cache, name, version: string) -> (path: str
 
 // Return the cache directory path for a versioned package.
 package_version_dir :: proc(cache: ^Cache, name, version: string) -> string {
-	return strings.concatenate({cache.packages, "/", name, "/", version}, cache.allocator)
+	safe_name := sanitize_path_component(name)
+	safe_ver := sanitize_path_component(version)
+	return strings.concatenate({cache.packages, "/", safe_name, "/", safe_ver}, cache.allocator)
+}
+
+// Sanitize a path component: strip directory separators and ".." to prevent traversal
+sanitize_path_component :: proc(s: string) -> string {
+	if strings.contains(s, "..") || strings.contains(s, "/") || strings.contains(s, "\\") {
+		// Strip dangerous characters, keep only safe chars
+		buf := make([dynamic]u8, 0, len(s))
+		for c in s {
+			if c == '/' || c == '\\' { continue }
+			append(&buf, u8(c))
+		}
+		result := string(buf[:])
+		// Strip leading/trailing dots
+		result = strings.trim(result, ".")
+		if len(result) == 0 { return "_invalid_" }
+		return result
+	}
+	return s
 }

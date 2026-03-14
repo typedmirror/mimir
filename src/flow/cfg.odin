@@ -426,13 +426,18 @@ process_with :: proc(b: ^CFG_Builder, s: ^parser.With_Stmt, stmt: parser.Stmt) -
 	body_block := new_block(b.cfg, b.allocator)
 	add_edge(b.cfg, pre_block, body_block, .Fallthrough)
 
+	body_start_count := len(b.cfg.blocks)
 	b.current = body_block
 	body_end := process_stmts(b, s.body)
 	if body_end != INVALID_BLOCK {
 		add_edge(b.cfg, body_end, after, .Fallthrough)
 	}
-	// Exception edge for cleanup
+	// Exception edges from ALL body blocks for cleanup
 	add_edge(b.cfg, body_block, after, .Exception)
+	for i := body_start_count; i < len(b.cfg.blocks); i += 1 {
+		body_block_id := Block_ID(i + 1) // 1-indexed
+		add_edge(b.cfg, body_block_id, after, .Exception)
+	}
 
 	return after
 }
@@ -446,12 +451,17 @@ process_async_with :: proc(b: ^CFG_Builder, s: ^parser.Async_With, stmt: parser.
 	body_block := new_block(b.cfg, b.allocator)
 	add_edge(b.cfg, pre_block, body_block, .Fallthrough)
 
+	body_start_count := len(b.cfg.blocks)
 	b.current = body_block
 	body_end := process_stmts(b, s.body)
 	if body_end != INVALID_BLOCK {
 		add_edge(b.cfg, body_end, after, .Fallthrough)
 	}
 	add_edge(b.cfg, body_block, after, .Exception)
+	for i := body_start_count; i < len(b.cfg.blocks); i += 1 {
+		body_block_id := Block_ID(i + 1)
+		add_edge(b.cfg, body_block_id, after, .Exception)
+	}
 
 	return after
 }
@@ -664,9 +674,10 @@ compute_reachability :: proc(cfg: ^CFG) {
 	defer delete(queue)
 	append(&queue, cfg.entry)
 
-	for len(queue) > 0 {
-		block_id := queue[0]
-		ordered_remove(&queue, 0)
+	queue_head := 0
+	for queue_head < len(queue) {
+		block_id := queue[queue_head]
+		queue_head += 1
 
 		blk := get_block(cfg, block_id)
 		if blk == nil { continue }

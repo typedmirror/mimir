@@ -58,7 +58,17 @@ check_typosquat_name :: proc(ctx: ^Security_Context, name: string, loc: parser.S
 
 	for pkg in POPULAR_PACKAGES {
 		dist := levenshtein(name, pkg)
-		if dist == 1 {
+		// Distance 1 always flags; distance 2 flags for longer names (>6 chars)
+		is_typo := dist == 1 || (dist == 2 && len(pkg) > 6)
+		// Also check hyphen/underscore confusion: requests-lib vs requests_lib
+		if !is_typo {
+			normalized_name, _ := strings.replace_all(name, "-", "_")
+			normalized_pkg, _ := strings.replace_all(pkg, "-", "_")
+			if normalized_name != name || normalized_pkg != pkg {
+				is_typo = levenshtein(normalized_name, normalized_pkg) <= 1
+			}
+		}
+		if is_typo {
 			append(&ctx.diagnostics, core.Diagnostic{
 				severity = .Security,
 				location = core.Location{

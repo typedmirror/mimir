@@ -19,7 +19,7 @@ walk_stmts_for_secrets :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
 			// Check: secret_name = "string_value"
 			if c, ok := s.value.(^parser.Constant_Expr); ok {
 				if str, s_ok := c.value.(string); s_ok {
-					if len(str) > 8 {
+					if len(str) > 5 {
 						for target in s.targets {
 							if name, n_ok := target.(^parser.Name_Expr); n_ok {
 								if is_secret_variable_name(name.id) {
@@ -49,7 +49,7 @@ walk_stmts_for_secrets :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
 			if s.value != nil {
 				if c, ok := s.value.(^parser.Constant_Expr); ok {
 					if str, s_ok := c.value.(string); s_ok {
-						if len(str) > 8 {
+						if len(str) > 5 {
 							if name, n_ok := s.target.(^parser.Name_Expr); n_ok {
 								if is_secret_variable_name(name.id) {
 									append(&ctx.diagnostics, core.Diagnostic{
@@ -113,7 +113,7 @@ check_string_prefixes :: proc(ctx: ^Security_Context, expr: parser.Expr, stmt_lo
 		{"gho_",  "GitHub OAuth token"},
 		{"ghs_",  "GitHub server-to-server token"},
 		{"AKIA",  "AWS access key"},
-		{"eyJ",   "JWT token"},
+		{"eyJ",   "JWT token"},  // validated below: must have two dots (header.payload.signature)
 		{"xoxb-", "Slack bot token"},
 		{"xoxp-", "Slack user token"},
 		{"xoxs-", "Slack session token"},
@@ -121,6 +121,12 @@ check_string_prefixes :: proc(ctx: ^Security_Context, expr: parser.Expr, stmt_lo
 
 	for p in prefixes {
 		if strings.has_prefix(str, p.prefix) {
+			// JWT prefix "eyJ" needs structural validation (must have two dots)
+			if p.prefix == "eyJ" {
+				dot_count := 0
+				for c2 in str { if c2 == '.' { dot_count += 1 } }
+				if dot_count != 2 { continue }
+			}
 			append(&ctx.diagnostics, core.Diagnostic{
 				severity = .Security,
 				location = core.Location{

@@ -210,13 +210,17 @@ resolve_annotation :: proc(
 					}
 				}
 			}
-			// Check typing imports (Any, Never, NoReturn, object)
+			// Check typing imports (Any, Never, NoReturn, object, List, Dict, etc.)
 			if orig_name, is_typing := bind_result.typing_names[e.id]; is_typing {
 				switch orig_name {
-				case "Any":      return TYPE_ANY
-				case "Never":    return TYPE_NEVER
-				case "NoReturn": return TYPE_NEVER
-				case "object":   return TYPE_OBJECT
+				case "Any":            return TYPE_ANY
+				case "Never":          return TYPE_NEVER
+				case "NoReturn":       return TYPE_NEVER
+				case "object":         return TYPE_OBJECT
+				case "List", "list":   return make_list_type(reg, TYPE_ANY)
+				case "Dict", "dict":   return make_dict_type(reg, TYPE_ANY, TYPE_ANY)
+				case "Set", "set":     return make_set_type(reg, TYPE_ANY)
+				case "Tuple", "tuple": return make_tuple_type(reg, {}, false)
 				}
 			}
 			return TYPE_UNKNOWN
@@ -231,6 +235,10 @@ resolve_annotation :: proc(
 	case ^parser.Subscript_Expr:
 		// Generic types: list[int], dict[str, int], Optional[int], etc.
 		base_name := get_annotation_name(e.value)
+		// Resolve typing aliases: `from typing import List as L` → L maps to List
+		if orig, ok := bind_result.typing_names[base_name]; ok {
+			base_name = orig
+		}
 		switch base_name {
 		case "list":
 			elem := resolve_annotation(e.slice, reg, bind_result, builtins, env)

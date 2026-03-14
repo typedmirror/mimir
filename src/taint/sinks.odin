@@ -57,9 +57,8 @@ check_sink :: proc(ctx: ^Taint_Context, call: ^parser.Call_Expr) -> (is_sink: bo
 			}
 			// cursor.execute(x) — SEC012
 			// Heuristic: any .execute() call is treated as potential SQL sink
+			// Even with parameterized queries, the query string itself should not be tainted
 			if f.attr == "execute" {
-				// Parameterized query (≥2 args) is safe
-				if len(call.args) >= 2 { return false, {} }
 				return true, {arg_index = 0, desc = "SQL execute()", code = "SEC012"}
 			}
 		}

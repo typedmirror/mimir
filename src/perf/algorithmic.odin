@@ -6,6 +6,7 @@ import core "mimir:core"
 
 // PERF001 — String concatenation in loop is O(n²)
 check_string_concat_in_loop :: proc(ctx: ^Perf_Context) {
+	ctx.current_scope = ctx.module.body
 	walk_stmts_for_concat(ctx, ctx.module.body, false)
 }
 
@@ -34,6 +35,33 @@ walk_stmts_for_concat :: proc(ctx: ^Perf_Context, stmts: []parser.Stmt, in_loop:
 					}
 				}
 			}
+		case ^parser.Assign:
+			// result = result + x (non-augmented string concat in loop)
+			if in_loop {
+				if bin, ok := s.value.(^parser.Bin_Op_Expr); ok && bin.op == .Add {
+					for target in s.targets {
+						if name, n_ok := target.(^parser.Name_Expr); n_ok {
+							// Check if LHS of + matches the target name
+							if lhs_name, l_ok := bin.left.(^parser.Name_Expr); l_ok && lhs_name.id == name.id {
+								if was_string_init_before_loop(ctx, name.id) {
+									append(&ctx.diagnostics, core.Diagnostic{
+										severity = .Performance,
+										location = core.Location{
+											file   = ctx.file_path,
+											line   = int(s.loc.line),
+											column = int(s.loc.col),
+										},
+										what = "string concatenation in loop is O(n²)",
+										why  = "each reassignment copies the entire string; use a list and ''.join()",
+										fix  = "collect items in a list, then use ''.join(items)",
+										code = "PERF001",
+									})
+								}
+							}
+						}
+					}
+				}
+			}
 		case ^parser.For_Stmt:
 			// Walk loop body with in_loop=true
 			walk_stmts_for_concat(ctx, s.body, true)
@@ -42,11 +70,20 @@ walk_stmts_for_concat :: proc(ctx: ^Perf_Context, stmts: []parser.Stmt, in_loop:
 			walk_stmts_for_concat(ctx, s.body, true)
 			walk_stmts_for_concat(ctx, s.orelse, in_loop)
 		case ^parser.Func_Def:
+			prev_scope := ctx.current_scope
+			ctx.current_scope = s.body
 			walk_stmts_for_concat(ctx, s.body, false)
+			ctx.current_scope = prev_scope
 		case ^parser.Async_Func_Def:
+			prev_scope := ctx.current_scope
+			ctx.current_scope = s.body
 			walk_stmts_for_concat(ctx, s.body, false)
+			ctx.current_scope = prev_scope
 		case ^parser.Class_Def:
+			prev_scope := ctx.current_scope
+			ctx.current_scope = s.body
 			walk_stmts_for_concat(ctx, s.body, false)
+			ctx.current_scope = prev_scope
 		case ^parser.If_Stmt:
 			walk_stmts_for_concat(ctx, s.body, in_loop)
 			walk_stmts_for_concat(ctx, s.orelse, in_loop)
@@ -61,23 +98,25 @@ walk_stmts_for_concat :: proc(ctx: ^Perf_Context, stmts: []parser.Stmt, in_loop:
 	}
 }
 
-// Check if a variable was initialized to "" in preceding statements (outside the current loop)
-// We look backward from the loop statement that contains this aug_assign
+// Check if a variable was initialized to "" in preceding statements (same scope)
 was_string_init_before_loop :: proc(ctx: ^Perf_Context, name: string) -> bool {
-	return check_string_init_in_scope(ctx.module.body, name)
+	// Use the innermost scope being walked, not module.body
+	return check_string_init_in_scope(ctx.current_scope, name)
 }
 
-// Recursively check if any Assign in the scope initializes `name` to a string literal
+// Check if any Assign in the given statements initializes `name` to a string literal
+// Does NOT recurse into function/class bodies (different scope)
 check_string_init_in_scope :: proc(stmts: []parser.Stmt, name: string) -> bool {
 	for stmt in stmts {
 		#partial switch s in stmt {
 		case ^parser.Assign:
 			if is_string_assign(s, name) { return true }
-		case ^parser.Func_Def:
+		case ^parser.If_Stmt:
 			if check_string_init_in_scope(s.body, name) { return true }
-		case ^parser.Async_Func_Def:
+			if check_string_init_in_scope(s.orelse, name) { return true }
+		case ^parser.With_Stmt:
 			if check_string_init_in_scope(s.body, name) { return true }
-		case ^parser.Class_Def:
+		case ^parser.Try_Stmt:
 			if check_string_init_in_scope(s.body, name) { return true }
 		}
 	}

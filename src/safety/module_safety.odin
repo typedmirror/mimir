@@ -15,7 +15,7 @@ check_import_side_effect :: proc(ctx: ^Safety_Context) {
 		#partial switch s in stmt {
 		case ^parser.Expr_Stmt:
 			if call, is_call := s.value.(^parser.Call_Expr); is_call {
-				if !is_safe_module_call(call) {
+				if !is_safe_module_call_standalone(call) {
 					name := call_name(call)
 					append(&ctx.diagnostics, core.Diagnostic{
 						severity = .Warning,
@@ -295,7 +295,7 @@ is_safe_module_call :: proc(call: ^parser.Call_Expr) -> bool {
 		for safe in SAFE_BUILTINS {
 			if name.id == safe { return true }
 		}
-		// Capitalized = likely class constructor
+		// Capitalized = likely class constructor (for assigned context)
 		if len(name.id) > 0 && name.id[0] >= 'A' && name.id[0] <= 'Z' {
 			return true
 		}
@@ -311,6 +311,22 @@ is_safe_module_call :: proc(call: ^parser.Call_Expr) -> bool {
 		return false
 	}
 
+	return false
+}
+
+// Standalone call check: does NOT exempt capitalized names (standalone Setup() is suspicious)
+is_safe_module_call_standalone :: proc(call: ^parser.Call_Expr) -> bool {
+	if name, is_name := call.func.(^parser.Name_Expr); is_name {
+		for safe in SAFE_BUILTINS {
+			if name.id == safe { return true }
+		}
+		return false
+	}
+	if attr, is_attr := call.func.(^parser.Attribute_Expr); is_attr {
+		if attr.attr == "namedtuple" || attr.attr == "dataclass" { return true }
+		if attr.attr == "getLogger" { return true }
+		return false
+	}
 	return false
 }
 

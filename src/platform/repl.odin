@@ -32,7 +32,7 @@ init_repl :: proc(bridge: ^parser.Bridge, allocator: mem.Allocator) -> Repl_Stat
 		accumulated_source = strings.builder_make(0, 1024, allocator),
 		continuation_lines = strings.builder_make(0, 256, allocator),
 		bridge             = bridge,
-		temp_path          = "/tmp/mimir_repl_input.py",
+		temp_path          = fmt.aprintf("/tmp/mimir_repl_%d.py", os.get_pid(), allocator = allocator),
 		allocator          = allocator,
 	}
 }

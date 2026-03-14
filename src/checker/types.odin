@@ -521,13 +521,14 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	return false
 }
 
-is_class_subtype :: proc(reg: ^Type_Registry, sub_class: Type_ID, super_class: Type_ID) -> bool {
+is_class_subtype :: proc(reg: ^Type_Registry, sub_class: Type_ID, super_class: Type_ID, depth: int = 0) -> bool {
 	if sub_class == super_class { return true }
+	if depth > 32 { return false }  // cycle guard
 	t := get_type(reg, sub_class)
 	#partial switch cls in t.info {
 	case Class_Type:
 		for base in cls.bases {
-			if is_class_subtype(reg, base, super_class) { return true }
+			if is_class_subtype(reg, base, super_class, depth + 1) { return true }
 		}
 	}
 	return false

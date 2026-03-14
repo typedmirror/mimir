@@ -23,7 +23,7 @@ resolve :: proc(python: string, deps: []Dep_Spec, allocator: mem.Allocator) -> (
 	if tmp_err != nil {
 		tmp_dir = "/tmp"
 	}
-	report_path := strings.concatenate({tmp_dir, "/mimir_pip_report.json"}, allocator)
+	report_path := fmt.aprintf("%s/mimir_pip_report_%d.json", tmp_dir, os.get_pid(), allocator = allocator)
 	defer {
 		if os.exists(report_path) {
 			os.remove(report_path)

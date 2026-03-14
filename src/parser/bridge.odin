@@ -17,11 +17,12 @@ Bridge :: struct {
 }
 
 bridge_start :: proc() -> (Bridge, Parse_Error) {
-	// Write helper script to temp file
-	helper_path := "/tmp/mimir_ast_helper.py"
+	// Write helper script to temp file with PID-unique name
+	pid := os.get_pid()
+	helper_path := fmt.tprintf("/tmp/mimir_ast_helper_%d.py", pid)
 	write_err := os.write_entire_file(helper_path, transmute([]byte)HELPER_SCRIPT)
 	if write_err != nil {
-		return {}, Bridge_Error{"failed to write helper script to /tmp"}
+		return {}, Bridge_Error{"failed to write helper script"}
 	}
 
 	// Create pipes for child stdin/stdout

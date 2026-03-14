@@ -36,8 +36,8 @@ analyze_document :: proc(
 ) -> Analysis_Result {
 	result: Analysis_Result
 
-	// Write content to temp file (parser bridge needs a file path)
-	temp_path := "/tmp/mimir_lsp_input.py"
+	// Write content to temp file with PID-unique name
+	temp_path := fmt.tprintf("/tmp/mimir_lsp_%d.py", os.get_pid())
 	write_err := os.write_entire_file(temp_path, transmute([]u8)content)
 	if write_err != nil {
 		return result

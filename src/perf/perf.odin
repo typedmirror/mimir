@@ -12,15 +12,16 @@ Perf_Config :: struct {
 }
 
 Perf_Context :: struct {
-	source:      string,
-	lines:       []string,
-	module:      ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	file_path:   string,
-	config:      ^Perf_Config,
-	diagnostics: [dynamic]core.Diagnostic,
-	import_map:  map[string]string,
-	allocator:   mem.Allocator,
+	source:        string,
+	lines:         []string,
+	module:        ^parser.Module,
+	bind_result:   ^binder.Bind_Result,
+	file_path:     string,
+	config:        ^Perf_Config,
+	diagnostics:   [dynamic]core.Diagnostic,
+	import_map:    map[string]string,
+	allocator:     mem.Allocator,
+	current_scope: []parser.Stmt,  // innermost function body for scoped checks
 }
 
 default_config :: proc() -> Perf_Config {

@@ -115,10 +115,10 @@ parse_toml_mypy :: proc(result: ^Import_Result, content: string, allocator: mem.
 
 		// Section header
 		if trimmed[0] == '[' {
-			if strings.contains(trimmed, "tool.mypy]") && !strings.contains(trimmed, "tool.mypy.") {
+			if trimmed == "[tool.mypy]" || trimmed == "[mypy]" {
 				in_mypy_section = true
 				in_override = false
-			} else if strings.contains(trimmed, "tool.mypy.overrides") {
+			} else if trimmed == "[[tool.mypy.overrides]]" || strings.has_prefix(trimmed, "[[tool.mypy.overrides") {
 				in_mypy_section = false
 				in_override = true
 			} else {

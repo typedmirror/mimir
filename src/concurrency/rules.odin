@@ -16,25 +16,28 @@ check_unawaited :: proc(ctx: ^Concurrency_Context, stmt: ^parser.Expr_Stmt, in_a
 
 	// Resolve callee name
 	name := ""
+	display_name := ""
 	#partial switch f in call.func {
 	case ^parser.Name_Expr:
 		name = f.id
+		display_name = f.id
 	case ^parser.Attribute_Expr:
-		// self.async_method() — can't track without type info, skip
-		return
+		name = f.attr
+		if recv, ok := f.value.(^parser.Name_Expr); ok {
+			display_name = fmt.tprintf("%s.%s", recv.id, f.attr)
+		} else {
+			display_name = f.attr
+		}
 	}
 
 	if len(name) == 0 { return }
 
 	// Check if name is a known async function defined in this module
 	if _, is_async := ctx.async_funcs[name]; is_async {
-		// Make sure it's not wrapped in asyncio.create_task or asyncio.ensure_future
-		// Those don't apply here since we're looking at Expr_Stmt(Call_Expr)
-		// The call is bare: async_func() as a statement
 		emit(ctx, "CONC002", call.loc,
-			fmt.tprintf("coroutine `%s()` is never awaited", name),
+			fmt.tprintf("coroutine `%s()` is never awaited", display_name),
 			"calling an async function without `await` creates a coroutine object that is immediately discarded",
-			fmt.tprintf("use `await %s()` or wrap in `asyncio.create_task(%s())`", name, name))
+			fmt.tprintf("use `await %s()` or wrap in `asyncio.create_task(%s())`", display_name, display_name))
 	}
 }
 
@@ -156,9 +159,17 @@ is_loop_blocking :: proc(ctx: ^Concurrency_Context, call: ^parser.Call_Expr) -> 
 			}
 		}
 		// loop.run_until_complete(...)
-		// or any_var.run_until_complete(...)
 		if f.attr == "run_until_complete" {
-			return true
+			// Only flag if receiver is a known asyncio loop variable or asyncio attr
+			if name, ok := f.value.(^parser.Name_Expr); ok {
+				if mod, ok2 := ctx.import_map[name.id]; ok2 {
+					return mod == "asyncio"
+				}
+				// Heuristic: variable names like "loop", "event_loop" are likely asyncio loops
+				if name.id == "loop" || name.id == "event_loop" {
+					return true
+				}
+			}
 		}
 	}
 	return false

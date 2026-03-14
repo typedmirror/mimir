@@ -74,32 +74,45 @@ walk_assign_random :: proc(ctx: ^Security_Context, stmt: parser.Stmt) {
 		// Check if value is a random.* call
 		if call, ok := s.value.(^parser.Call_Expr); ok {
 			mod, func_name := resolve_call(ctx, call)
-			if mod != "random" { return }
+			if mod == "random" {
+				check_insecure_random_call(ctx, call, mod, func_name)
 
-			insecure_funcs := [?]string{"choice", "choices", "randint", "random", "getrandbits", "uniform", "randrange"}
-			is_insecure := false
-			for f in insecure_funcs {
-				if func_name == f { is_insecure = true; break }
-			}
-			if !is_insecure { return }
-
-			// Check if target has a security-relevant name
-			for target in s.targets {
-				if name, n_ok := target.(^parser.Name_Expr); n_ok {
-					if is_security_name(name.id) {
-						append(&ctx.diagnostics, core.Diagnostic{
-							severity = .Security,
-							location = core.Location{
-								file   = ctx.file_path,
-								line   = int(call.loc.line),
-								column = int(call.loc.col),
-							},
-							what = fmt.tprintf("insecure random used for security-sensitive value '%s'", name.id),
-							why  = "the 'random' module uses a predictable PRNG not suitable for security",
-							fix  = "use secrets.token_hex(), secrets.token_urlsafe(), or secrets.token_bytes()",
-							code = "SEC002",
-						})
+				// Check if target has a security-relevant name
+				for target in s.targets {
+					if name, n_ok := target.(^parser.Name_Expr); n_ok {
+						if is_security_name(name.id) {
+							append(&ctx.diagnostics, core.Diagnostic{
+								severity = .Security,
+								location = core.Location{
+									file   = ctx.file_path,
+									line   = int(call.loc.line),
+									column = int(call.loc.col),
+								},
+								what = fmt.tprintf("insecure random used for security-sensitive value '%s'", name.id),
+								why  = "the 'random' module uses a predictable PRNG not suitable for security",
+								fix  = "use secrets.token_hex(), secrets.token_urlsafe(), or secrets.token_bytes()",
+								code = "SEC002",
+							})
+						}
 					}
+				}
+			}
+		}
+	case ^parser.Aug_Assign:
+		// x += random.randint(...)
+		if call, ok := s.value.(^parser.Call_Expr); ok {
+			mod, func_name := resolve_call(ctx, call)
+			if mod == "random" {
+				check_insecure_random_call(ctx, call, mod, func_name)
+			}
+		}
+	case ^parser.Return_Stmt:
+		// return random.choice(...)
+		if s.value != nil {
+			if call, ok := s.value.(^parser.Call_Expr); ok {
+				mod, func_name := resolve_call(ctx, call)
+				if mod == "random" {
+					check_insecure_random_call(ctx, call, mod, func_name)
 				}
 			}
 		}
@@ -125,6 +138,28 @@ walk_assign_random :: proc(ctx: ^Security_Context, stmt: parser.Stmt) {
 		for h in s.handlers { for st in h.body { walk_assign_random(ctx, st) } }
 		for st in s.orelse { walk_assign_random(ctx, st) }
 		for st in s.finalbody { walk_assign_random(ctx, st) }
+	}
+}
+
+// Helper: check if a random.* call uses an insecure function (for SEC002 in non-assign contexts)
+check_insecure_random_call :: proc(ctx: ^Security_Context, call: ^parser.Call_Expr, mod, func_name: string) {
+	insecure_funcs := [?]string{"choice", "choices", "randint", "random", "getrandbits", "uniform", "randrange"}
+	for f in insecure_funcs {
+		if func_name == f {
+			append(&ctx.diagnostics, core.Diagnostic{
+				severity = .Security,
+				location = core.Location{
+					file   = ctx.file_path,
+					line   = int(call.loc.line),
+					column = int(call.loc.col),
+				},
+				what = fmt.tprintf("insecure random function '%s.%s()' used", mod, func_name),
+				why  = "the 'random' module uses a predictable PRNG not suitable for security",
+				fix  = "use secrets.token_hex(), secrets.token_urlsafe(), or secrets.token_bytes()",
+				code = "SEC002",
+			})
+			return
+		}
 	}
 }
 

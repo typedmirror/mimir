@@ -18,6 +18,7 @@ Infer_Context :: struct {
 	file_path:      string,
 	declared_types: ^map[binder.Symbol_ID]Type_ID,
 	current_class:  Type_ID,
+	scope_id:       binder.Scope_ID,
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -890,20 +891,23 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 	params := make([]Param_Type, total, ctx.reg.allocator)
 	idx := 0
 
-	// Position-only args
-	for a in args.posonlyargs {
+	// Position-only args + regular args share the `defaults` list (filled from the end)
+	n_defaults := len(args.defaults)
+	n_positional := len(args.posonlyargs) + len(args.args)  // total positional params
+	for a, i in args.posonlyargs {
+		has_default := i >= (n_positional - n_defaults)
 		params[idx] = Param_Type{
 			name = a.arg,
 			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env),
+			has_default = has_default,
 		}
 		idx += 1
 	}
 
 	// Regular args
-	n_defaults := len(args.defaults)
 	n_args := len(args.args)
 	for a, i in args.args {
-		has_default := i >= (n_args - n_defaults)
+		has_default := (len(args.posonlyargs) + i) >= (n_positional - n_defaults)
 		params[idx] = Param_Type{
 			name = a.arg,
 			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env),

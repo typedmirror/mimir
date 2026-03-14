@@ -63,9 +63,15 @@ ensure_dependencies :: proc(
 
 	for dep in deps {
 		dir, found := find_package(cache, dep.name)
-		if found {
+		if found && len(dep.constraint) == 0 {
+			// Only trust cache for unconstrained deps — constrained deps
+			// need version verification we can't do yet, so reinstall
 			append(&paths, dir)
 			continue
+		}
+		if found && len(dep.constraint) > 0 {
+			// Have a cached version but can't verify constraint — reinstall
+			// TODO: parse installed version from METADATA and compare
 		}
 
 		// Install missing package

@@ -186,9 +186,10 @@ check_scope :: proc(
 	queue := make([dynamic]flow.Block_ID, 0, n_blocks, reg.allocator)
 	append(&queue, cfg.entry)
 
-	for len(queue) > 0 {
-		block_id := queue[0]
-		ordered_remove(&queue, 0)
+	queue_head := 0
+	for queue_head < len(queue) {
+		block_id := queue[queue_head]
+		queue_head += 1
 		idx := int(block_id) - 1  // Block_IDs are 1-indexed
 
 		if idx < 0 || idx >= n_blocks { continue }
@@ -227,6 +228,7 @@ check_scope :: proc(
 			file_path      = file_path,
 			declared_types = &declared_types,
 			current_class  = current_class,
+			scope_id       = cfg.scope_id,
 		}
 
 		// Process each statement in the block
@@ -722,34 +724,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	attrs := make(map[string]Type_ID, 16, ctx.reg.allocator)
 
 	// Scan class body for method and attribute definitions
-	for stmt in cd.body {
-		#partial switch s in stmt {
-		case ^parser.Func_Def:
-			ft := build_func_type(s, ctx)
-			attrs[s.name] = ft
-
-			// Scan __init__ for self.x = ... attribute assignments
-			if s.name == "__init__" {
-				scan_init_attrs(s, ctx, &attrs)
-			}
-
-		case ^parser.Ann_Assign:
-			declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
-			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
-				attrs[name_expr.id] = declared
-			}
-
-		case ^parser.Assign:
-			if s.value != nil {
-				val_type := infer_expr(s.value, ctx)
-				for target in s.targets {
-					if name_expr, ok := target.(^parser.Name_Expr); ok {
-						attrs[name_expr.id] = val_type
-					}
-				}
-			}
-		}
-	}
+	scan_class_body_attrs(cd.body, ctx, &attrs)
 
 	// Inherit attributes from base classes (own attrs take precedence)
 	for base_type_id in bases {
@@ -888,6 +863,45 @@ build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_i
 	return proto_type_id
 }
 
+// Scan class body for method and attribute definitions, recursing into if/try/with blocks
+scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: ^map[string]Type_ID) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			ft := build_func_type(s, ctx)
+			attrs[s.name] = ft
+			if s.name == "__init__" {
+				scan_init_attrs(s, ctx, attrs)
+			}
+		case ^parser.Ann_Assign:
+			declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
+				attrs[name_expr.id] = declared
+			}
+		case ^parser.Assign:
+			if s.value != nil {
+				val_type := infer_expr(s.value, ctx)
+				for target in s.targets {
+					if name_expr, ok := target.(^parser.Name_Expr); ok {
+						attrs[name_expr.id] = val_type
+					}
+				}
+			}
+		case ^parser.If_Stmt:
+			scan_class_body_attrs(s.body, ctx, attrs)
+			scan_class_body_attrs(s.orelse, ctx, attrs)
+		case ^parser.Try_Stmt:
+			scan_class_body_attrs(s.body, ctx, attrs)
+			for handler in s.handlers {
+				scan_class_body_attrs(handler.body, ctx, attrs)
+			}
+			scan_class_body_attrs(s.orelse, ctx, attrs)
+		case ^parser.With_Stmt:
+			scan_class_body_attrs(s.body, ctx, attrs)
+		}
+	}
+}
+
 // Scan __init__ body for self.attr = value patterns
 scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[string]Type_ID) {
 	for stmt in fd.body {
@@ -988,7 +1002,7 @@ set_target_type :: proc(target: parser.Expr, type_id: Type_ID, ctx: ^Infer_Conte
 }
 
 set_name_type :: proc(name: string, type_id: Type_ID, ctx: ^Infer_Context) {
-	// Find symbol for this name in current scope
+	// Find symbol for this name in current env (already scoped)
 	for sym_id, sym_type in ctx.env.types {
 		sym := binder.result_get_symbol(ctx.bind_result, sym_id)
 		if sym != nil && sym.name == name {
@@ -996,7 +1010,18 @@ set_name_type :: proc(name: string, type_id: Type_ID, ctx: ^Infer_Context) {
 			return
 		}
 	}
-	// If not in env yet, search in bind_result
+	// If not in env yet, search in bind_result — prefer current scope
+	scope := binder.result_get_scope(ctx.bind_result, ctx.scope_id)
+	if scope != nil {
+		for _, sym_id in scope.symbols {
+			sym := binder.result_get_symbol(ctx.bind_result, sym_id)
+			if sym != nil && sym.name == name {
+				ctx.env.types[sym_id] = type_id
+				return
+			}
+		}
+	}
+	// Last resort: any symbol with this name
 	for &sym in ctx.bind_result.symbols {
 		if sym.name == name {
 			ctx.env.types[sym.id] = type_id
@@ -1223,7 +1248,7 @@ init_param_types :: proc(
 	// Build param name → annotation map from function args
 	param_annotations: map[string]parser.Expr
 	if func_args != nil {
-		param_annotations.allocator = context.temp_allocator
+		param_annotations.allocator = reg.allocator
 		for a in func_args.posonlyargs {
 			if a.annotation != nil { param_annotations[a.arg] = a.annotation }
 		}
