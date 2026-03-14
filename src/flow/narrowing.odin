@@ -205,10 +205,16 @@ analyze_condition :: proc(
 		}
 
 	case ^parser.Bool_Op_Expr:
-		// `x and isinstance(x, T)` — all sub-conditions produce guards for same branches
 		if e.op == .And {
+			// `x and isinstance(x, T)` — all sub-conditions produce guards for same branches
 			for val in e.values {
 				analyze_condition(val, bind_result, scope_id, branch_block, true_block, false_block, loc, guards, allocator)
+			}
+		} else if e.op == .Or {
+			// De Morgan's: `a or b` false branch means both a AND b are false.
+			// Swap true/false so guards apply to the false branch (both false).
+			for val in e.values {
+				analyze_condition(val, bind_result, scope_id, branch_block, false_block, true_block, loc, guards, allocator)
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package lsp
 
 import "core:fmt"
+import "core:hash"
 import "core:mem"
 import "core:os"
 import "core:strings"
@@ -36,8 +37,9 @@ analyze_document :: proc(
 ) -> Analysis_Result {
 	result: Analysis_Result
 
-	// Write content to temp file with PID-unique name
-	temp_path := fmt.tprintf("/tmp/mimir_lsp_%d.py", os.get_pid())
+	// Write content to temp file with PID + URI hash for per-document uniqueness
+	uri_hash := hash.fnv32a(transmute([]u8)uri)
+	temp_path := fmt.tprintf("/tmp/mimir_lsp_%d_%x.py", os.get_pid(), uri_hash)
 	write_err := os.write_entire_file(temp_path, transmute([]u8)content)
 	if write_err != nil {
 		return result

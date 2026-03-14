@@ -1,5 +1,6 @@
 package core
 
+import "core:fmt"
 import "core:os"
 import "core:strings"
 
@@ -13,6 +14,7 @@ IGNORE_DIRS :: [?]string{
 	".mypy_cache",
 	".pytest_cache",
 	".eggs",
+	".mimir",
 	"build",
 	"dist",
 }
@@ -44,7 +46,10 @@ MAX_WALK_DEPTH :: 64
 _walk_dir :: proc(dir: string, files: ^[dynamic]string, allocator := context.allocator, depth: int = 0) {
 	if depth >= MAX_WALK_DEPTH { return } // guard against symlink cycles
 	entries, err := os.read_all_directory_by_path(dir, context.temp_allocator)
-	if err != nil do return
+	if err != nil {
+		fmt.eprintfln("warning: could not read directory '%s': skipping", dir)
+		return
+	}
 	defer os.file_info_slice_delete(entries, context.temp_allocator)
 
 	for entry in entries {

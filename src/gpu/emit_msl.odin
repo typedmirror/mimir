@@ -183,9 +183,7 @@ msl_input_ref :: proc(graph: ^Compute_Graph, nid: GPU_Node_ID, bindings: ^Bindin
 	node := get_node(graph, nid)
 	if node == nil { return "0.0f" }
 	if node.kind == .Param {
-		if use_matmul {
-			return fmt.tprintf("param_%s[row * K + k]", node.name)
-		}
+		// MatMul handles its own param indexing; other ops use tid
 		return fmt.tprintf("param_%s[tid]", node.name)
 	}
 	return fmt.tprintf("v%d", int(nid))

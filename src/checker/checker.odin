@@ -426,8 +426,25 @@ check_stmt :: proc(
 	case ^parser.Import_Stmt:
 	case ^parser.Import_From:
 	case ^parser.With_Stmt:
+		// Type-check context manager expressions and bind optional_vars
+		for item in s.items {
+			cm_type := infer_expr(item.context_expr, ctx)
+			if item.optional_vars != nil {
+				// __enter__ return type approximated as the context manager type itself
+				assign_target(item.optional_vars, cm_type, ctx)
+			}
+		}
 	case ^parser.Async_With:
+		for item in s.items {
+			cm_type := infer_expr(item.context_expr, ctx)
+			if item.optional_vars != nil {
+				assign_target(item.optional_vars, cm_type, ctx)
+			}
+		}
 	case ^parser.Async_For:
+		iter_type := infer_expr(s.iter, ctx)
+		elem_type := get_iterator_element_type(iter_type, ctx.reg)
+		assign_target(s.target, elem_type, ctx)
 	case ^parser.Try_Stmt:
 	case ^parser.Try_Star:
 	case ^parser.Match_Stmt:
@@ -606,8 +623,20 @@ build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 
 build_async_func_type :: proc(fd: ^parser.Async_Func_Def, ctx: ^Infer_Context) -> Type_ID {
 	params := resolve_params(&fd.args, ctx)
+
+	// Check for @staticmethod / @classmethod
+	is_static := false
+	for dec in fd.decorator_list {
+		#partial switch d in dec {
+		case ^parser.Name_Expr:
+			if d.id == "staticmethod" { is_static = true }
+		case ^parser.Attribute_Expr:
+			if d.attr == "staticmethod" { is_static = true }
+		}
+	}
+
 	actual_params := params
-	if len(params) > 0 && params[0].name == "self" {
+	if !is_static && len(params) > 0 && (params[0].name == "self" || params[0].name == "cls") {
 		actual_params = params[1:]
 	}
 	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
@@ -944,6 +973,63 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 					}
 				}
 			}
+		// Recurse into control flow blocks for conditional self.attr initialization
+		case ^parser.If_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+			scan_init_attrs_stmts(fd, s.orelse, ctx, attrs)
+		case ^parser.For_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+		case ^parser.While_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+		case ^parser.Try_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+			for handler in s.handlers {
+				scan_init_attrs_stmts(fd, handler.body, ctx, attrs)
+			}
+		case ^parser.With_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+		}
+	}
+}
+
+// Helper: recurse scan_init_attrs into nested statement blocks
+scan_init_attrs_stmts :: proc(fd: ^parser.Func_Def, stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: ^map[string]Type_ID) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			for target in s.targets {
+				if attr, ok := target.(^parser.Attribute_Expr); ok {
+					if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
+						if self_name.id == "self" && s.value != nil {
+							val_type := infer_expr(s.value, ctx)
+							attrs[attr.attr] = val_type
+						}
+					}
+				}
+			}
+		case ^parser.Ann_Assign:
+			if attr, ok := s.target.(^parser.Attribute_Expr); ok {
+				if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
+					if self_name.id == "self" {
+						declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+						attrs[attr.attr] = declared
+					}
+				}
+			}
+		case ^parser.If_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+			scan_init_attrs_stmts(fd, s.orelse, ctx, attrs)
+		case ^parser.Try_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+			for handler in s.handlers {
+				scan_init_attrs_stmts(fd, handler.body, ctx, attrs)
+			}
+		case ^parser.For_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+		case ^parser.While_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+		case ^parser.With_Stmt:
+			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
 		}
 	}
 }
@@ -1137,6 +1223,9 @@ collect_func_return_types :: proc(
 
 		case ^parser.Try_Stmt:
 			collect_func_return_types(s.body, bind_result, reg, builtins, out)
+			for handler in s.handlers {
+				collect_func_return_types(handler.body, bind_result, reg, builtins, out)
+			}
 			collect_func_return_types(s.finalbody, bind_result, reg, builtins, out)
 			collect_func_return_types(s.orelse, bind_result, reg, builtins, out)
 		}

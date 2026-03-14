@@ -97,9 +97,10 @@ analyze_taint :: proc(
 		in_queue[entry_idx] = true
 	}
 
-	for len(queue) > 0 {
-		block_id := queue[0]
-		ordered_remove(&queue, 0)
+	queue_head := 0
+	for queue_head < len(queue) {
+		block_id := queue[queue_head]
+		queue_head += 1
 
 		idx := int(block_id) - 1
 		if idx < 0 || idx >= num_blocks { continue }
@@ -168,8 +169,20 @@ taint_env_equal :: proc(a, b: ^Taint_Env) -> bool {
 	return true
 }
 
-// copy_taint_env copies src env into dst (overwriting dst entries).
+// copy_taint_env replaces dst env with an exact copy of src.
 copy_taint_env :: proc(dst, src: ^Taint_Env, allocator: mem.Allocator) {
+	// Clear stale entries not in src
+	keys_to_delete: [dynamic]binder.Symbol_ID
+	keys_to_delete.allocator = context.temp_allocator
+	for sym_id in dst.info {
+		if sym_id not_in src.info {
+			append(&keys_to_delete, sym_id)
+		}
+	}
+	for k in keys_to_delete {
+		delete_key(&dst.info, k)
+	}
+	// Copy all src entries
 	for sym_id, info in src.info {
 		dst.info[sym_id] = info
 	}

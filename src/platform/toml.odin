@@ -112,7 +112,12 @@ _parse_value :: proc(raw: string, allocator: mem.Allocator) -> Toml_Value {
 
 	// Quoted strings
 	if len(s) >= 2 && ((s[0] == '"' && s[len(s) - 1] == '"') || (s[0] == '\'' && s[len(s) - 1] == '\'')) {
-		return Toml_Value(strings.clone(s[1:len(s) - 1], allocator))
+		inner := s[1:len(s) - 1]
+		// Double-quoted strings process escape sequences; single-quoted are literal
+		if s[0] == '"' {
+			return Toml_Value(_process_escapes(inner, allocator))
+		}
+		return Toml_Value(strings.clone(inner, allocator))
 	}
 
 	// Arrays
@@ -132,6 +137,40 @@ _parse_value :: proc(raw: string, allocator: mem.Allocator) -> Toml_Value {
 
 	// Unquoted string (fallback)
 	return Toml_Value(strings.clone(s, allocator))
+}
+
+_process_escapes :: proc(s: string, allocator: mem.Allocator) -> string {
+	// Fast path: no backslashes means no escapes to process
+	has_escape := false
+	for c in s {
+		if c == '\\' { has_escape = true; break }
+	}
+	if !has_escape { return strings.clone(s, allocator) }
+
+	buf := strings.builder_make(0, len(s), allocator)
+	i := 0
+	for i < len(s) {
+		if s[i] == '\\' && i + 1 < len(s) {
+			switch s[i + 1] {
+			case '\\': strings.write_byte(&buf, '\\')
+			case '"':  strings.write_byte(&buf, '"')
+			case 'n':  strings.write_byte(&buf, '\n')
+			case 't':  strings.write_byte(&buf, '\t')
+			case 'r':  strings.write_byte(&buf, '\r')
+			case 'b':  strings.write_byte(&buf, '\b')
+			case 'f':  strings.write_byte(&buf, '\f')
+			case:
+				// Unknown escape — preserve as-is
+				strings.write_byte(&buf, '\\')
+				strings.write_byte(&buf, s[i + 1])
+			}
+			i += 2
+		} else {
+			strings.write_byte(&buf, s[i])
+			i += 1
+		}
+	}
+	return strings.to_string(buf)
 }
 
 _looks_like_number :: proc(s: string) -> bool {
@@ -328,7 +367,16 @@ _write_value :: proc(b: ^strings.Builder, val: Toml_Value) {
 	switch v in val {
 	case string:
 		strings.write_byte(b, '"')
-		strings.write_string(b, v)
+		for c in v {
+			switch c {
+			case '"':  strings.write_string(b, "\\\"")
+			case '\\': strings.write_string(b, "\\\\")
+			case '\n': strings.write_string(b, "\\n")
+			case '\r': strings.write_string(b, "\\r")
+			case '\t': strings.write_string(b, "\\t")
+			case:      strings.write_rune(b, c)
+			}
+		}
 		strings.write_byte(b, '"')
 	case i64:
 		strings.write_string(b, fmt.tprintf("%d", v))

@@ -3,6 +3,7 @@ package taint
 import "core:mem"
 import parser "mimir:parser"
 import binder "mimir:binder"
+import core "mimir:core"
 
 // ==================== Expression Taint ====================
 
@@ -57,8 +58,17 @@ expr_taint :: proc(ctx: ^Taint_Context, env: ^Taint_Env, expr: parser.Expr) -> T
 				}
 			}
 		}
-		// Unknown function call — conservative
-		return {label = .Unknown}
+		// Unknown function call — propagate taint from arguments conservatively
+		max_arg := Taint_Info{label = .Trusted}
+		for arg in e.args {
+			arg_info := expr_taint(ctx, env, arg)
+			max_arg = max_taint_info(max_arg, arg_info)
+		}
+		for kw in e.keywords {
+			kw_info := expr_taint(ctx, env, kw.value)
+			max_arg = max_taint_info(max_arg, kw_info)
+		}
+		return max_arg
 
 	case ^parser.Bin_Op_Expr:
 		left := expr_taint(ctx, env, e.left)
@@ -113,6 +123,23 @@ expr_taint :: proc(ctx: ^Taint_Context, env: ^Taint_Env, expr: parser.Expr) -> T
 		}
 		return result
 
+	case ^parser.Dict_Expr:
+		result := Taint_Info{label = .Trusted}
+		for key in e.keys {
+			result = max_taint_info(result, expr_taint(ctx, env, key))
+		}
+		for val in e.values {
+			result = max_taint_info(result, expr_taint(ctx, env, val))
+		}
+		return result
+
+	case ^parser.Set_Expr:
+		result := Taint_Info{label = .Trusted}
+		for elt in e.elts {
+			result = max_taint_info(result, expr_taint(ctx, env, elt))
+		}
+		return result
+
 	case ^parser.Tuple_Expr:
 		result := Taint_Info{label = .Trusted}
 		for elt in e.elts {
@@ -127,25 +154,29 @@ expr_taint :: proc(ctx: ^Taint_Context, env: ^Taint_Env, expr: parser.Expr) -> T
 
 	case ^parser.List_Comp:
 		for gen in e.generators {
-			expr_taint(ctx, env, gen.iter)
+			iter_taint := expr_taint(ctx, env, gen.iter)
+			assign_taint(ctx, env, gen.target, iter_taint)
 		}
 		return expr_taint(ctx, env, e.elt)
 
 	case ^parser.Set_Comp:
 		for gen in e.generators {
-			expr_taint(ctx, env, gen.iter)
+			iter_taint := expr_taint(ctx, env, gen.iter)
+			assign_taint(ctx, env, gen.target, iter_taint)
 		}
 		return expr_taint(ctx, env, e.elt)
 
 	case ^parser.Generator_Expr:
 		for gen in e.generators {
-			expr_taint(ctx, env, gen.iter)
+			iter_taint := expr_taint(ctx, env, gen.iter)
+			assign_taint(ctx, env, gen.target, iter_taint)
 		}
 		return expr_taint(ctx, env, e.elt)
 
 	case ^parser.Dict_Comp:
 		for gen in e.generators {
-			expr_taint(ctx, env, gen.iter)
+			iter_taint := expr_taint(ctx, env, gen.iter)
+			assign_taint(ctx, env, gen.target, iter_taint)
 		}
 		key_taint := expr_taint(ctx, env, e.key)
 		val_taint := expr_taint(ctx, env, e.value)
@@ -218,87 +249,59 @@ assign_taint :: proc(ctx: ^Taint_Context, env: ^Taint_Env, target: parser.Expr, 
 
 // ==================== Sink Checking ====================
 
-// check_expr_sinks recursively walks an expression tree looking for
+// Wrapper context for the sink-checking walker.
+Sink_Walker :: struct {
+	taint_ctx: ^Taint_Context,
+	env:       ^Taint_Env,
+}
+
+// check_expr_sinks walks an expression tree looking for
 // Call_Exprs that are sinks and checks if their arguments are tainted.
+// Uses the shared core.AST_Visitor for traversal.
 check_expr_sinks :: proc(ctx: ^Taint_Context, env: ^Taint_Env, expr: parser.Expr) {
 	if expr == nil { return }
 
-	#partial switch e in expr {
-	case ^parser.Call_Expr:
-		is_sink, info := check_sink(ctx, e)
-		if is_sink && info.arg_index < len(e.args) {
-			arg_info := expr_taint(ctx, env, e.args[info.arg_index])
-			if arg_info.label == .Untrusted {
-				append(&ctx.violations, Taint_Violation{
-					sink_loc    = e.loc,
-					source_loc  = arg_info.source_loc,
-					source_desc = arg_info.source_desc,
-					sink_desc   = info.desc,
-					rule_code   = info.code,
-				})
+	sw := Sink_Walker{taint_ctx = ctx, env = env}
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			w := cast(^Sink_Walker)raw_ctx
+			e, ok := expr.(^parser.Call_Expr)
+			if !ok { return }
+
+			is_sink, info := check_sink(w.taint_ctx, e)
+			if !is_sink { return }
+
+			// Check positional args
+			if info.arg_index < len(e.args) {
+				arg_info := expr_taint(w.taint_ctx, w.env, e.args[info.arg_index])
+				if arg_info.label == .Untrusted {
+					append(&w.taint_ctx.violations, Taint_Violation{
+						sink_loc    = e.loc,
+						source_loc  = arg_info.source_loc,
+						source_desc = arg_info.source_desc,
+						sink_desc   = info.desc,
+						rule_code   = info.code,
+					})
+				}
 			}
-		}
-		// Also check nested expressions in args
-		for arg in e.args {
-			check_expr_sinks(ctx, env, arg)
-		}
-		for kw in e.keywords {
-			check_expr_sinks(ctx, env, kw.value)
-		}
-
-	case ^parser.Bin_Op_Expr:
-		check_expr_sinks(ctx, env, e.left)
-		check_expr_sinks(ctx, env, e.right)
-
-	case ^parser.Joined_Str:
-		for v in e.values {
-			check_expr_sinks(ctx, env, v)
-		}
-
-	case ^parser.Formatted_Value:
-		check_expr_sinks(ctx, env, e.value)
-
-	case ^parser.If_Expr:
-		check_expr_sinks(ctx, env, e.body)
-		check_expr_sinks(ctx, env, e.orelse)
-
-	case ^parser.List_Expr:
-		for elt in e.elts {
-			check_expr_sinks(ctx, env, elt)
-		}
-
-	case ^parser.Tuple_Expr:
-		for elt in e.elts {
-			check_expr_sinks(ctx, env, elt)
-		}
-	case ^parser.Named_Expr:
-		check_expr_sinks(ctx, env, e.value)
-	case ^parser.List_Comp:
-		check_expr_sinks(ctx, env, e.elt)
-		for gen in e.generators {
-			check_expr_sinks(ctx, env, gen.iter)
-			for cond in gen.ifs { check_expr_sinks(ctx, env, cond) }
-		}
-	case ^parser.Set_Comp:
-		check_expr_sinks(ctx, env, e.elt)
-		for gen in e.generators {
-			check_expr_sinks(ctx, env, gen.iter)
-			for cond in gen.ifs { check_expr_sinks(ctx, env, cond) }
-		}
-	case ^parser.Dict_Comp:
-		check_expr_sinks(ctx, env, e.key)
-		check_expr_sinks(ctx, env, e.value)
-		for gen in e.generators {
-			check_expr_sinks(ctx, env, gen.iter)
-			for cond in gen.ifs { check_expr_sinks(ctx, env, cond) }
-		}
-	case ^parser.Generator_Expr:
-		check_expr_sinks(ctx, env, e.elt)
-		for gen in e.generators {
-			check_expr_sinks(ctx, env, gen.iter)
-			for cond in gen.ifs { check_expr_sinks(ctx, env, cond) }
-		}
+			// Also check keyword args for taint
+			for kw in e.keywords {
+				kw_info := expr_taint(w.taint_ctx, w.env, kw.value)
+				if kw_info.label == .Untrusted {
+					append(&w.taint_ctx.violations, Taint_Violation{
+						sink_loc    = e.loc,
+						source_loc  = kw_info.source_loc,
+						source_desc = kw_info.source_desc,
+						sink_desc   = info.desc,
+						rule_code   = info.code,
+					})
+					break // one violation per call is enough
+				}
+			}
+		},
+		ctx = rawptr(&sw),
 	}
+	core.walk_expr(&visitor, expr)
 }
 
 // ==================== Environment Merge ====================

@@ -1,6 +1,7 @@
 package lint
 
 import "core:strings"
+import "core:unicode/utf8"
 import core "mimir:core"
 
 // S001 — Line too long
@@ -9,7 +10,7 @@ check_line_too_long :: proc(ctx: ^Lint_Context) {
 	if max_len <= 0 { max_len = 88 }
 
 	for line, idx in ctx.lines {
-		if len(line) <= max_len { continue }
+		if utf8.rune_count_in_string(line) <= max_len { continue }
 
 		// Exception: lines that are just a URL (possibly with comment prefix)
 		trimmed := strings.trim_space(line)

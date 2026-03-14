@@ -169,8 +169,16 @@ extract_stmt :: proc(stmt: parser.Stmt, ctx: ^WASM_Extract_Context) {
 	case ^parser.Return_Stmt:
 		extract_return_stmt(s, ctx)
 	case ^parser.Expr_Stmt:
-		extract_expr(s.value, ctx)
-		emit(ctx, WASM_Instruction{kind = .Drop})
+		// Only emit Drop if the expression pushes a value onto the stack
+		if s.value != nil {
+			#partial switch _ in s.value {
+			case ^parser.Call_Expr:
+				extract_expr(s.value, ctx)
+				emit(ctx, WASM_Instruction{kind = .Drop})
+			case:
+				extract_expr(s.value, ctx)
+			}
+		}
 	case ^parser.Pass_Stmt:
 		// nop
 	case ^parser.Break_Stmt:
@@ -388,7 +396,12 @@ extract_expr :: proc(expr: parser.Expr, ctx: ^WASM_Extract_Context) {
 extract_constant :: proc(e: ^parser.Constant_Expr, ctx: ^WASM_Extract_Context) {
 	#partial switch v in e.value {
 	case i64:
-		emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = i32(v)})
+		if v > i64(max(i32)) || v < i64(min(i32)) {
+			// Value exceeds i32 range — use i64
+			emit(ctx, WASM_Instruction{kind = .I64_Const, i64_val = v})
+		} else {
+			emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = i32(v)})
+		}
 	case f64:
 		emit(ctx, WASM_Instruction{kind = .F64_Const, f64_val = f64(v)})
 	case bool:
@@ -821,7 +834,9 @@ binop_instr :: proc(op: parser.Binary_Op, type: WASM_Value_Type) -> WASM_Instruc
 		case .Bit_Xor:   return WASM_Instruction{kind = .I32_Xor}
 		case .LShift:    return WASM_Instruction{kind = .I32_Shl}
 		case .RShift:    return WASM_Instruction{kind = .I32_Shr_S}
-		case .Pow:       return WASM_Instruction{kind = .I32_Mul}
+		case .Pow:
+			fmt.eprintfln("warning: WASM has no integer power instruction — using multiply as approximation")
+			return WASM_Instruction{kind = .I32_Mul}
 		case .Div:       return WASM_Instruction{kind = .I32_Div_S}
 		case .Mat_Mult:  return WASM_Instruction{kind = .I32_Mul}
 		}

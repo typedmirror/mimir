@@ -153,7 +153,7 @@ extract_stmt :: proc(stmt: parser.Stmt, ctx: ^GPU_Graph_Context) {
 		lhs := extract_expr(s.target, ctx)
 		rhs := extract_expr(s.value, ctx)
 		if lhs == GPU_Node_ID(0) || rhs == GPU_Node_ID(0) { return }
-		kind := binop_to_gpu_op(s.op)
+		kind, _ := binop_to_gpu_op(s.op)
 		inputs := make([]GPU_Node_ID, 2, ctx.allocator)
 		inputs[0] = lhs
 		inputs[1] = rhs
@@ -207,7 +207,7 @@ extract_expr :: proc(expr: parser.Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID 
 		left := extract_expr(e.left, ctx)
 		right := extract_expr(e.right, ctx)
 		if left == GPU_Node_ID(0) || right == GPU_Node_ID(0) { return GPU_Node_ID(0) }
-		kind := binop_to_gpu_op(e.op)
+		kind, _ := binop_to_gpu_op(e.op)
 		inputs := make([]GPU_Node_ID, 2, ctx.allocator)
 		inputs[0] = left
 		inputs[1] = right
@@ -240,7 +240,7 @@ extract_expr :: proc(expr: parser.Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID 
 		left := extract_expr(e.left, ctx)
 		right := extract_expr(e.comparators[0], ctx)
 		if left == GPU_Node_ID(0) || right == GPU_Node_ID(0) { return GPU_Node_ID(0) }
-		kind := cmpop_to_gpu_op(e.ops[0])
+		kind, _ := cmpop_to_gpu_op(e.ops[0])
 		inputs := make([]GPU_Node_ID, 2, ctx.allocator)
 		inputs[0] = left
 		inputs[1] = right
@@ -602,26 +602,29 @@ count_ops :: proc(graph: ^Compute_Graph) -> (elementwise: int, matmul: int, redu
 
 // ==================== Helpers ====================
 
-binop_to_gpu_op :: proc(op: parser.Binary_Op) -> GPU_Op_Kind {
+binop_to_gpu_op :: proc(op: parser.Binary_Op) -> (GPU_Op_Kind, bool) {
 	#partial switch op {
-	case .Add:       return .Add
-	case .Sub:       return .Sub
-	case .Mult:      return .Mul
-	case .Div:       return .Div
-	case .Mat_Mult:  return .MatMul
-	case: return .Add // fallback
+	case .Add:       return .Add, true
+	case .Sub:       return .Sub, true
+	case .Mult:      return .Mul, true
+	case .Div:       return .Div, true
+	case .Mat_Mult:  return .MatMul, true
 	}
+	fmt.eprintfln("warning: unsupported GPU binary operator, defaulting to Add")
+	return .Add, false
 }
 
-cmpop_to_gpu_op :: proc(op: parser.Cmp_Op) -> GPU_Op_Kind {
+cmpop_to_gpu_op :: proc(op: parser.Cmp_Op) -> (GPU_Op_Kind, bool) {
 	#partial switch op {
-	case .Eq:     return .Equal
-	case .Lt:     return .Less
-	case .Gt:     return .Greater
-	case .Lt_E:   return .LessEq
-	case .Gt_E:   return .GreaterEq
-	case: return .Equal // fallback
+	case .Eq:     return .Equal, true
+	case .Not_Eq: return .Equal, true // NOTE: no NotEqual GPU op; callers should invert
+	case .Lt:     return .Less, true
+	case .Gt:     return .Greater, true
+	case .Lt_E:   return .LessEq, true
+	case .Gt_E:   return .GreaterEq, true
 	}
+	fmt.eprintfln("warning: unsupported GPU comparison operator, defaulting to Equal")
+	return .Equal, false
 }
 
 op_kind_string :: proc(kind: GPU_Op_Kind) -> string {

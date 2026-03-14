@@ -112,19 +112,24 @@ wgsl_emit_node :: proc(
 
 	case .Equal:
 		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = select(0.0, 1.0, %s == %s);\n", id, a, c)
+		zero, one := wgsl_cmp_literals(etype)
+		fmt.sbprintf(b, "    let v%d = select(%s, %s, %s == %s);\n", id, zero, one, a, c)
 	case .Less:
 		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = select(0.0, 1.0, %s < %s);\n", id, a, c)
+		zero, one := wgsl_cmp_literals(etype)
+		fmt.sbprintf(b, "    let v%d = select(%s, %s, %s < %s);\n", id, zero, one, a, c)
 	case .Greater:
 		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = select(0.0, 1.0, %s > %s);\n", id, a, c)
+		zero, one := wgsl_cmp_literals(etype)
+		fmt.sbprintf(b, "    let v%d = select(%s, %s, %s > %s);\n", id, zero, one, a, c)
 	case .LessEq:
 		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = select(0.0, 1.0, %s <= %s);\n", id, a, c)
+		zero, one := wgsl_cmp_literals(etype)
+		fmt.sbprintf(b, "    let v%d = select(%s, %s, %s <= %s);\n", id, zero, one, a, c)
 	case .GreaterEq:
 		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = select(0.0, 1.0, %s >= %s);\n", id, a, c)
+		zero, one := wgsl_cmp_literals(etype)
+		fmt.sbprintf(b, "    let v%d = select(%s, %s, %s >= %s);\n", id, zero, one, a, c)
 
 	case .ReLU:
 		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
@@ -184,9 +189,7 @@ wgsl_input_ref :: proc(graph: ^Compute_Graph, nid: GPU_Node_ID, bindings: ^Bindi
 	node := get_node(graph, nid)
 	if node == nil { return "0.0" }
 	if node.kind == .Param {
-		if use_matmul {
-			return fmt.tprintf("param_%s[row * dims.K + k]", node.name) // context-dependent; caller may override
-		}
+		// MatMul handles its own param indexing; other ops use tid
 		return fmt.tprintf("param_%s[tid]", node.name)
 	}
 	return fmt.tprintf("v%d", int(nid))
@@ -196,6 +199,14 @@ wgsl_binary_inputs :: proc(graph: ^Compute_Graph, node: ^GPU_Node, bindings: ^Bi
 	a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
 	c := wgsl_input_ref(graph, node.inputs[1], bindings, use_matmul)
 	return a, c
+}
+
+// Return type-appropriate zero/one literals for comparison select().
+wgsl_cmp_literals :: proc(etype: string) -> (string, string) {
+	if etype == "i32" {
+		return "0", "1"
+	}
+	return "0.0", "1.0"
 }
 
 wgsl_const_value :: proc(name: string, etype: string) -> string {

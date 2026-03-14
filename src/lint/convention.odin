@@ -116,6 +116,10 @@ is_pascal_case :: proc(name: string) -> bool {
 		if c == '_' { continue }  // Allow underscores in class names
 		return false
 	}
+	// ALLCAPS (like "ABC") should not pass as PascalCase — require at least one lowercase letter
+	if len(name) > 1 {
+		return has_lower
+	}
 	return true
 }
 

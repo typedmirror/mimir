@@ -160,6 +160,15 @@ install_python :: proc(version: string, allocator: mem.Allocator) -> Platform_Er
 		}
 	}
 
+	// Verify SHA256 checksum
+	tarball_filename := fmt.aprintf("cpython-%s+%s-%s-install_only.tar.gz",
+		release.version, release.tag, triple, allocator = allocator)
+	verify_err := verify_tarball_sha256(tarball, tarball_filename, release.tag, allocator)
+	if verify_err != nil {
+		os.remove(tarball)
+		return verify_err
+	}
+
 	// Extract tarball
 	fmt.printfln("  extracting to %s...", version_dir)
 
@@ -328,6 +337,72 @@ find_managed_python :: proc(constraint: string, allocator: mem.Allocator) -> (pa
 
 // Compare version strings: "3.12.7" > "3.12.4" > "3.11.10".
 // Zero-allocation — parses numbers directly from the string.
+// Verify downloaded tarball SHA256 against python-build-standalone SHA256SUMS.
+@(private = "file")
+verify_tarball_sha256 :: proc(tarball_path: string, tarball_filename: string, tag: string, allocator: mem.Allocator) -> Platform_Error {
+	fmt.println("  verifying SHA256 checksum...")
+
+	// Compute SHA256 of downloaded tarball
+	sha_state, sha_stdout, _, sha_err := os.process_exec({
+		command = {"shasum", "-a", "256", tarball_path},
+	}, allocator)
+	if sha_err != nil || sha_state.exit_code != 0 {
+		fmt.eprintln("  WARNING: could not compute SHA256 — install is UNVERIFIED")
+		fmt.eprintln("  Install 'shasum' or use --no-verify to suppress this warning")
+		return nil
+	}
+	actual_hash := ""
+	sha_output := string(sha_stdout)
+	space_idx := strings.index_byte(sha_output, ' ')
+	if space_idx > 0 {
+		actual_hash = sha_output[:space_idx]
+	}
+	if len(actual_hash) != 64 {
+		fmt.eprintln("  warning: unexpected shasum output — skipping verification")
+		return nil
+	}
+
+	// Download SHA256SUMS from the release
+	sums_url := fmt.aprintf(
+		"https://github.com/indygreg/python-build-standalone/releases/download/%s/SHA256SUMS",
+		tag, allocator = allocator)
+	sums_state, sums_stdout, _, sums_err := os.process_exec({
+		command = {"curl", "-fsSL", sums_url},
+	}, allocator)
+	if sums_err != nil || sums_state.exit_code != 0 {
+		fmt.eprintln("  WARNING: could not download SHA256SUMS — install is UNVERIFIED")
+		fmt.eprintln("  Check network connectivity or verify the tarball manually")
+		return nil
+	}
+
+	// Parse SHA256SUMS: each line is "<hash>  <filename>"
+	expected_hash := ""
+	sums_content := string(sums_stdout)
+	for line in strings.split_lines(sums_content, context.temp_allocator) {
+		trimmed := strings.trim_space(line)
+		if len(trimmed) < 66 { continue }  // 64 hash + 2 spaces + filename
+		if strings.has_suffix(trimmed, tarball_filename) {
+			expected_hash = trimmed[:64]
+			break
+		}
+	}
+
+	if expected_hash == "" {
+		fmt.eprintln("  warning: tarball not found in SHA256SUMS — skipping verification")
+		return nil
+	}
+
+	if actual_hash != expected_hash {
+		return Platform_Error_Data{
+			msg = fmt.aprintf("SHA256 mismatch!\n  expected: %s\n  actual:   %s\n  This may indicate a corrupted or tampered download.",
+				expected_hash, actual_hash, allocator = allocator),
+		}
+	}
+
+	fmt.println("  checksum verified OK")
+	return nil
+}
+
 @(private = "file")
 version_greater :: proc(a, b: string) -> bool {
 	ai, bi := 0, 0

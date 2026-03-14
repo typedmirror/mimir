@@ -3,7 +3,7 @@ from typing import assert_type
 d: dict[str, int] = {"a": 1}
 
 # Correct
-assert_type(d.get("a"), int)
+assert_type(d.get("a"), int)  # E
 assert_type(d.pop("a"), int)
 good1: dict[str, int] = d.copy()
 

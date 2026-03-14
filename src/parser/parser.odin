@@ -2,6 +2,7 @@ package parser
 
 import "core:encoding/base64"
 import "core:encoding/json"
+import "core:fmt"
 import "core:mem"
 import "core:strings"
 
@@ -147,6 +148,7 @@ conv_binary_op :: proc(v: json.Value) -> Binary_Op {
 	case "BitAnd":   return .Bit_And
 	case "FloorDiv": return .Floor_Div
 	}
+	if len(t) > 0 { fmt.eprintfln("warning: unknown binary operator '%s'", t) }
 	return .Add
 }
 
@@ -160,6 +162,7 @@ conv_unary_op :: proc(v: json.Value) -> Unary_Op {
 	case "UAdd":   return .UAdd
 	case "USub":   return .USub
 	}
+	if len(t) > 0 { fmt.eprintfln("warning: unknown unary operator '%s'", t) }
 	return .Not
 }
 
@@ -171,6 +174,7 @@ conv_bool_op :: proc(v: json.Value) -> Bool_Op_Kind {
 	case "And": return .And
 	case "Or":  return .Or
 	}
+	if len(t) > 0 { fmt.eprintfln("warning: unknown bool operator '%s'", t) }
 	return .And
 }
 
@@ -190,6 +194,7 @@ conv_cmp_op :: proc(v: json.Value) -> Cmp_Op {
 	case "In":    return .In
 	case "NotIn": return .Not_In
 	}
+	if len(t) > 0 { fmt.eprintfln("warning: unknown comparison operator '%s'", t) }
 	return .Eq
 }
 

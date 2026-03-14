@@ -19,7 +19,7 @@ Bridge :: struct {
 bridge_start :: proc() -> (Bridge, Parse_Error) {
 	// Write helper script to temp file with PID-unique name
 	pid := os.get_pid()
-	helper_path := fmt.tprintf("/tmp/mimir_ast_helper_%d.py", pid)
+	helper_path := fmt.aprintf("/tmp/mimir_ast_helper_%d.py", pid)
 	write_err := os.write_entire_file(helper_path, transmute([]byte)HELPER_SCRIPT)
 	if write_err != nil {
 		return {}, Bridge_Error{"failed to write helper script"}
@@ -92,6 +92,9 @@ bridge_parse :: proc(b: ^Bridge, path: string, allocator: mem.Allocator) -> (^Mo
 	body_len, parse_ok := strconv.parse_int(strings.trim_space(header[len_start:]))
 	if !parse_ok || body_len < 0 {
 		return nil, Bridge_Error{"invalid response length in bridge header"}
+	}
+	if body_len > 100_000_000 {
+		return nil, Bridge_Error{"bridge response body too large (>100MB)"}
 	}
 
 	// Read body bytes

@@ -173,42 +173,38 @@ check_defaults_mutable :: proc(ctx: ^Lint_Context, defaults: []parser.Expr) {
 
 // L004 — f-string without placeholders
 check_fstring_no_placeholders :: proc(ctx: ^Lint_Context) {
-	walk_stmts_for_fstring(ctx, ctx.module.body)
-}
-
-walk_stmts_for_fstring :: proc(ctx: ^Lint_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		walk_stmt_exprs(ctx, stmt, check_expr_fstring)
-	}
-}
-
-check_expr_fstring :: proc(ctx: ^Lint_Context, expr: parser.Expr) {
-	if expr == nil { return }
-	#partial switch e in expr {
-	case ^parser.Joined_Str:
-		// f-string: check if any value is a Formatted_Value
-		has_placeholder := false
-		for v in e.values {
-			if _, ok := v.(^parser.Formatted_Value); ok {
-				has_placeholder = true
-				break
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			lint_ctx := cast(^Lint_Context)raw_ctx
+			#partial switch e in expr {
+			case ^parser.Joined_Str:
+				// f-string: check if any value is a Formatted_Value
+				has_placeholder := false
+				for v in e.values {
+					if _, ok := v.(^parser.Formatted_Value); ok {
+						has_placeholder = true
+						break
+					}
+				}
+				if !has_placeholder {
+					append(&lint_ctx.diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = lint_ctx.file_path,
+							line   = int(e.loc.line),
+							column = int(e.loc.col),
+						},
+						what = "f-string without placeholders",
+						why  = "this f-string has no interpolated expressions, so the 'f' prefix is unnecessary",
+						fix  = "remove the 'f' prefix to use a regular string",
+						code = "L004",
+					})
+				}
 			}
-		}
-		if !has_placeholder {
-			append(&ctx.diagnostics, core.Diagnostic{
-				severity = .Warning,
-				location = core.Location{
-					file   = ctx.file_path,
-					line   = int(e.loc.line),
-					column = int(e.loc.col),
-				},
-				what = "f-string without placeholders",
-				why  = "this f-string has no interpolated expressions, so the 'f' prefix is unnecessary",
-				fix  = "remove the 'f' prefix to use a regular string",
-				code = "L004",
-			})
-		}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 // L005 — Bare except
@@ -310,119 +306,3 @@ walk_stmts_for_assert_tuple :: proc(ctx: ^Lint_Context, stmts: []parser.Stmt) {
 	}
 }
 
-// Generic statement-expression walker used by fstring checker
-walk_stmt_exprs :: proc(ctx: ^Lint_Context, stmt: parser.Stmt, visit: proc(ctx: ^Lint_Context, expr: parser.Expr)) {
-	#partial switch s in stmt {
-	case ^parser.Expr_Stmt:
-		walk_expr(ctx, s.value, visit)
-	case ^parser.Assign:
-		walk_expr(ctx, s.value, visit)
-		for t in s.targets { walk_expr(ctx, t, visit) }
-	case ^parser.Ann_Assign:
-		if s.value != nil { walk_expr(ctx, s.value, visit) }
-	case ^parser.Return_Stmt:
-		if s.value != nil { walk_expr(ctx, s.value, visit) }
-	case ^parser.Func_Def:
-		for st in s.body { walk_stmt_exprs(ctx, st, visit) }
-	case ^parser.Async_Func_Def:
-		for st in s.body { walk_stmt_exprs(ctx, st, visit) }
-	case ^parser.Class_Def:
-		for st in s.body { walk_stmt_exprs(ctx, st, visit) }
-	case ^parser.If_Stmt:
-		walk_expr(ctx, s.test, visit)
-		for st in s.body { walk_stmt_exprs(ctx, st, visit) }
-		for st in s.orelse { walk_stmt_exprs(ctx, st, visit) }
-	case ^parser.For_Stmt:
-		for st in s.body { walk_stmt_exprs(ctx, st, visit) }
-		for st in s.orelse { walk_stmt_exprs(ctx, st, visit) }
-	case ^parser.While_Stmt:
-		walk_expr(ctx, s.test, visit)
-		for st in s.body { walk_stmt_exprs(ctx, st, visit) }
-		for st in s.orelse { walk_stmt_exprs(ctx, st, visit) }
-	case ^parser.With_Stmt:
-		for st in s.body { walk_stmt_exprs(ctx, st, visit) }
-	case ^parser.Try_Stmt:
-		for st in s.body { walk_stmt_exprs(ctx, st, visit) }
-		for h in s.handlers { for st in h.body { walk_stmt_exprs(ctx, st, visit) } }
-		for st in s.orelse { walk_stmt_exprs(ctx, st, visit) }
-		for st in s.finalbody { walk_stmt_exprs(ctx, st, visit) }
-	case ^parser.Assert_Stmt:
-		walk_expr(ctx, s.test, visit)
-		if s.msg != nil { walk_expr(ctx, s.msg, visit) }
-	case ^parser.Raise_Stmt:
-		if s.exc != nil { walk_expr(ctx, s.exc, visit) }
-	}
-}
-
-walk_expr :: proc(ctx: ^Lint_Context, expr: parser.Expr, visit: proc(ctx: ^Lint_Context, expr: parser.Expr)) {
-	if expr == nil { return }
-	visit(ctx, expr)
-
-	#partial switch e in expr {
-	case ^parser.Call_Expr:
-		walk_expr(ctx, e.func, visit)
-		for a in e.args { walk_expr(ctx, a, visit) }
-		for kw in e.keywords { walk_expr(ctx, kw.value, visit) }
-	case ^parser.Bin_Op_Expr:
-		walk_expr(ctx, e.left, visit)
-		walk_expr(ctx, e.right, visit)
-	case ^parser.Unary_Op_Expr:
-		walk_expr(ctx, e.operand, visit)
-	case ^parser.Bool_Op_Expr:
-		for v in e.values { walk_expr(ctx, v, visit) }
-	case ^parser.Compare_Expr:
-		walk_expr(ctx, e.left, visit)
-		for c in e.comparators { walk_expr(ctx, c, visit) }
-	case ^parser.If_Expr:
-		walk_expr(ctx, e.test, visit)
-		walk_expr(ctx, e.body, visit)
-		walk_expr(ctx, e.orelse, visit)
-	case ^parser.Dict_Expr:
-		for k in e.keys { walk_expr(ctx, k, visit) }
-		for v in e.values { walk_expr(ctx, v, visit) }
-	case ^parser.Set_Expr:
-		for elt in e.elts { walk_expr(ctx, elt, visit) }
-	case ^parser.List_Expr:
-		for elt in e.elts { walk_expr(ctx, elt, visit) }
-	case ^parser.Tuple_Expr:
-		for elt in e.elts { walk_expr(ctx, elt, visit) }
-	case ^parser.Joined_Str:
-		for v in e.values { walk_expr(ctx, v, visit) }
-	case ^parser.Formatted_Value:
-		walk_expr(ctx, e.value, visit)
-	case ^parser.Attribute_Expr:
-		walk_expr(ctx, e.value, visit)
-	case ^parser.Subscript_Expr:
-		walk_expr(ctx, e.value, visit)
-		walk_expr(ctx, e.slice, visit)
-	case ^parser.Starred_Expr:
-		walk_expr(ctx, e.value, visit)
-	case ^parser.Named_Expr:
-		walk_expr(ctx, e.value, visit)
-	case ^parser.List_Comp:
-		walk_expr(ctx, e.elt, visit)
-		for gen in e.generators {
-			walk_expr(ctx, gen.iter, visit)
-			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
-		}
-	case ^parser.Set_Comp:
-		walk_expr(ctx, e.elt, visit)
-		for gen in e.generators {
-			walk_expr(ctx, gen.iter, visit)
-			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
-		}
-	case ^parser.Dict_Comp:
-		walk_expr(ctx, e.key, visit)
-		walk_expr(ctx, e.value, visit)
-		for gen in e.generators {
-			walk_expr(ctx, gen.iter, visit)
-			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
-		}
-	case ^parser.Generator_Expr:
-		walk_expr(ctx, e.elt, visit)
-		for gen in e.generators {
-			walk_expr(ctx, gen.iter, visit)
-			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
-		}
-	}
-}

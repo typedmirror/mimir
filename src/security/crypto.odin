@@ -97,6 +97,15 @@ walk_assign_random :: proc(ctx: ^Security_Context, stmt: parser.Stmt) {
 					}
 				}
 			}
+			// Check random.* calls in function arguments: x = foo(random.choice(...))
+			for arg in call.args {
+				if arg_call, a_ok := arg.(^parser.Call_Expr); a_ok {
+					amod, afn := resolve_call(ctx, arg_call)
+					if amod == "random" {
+						check_insecure_random_call(ctx, arg_call, amod, afn)
+					}
+				}
+			}
 		}
 	case ^parser.Aug_Assign:
 		// x += random.randint(...)
@@ -113,6 +122,23 @@ walk_assign_random :: proc(ctx: ^Security_Context, stmt: parser.Stmt) {
 				mod, func_name := resolve_call(ctx, call)
 				if mod == "random" {
 					check_insecure_random_call(ctx, call, mod, func_name)
+				}
+			}
+		}
+	case ^parser.Expr_Stmt:
+		// Standalone call: random.choice(items)
+		if call, ok := s.value.(^parser.Call_Expr); ok {
+			mod, func_name := resolve_call(ctx, call)
+			if mod == "random" {
+				check_insecure_random_call(ctx, call, mod, func_name)
+			}
+			// Also check random.* calls nested in function arguments
+			for arg in call.args {
+				if arg_call, a_ok := arg.(^parser.Call_Expr); a_ok {
+					amod, afn := resolve_call(ctx, arg_call)
+					if amod == "random" {
+						check_insecure_random_call(ctx, arg_call, amod, afn)
+					}
 				}
 			}
 		}

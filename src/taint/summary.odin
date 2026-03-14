@@ -111,9 +111,10 @@ build_summary_for_cfg :: proc(
 	append(&queue, cfg.entry)
 	in_queue[entry_idx] = true
 
-	for len(queue) > 0 {
-		block_id := queue[0]
-		ordered_remove(&queue, 0)
+	queue_head := 0
+	for queue_head < len(queue) {
+		block_id := queue[queue_head]
+		queue_head += 1
 
 		idx := int(block_id) - 1
 		if idx < 0 || idx >= num_blocks { continue }

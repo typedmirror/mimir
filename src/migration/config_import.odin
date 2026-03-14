@@ -44,6 +44,8 @@ import_mypy_config :: proc(path: string, allocator: mem.Allocator) -> (Import_Re
 parse_ini_mypy :: proc(result: ^Import_Result, content: string, allocator: mem.Allocator) {
 	in_mypy_section := false
 	in_override := false
+	last_key := ""
+	last_value := ""
 
 	lines := strings.split_lines(content, allocator)
 	for line in lines {
@@ -80,6 +82,13 @@ parse_ini_mypy :: proc(result: ^Import_Result, content: string, allocator: mem.A
 
 		if !in_mypy_section { continue }
 
+		// Continuation line: starts with whitespace, append to previous value
+		if (line[0] == ' ' || line[0] == '\t') && len(last_key) > 0 {
+			last_value = fmt.aprintf("%s %s", last_value, trimmed, allocator = allocator)
+			map_mypy_setting(result, last_key, last_value, allocator)
+			continue
+		}
+
 		// Key = value
 		eq := strings.index_byte(trimmed, '=')
 		if eq < 0 {
@@ -89,6 +98,8 @@ parse_ini_mypy :: proc(result: ^Import_Result, content: string, allocator: mem.A
 		}
 		key := strings.trim_space(trimmed[:eq])
 		value := strings.trim_space(trimmed[eq+1:])
+		last_key = key
+		last_value = value
 
 		map_mypy_setting(result, key, value, allocator)
 	}

@@ -32,6 +32,12 @@ main :: proc() {
 
 	command := args[1]
 
+	// L18: global --help/-h support
+	if command == "--help" || command == "-h" {
+		print_usage()
+		return
+	}
+
 	switch command {
 	case "check":
 		cmd_check(args[2:])
@@ -120,46 +126,17 @@ cmd_check :: proc(args: []string) {
 
 	target := args[0]
 
-	// Find Python files
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir: no Python files found in '%s'", target)
-		return
-	}
-
-	// Start parser bridge
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	// Initialize analysis arena
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("check", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	// Single file: fast path (existing behavior)
 	errors := 0
-	if len(files) == 1 {
-		errors = cmd_check_single(files[0], &bridge, &arena)
+	if len(p.files) == 1 {
+		errors = cmd_check_single(p.files[0], &p.bridge, &p.arena)
 	} else {
 		// Multi-module: shared registry + module graph
-		errors = cmd_check_multi(target, files, &bridge, &arena)
+		errors = cmd_check_multi(target, p.files, &p.bridge, &p.arena)
 	}
 	if errors > 0 { os.exit(1) }
 }
@@ -774,75 +751,31 @@ cmd_lint :: proc(args: []string) {
 		}
 	}
 
-	// Find Python files
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir lint: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir lint: no Python files found in '%s'", target)
-		return
-	}
-
-	// Start parser bridge
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	// Arena
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("lint", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	total_warnings := 0
 	files_with_warnings := 0
 
-	for file in files {
-		// Read source
-		source_data, read_err := os.read_entire_file(file, arena.allocator)
+	for file in p.files {
+		source_data, read_err := os.read_entire_file(file, p.arena.allocator)
 		if read_err != nil {
 			fmt.eprintfln("mimir lint: cannot read '%s': %v", file, read_err)
 			continue
 		}
 		source := string(source_data)
 
-		// Parse
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir lint: %s: %s", file, e.msg)
-			}
-			continue
-		}
+		module := pipeline_parse_file(&p, "lint", file)
+		if module == nil { continue }
 
-		// Bind
-		bind_result := binder.bind(module, file, arena.allocator)
-
-		// Lint
-		diagnostics := lint.lint_file(module, &bind_result, source, file, &config, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		diagnostics := lint.lint_file(module, &bind_result, source, file, &config, p.arena.allocator)
 
 		if len(diagnostics) > 0 {
 			files_with_warnings += 1
 			total_warnings += len(diagnostics)
-			for d in diagnostics {
-				core.diagnostic_print(d)
-			}
+			for d in diagnostics { core.diagnostic_print(d) }
 		}
 	}
 
@@ -850,7 +783,7 @@ cmd_lint :: proc(args: []string) {
 		fmt.printfln("mimir lint: %d warning(s) in %d file(s)", total_warnings, files_with_warnings)
 		os.exit(1)
 	} else {
-		fmt.printfln("mimir lint: %d file(s) clean", len(files))
+		fmt.printfln("mimir lint: %d file(s) clean", len(p.files))
 	}
 }
 
@@ -886,75 +819,31 @@ cmd_perf :: proc(args: []string) {
 		}
 	}
 
-	// Find Python files
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir perf: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir perf: no Python files found in '%s'", target)
-		return
-	}
-
-	// Start parser bridge
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	// Arena
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("perf", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	total_issues := 0
 	files_with_issues := 0
 
-	for file in files {
-		// Read source
-		source_data, read_err := os.read_entire_file(file, arena.allocator)
+	for file in p.files {
+		source_data, read_err := os.read_entire_file(file, p.arena.allocator)
 		if read_err != nil {
 			fmt.eprintfln("mimir perf: cannot read '%s': %v", file, read_err)
 			continue
 		}
 		source := string(source_data)
 
-		// Parse
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir perf: %s: %s", file, e.msg)
-			}
-			continue
-		}
+		module := pipeline_parse_file(&p, "perf", file)
+		if module == nil { continue }
 
-		// Bind
-		bind_result := binder.bind(module, file, arena.allocator)
-
-		// Performance analysis
-		diagnostics := perf.analyze_performance(module, &bind_result, source, file, &config, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		diagnostics := perf.analyze_performance(module, &bind_result, source, file, &config, p.arena.allocator)
 
 		if len(diagnostics) > 0 {
 			files_with_issues += 1
 			total_issues += len(diagnostics)
-			for d in diagnostics {
-				core.diagnostic_print(d)
-			}
+			for d in diagnostics { core.diagnostic_print(d) }
 		}
 	}
 
@@ -962,7 +851,7 @@ cmd_perf :: proc(args: []string) {
 		fmt.printfln("mimir perf: %d performance issue(s) in %d file(s)", total_issues, files_with_issues)
 		os.exit(1)
 	} else {
-		fmt.printfln("mimir perf: %d file(s) clean", len(files))
+		fmt.printfln("mimir perf: %d file(s) clean", len(p.files))
 	}
 }
 
@@ -1002,75 +891,37 @@ cmd_audit :: proc(args: []string) {
 		}
 	}
 
-	// Find Python files
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir audit: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir audit: no Python files found in '%s'", target)
-		return
-	}
-
-	// Start parser bridge
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	// Arena
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("audit", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	total_issues := 0
 	files_with_issues := 0
 
-	for file in files {
+	for file in p.files {
 		if verbose {
 			fmt.printfln("  scanning %s", file)
 		}
 
 		// Read source
-		source_data, read_err := os.read_entire_file(file, arena.allocator)
+		source_data, read_err := os.read_entire_file(file, p.arena.allocator)
 		if read_err != nil {
 			fmt.eprintfln("mimir audit: cannot read '%s': %v", file, read_err)
 			continue
 		}
 		source := string(source_data)
 
-		// Parse
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir audit: %s: %s", file, e.msg)
-			}
-			continue
-		}
+		module := pipeline_parse_file(&p, "audit", file)
+		if module == nil { continue }
 
 		// Bind (needed for import resolution)
-		bind_result := binder.bind(module, file, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
 
 		// Flow analysis (needed for taint tracking)
-		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, p.arena.allocator)
 
 		// Security scan (with taint analysis via flow_result)
-		diagnostics := security.scan_file(module, &bind_result, source, file, &config, arena.allocator, &flow_result)
+		diagnostics := security.scan_file(module, &bind_result, source, file, &config, p.arena.allocator, &flow_result)
 
 		if len(diagnostics) > 0 {
 			files_with_issues += 1
@@ -1085,7 +936,7 @@ cmd_audit :: proc(args: []string) {
 		fmt.printfln("mimir audit: %d security issue(s) in %d file(s)", total_issues, files_with_issues)
 		os.exit(1)
 	} else {
-		fmt.printfln("mimir audit: %d file(s) clean", len(files))
+		fmt.printfln("mimir audit: %d file(s) clean", len(p.files))
 	}
 }
 
@@ -1298,54 +1149,20 @@ cmd_safety :: proc(args: []string) {
 		}
 	}
 
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir safety: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir safety: no Python files found in '%s'", target)
-		return
-	}
-
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("safety", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	total_issues := 0
 	files_with_issues := 0
 
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir safety: %s: %s", file, e.msg)
-			}
-			continue
-		}
+	for file in p.files {
+		module := pipeline_parse_file(&p, "safety", file)
+		if module == nil { continue }
 
-		bind_result := binder.bind(module, file, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
 
-		diagnostics := safety.analyze_safety(module, &bind_result, file, &config, arena.allocator)
+		diagnostics := safety.analyze_safety(module, &bind_result, file, &config, p.arena.allocator)
 
 		if len(diagnostics) > 0 {
 			files_with_issues += 1
@@ -1360,7 +1177,7 @@ cmd_safety :: proc(args: []string) {
 		fmt.printfln("mimir safety: %d safety issue(s) in %d file(s)", total_issues, files_with_issues)
 		os.exit(1)
 	} else {
-		fmt.printfln("mimir safety: %d file(s) clean", len(files))
+		fmt.printfln("mimir safety: %d file(s) clean", len(p.files))
 	}
 }
 
@@ -1803,56 +1620,22 @@ cmd_migrate :: proc(args: []string) {
 		config.from_version.major, config.from_version.minor,
 		config.to_version.major, config.to_version.minor)
 
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir migrate: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir migrate: no Python files found in '%s'", target)
-		return
-	}
-
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		#partial switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("migrate", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	total_issues := 0
 	files_with_issues := 0
 	// Count per rule
 	rule_counts: [len(migration.ALL_RULES)]int
 
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			#partial switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir migrate: %s: %s", file, e.msg)
-			}
-			continue
-		}
+	for file in p.files {
+		module := pipeline_parse_file(&p, "migrate", file)
+		if module == nil { continue }
 
-		bind_result := binder.bind(module, file, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
 
-		diagnostics := migration.analyze_migration(module, &bind_result, file, &config, arena.allocator)
+		diagnostics := migration.analyze_migration(module, &bind_result, file, &config, p.arena.allocator)
 
 		if len(diagnostics) > 0 {
 			files_with_issues += 1
@@ -1873,7 +1656,7 @@ cmd_migrate :: proc(args: []string) {
 	// Summary
 	fmt.println()
 	if total_issues == 0 {
-		fmt.printfln("No migration opportunities found (%d files scanned).", len(files))
+		fmt.printfln("No migration opportunities found (%d files scanned).", len(p.files))
 	} else {
 		fmt.println("Migration summary:")
 		for idx := 0; idx < len(migration.ALL_RULES); idx += 1 {
@@ -1942,63 +1725,29 @@ cmd_stubs :: proc(args: []string) {
 		os.exit(1)
 	}
 
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir stubs: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir stubs: no Python files found in '%s'", target)
-		return
-	}
-
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		#partial switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("stubs", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	generated := 0
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			#partial switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir stubs: %s: %s", file, e.msg)
-			}
-			continue
-		}
+	for file in p.files {
+		module := pipeline_parse_file(&p, "stubs", file)
+		if module == nil { continue }
 
-		bind_result := binder.bind(module, file, arena.allocator)
-		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
-		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, p.arena.allocator)
+		check_result := checker.check(module, &bind_result, &flow_result, file, p.arena.allocator)
 
 		// Compute output path: foo.py → foo.pyi
 		out_path := ""
 		if output_dir != "" {
 			base := file_basename(file)
-			out_path = fmt.aprintf("%s/%si", output_dir, base, allocator = arena.allocator)
+			out_path = fmt.aprintf("%s/%si", output_dir, base, allocator = p.arena.allocator)
 		} else {
-			out_path = fmt.aprintf("%si", file, allocator = arena.allocator)
+			out_path = fmt.aprintf("%si", file, allocator = p.arena.allocator)
 		}
 
-		gen_err := codegen.generate_stubs(module, &bind_result, &check_result, out_path, arena.allocator)
+		gen_err := codegen.generate_stubs(module, &bind_result, &check_result, out_path, p.arena.allocator)
 		if gen_err != nil {
 			#partial switch e in gen_err {
 			case codegen.Error_Data:
@@ -2045,64 +1794,30 @@ cmd_generate_contracts :: proc(args: []string) {
 		os.exit(1)
 	}
 
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir generate-contracts: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir generate-contracts: no Python files found in '%s'", target)
-		return
-	}
-
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		#partial switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("generate-contracts", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	generated := 0
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			#partial switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir generate-contracts: %s: %s", file, e.msg)
-			}
-			continue
-		}
+	for file in p.files {
+		module := pipeline_parse_file(&p, "generate-contracts", file)
+		if module == nil { continue }
 
-		bind_result := binder.bind(module, file, arena.allocator)
-		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
-		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, p.arena.allocator)
+		check_result := checker.check(module, &bind_result, &flow_result, file, p.arena.allocator)
 
 		// Compute output path: foo.py → foo_contracts.py
 		base := file_stem(file)
 		out_path := ""
 		if output_dir != "" {
-			out_path = fmt.aprintf("%s/%s_contracts.py", output_dir, base, allocator = arena.allocator)
+			out_path = fmt.aprintf("%s/%s_contracts.py", output_dir, base, allocator = p.arena.allocator)
 		} else {
 			dir := file_dir(file)
-			out_path = fmt.aprintf("%s%s_contracts.py", dir, base, allocator = arena.allocator)
+			out_path = fmt.aprintf("%s%s_contracts.py", dir, base, allocator = p.arena.allocator)
 		}
 
-		gen_err := codegen.generate_contracts(module, &bind_result, &check_result, out_path, arena.allocator)
+		gen_err := codegen.generate_contracts(module, &bind_result, &check_result, out_path, p.arena.allocator)
 		if gen_err != nil {
 			#partial switch e in gen_err {
 			case codegen.Error_Data:
@@ -2149,64 +1864,30 @@ cmd_generate_tests :: proc(args: []string) {
 		os.exit(1)
 	}
 
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir generate-tests: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir generate-tests: no Python files found in '%s'", target)
-		return
-	}
-
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		#partial switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("generate-tests", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	generated := 0
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			#partial switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir generate-tests: %s: %s", file, e.msg)
-			}
-			continue
-		}
+	for file in p.files {
+		module := pipeline_parse_file(&p, "generate-tests", file)
+		if module == nil { continue }
 
-		bind_result := binder.bind(module, file, arena.allocator)
-		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
-		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, p.arena.allocator)
+		check_result := checker.check(module, &bind_result, &flow_result, file, p.arena.allocator)
 
 		// Compute module name and output path
 		mod_name := file_stem(file)
 		out_path := ""
 		if output_dir != "" {
-			out_path = fmt.aprintf("%s/test_%s.py", output_dir, mod_name, allocator = arena.allocator)
+			out_path = fmt.aprintf("%s/test_%s.py", output_dir, mod_name, allocator = p.arena.allocator)
 		} else {
 			dir := file_dir(file)
-			out_path = fmt.aprintf("%stest_%s.py", dir, mod_name, allocator = arena.allocator)
+			out_path = fmt.aprintf("%stest_%s.py", dir, mod_name, allocator = p.arena.allocator)
 		}
 
-		gen_err := codegen.generate_tests(module, &bind_result, &check_result, mod_name, out_path, arena.allocator)
+		gen_err := codegen.generate_tests(module, &bind_result, &check_result, mod_name, out_path, p.arena.allocator)
 		if gen_err != nil {
 			#partial switch e in gen_err {
 			case codegen.Error_Data:
@@ -2258,60 +1939,26 @@ cmd_gpu :: proc(args: []string) {
 		}
 	}
 
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir gpu: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir gpu: no Python files found in '%s'", target)
-		return
-	}
-
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		#partial switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
+	p: Pipeline; ok := pipeline_start("gpu", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
 	// Initialize GPU type context
-	reg := checker.init_registry(arena.allocator)
-	type_ctx := gpu.init_gpu_types(&reg, arena.allocator)
+	reg := checker.init_registry(p.arena.allocator)
+	type_ctx := gpu.init_gpu_types(&reg, p.arena.allocator)
 
 	total_errors := 0
 	total_funcs := 0
 	total_nodes := 0
 
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			#partial switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir gpu: %s: %s", file, e.msg)
-			}
-			continue
-		}
+	for file in p.files {
+		module := pipeline_parse_file(&p, "gpu", file)
+		if module == nil { continue }
 
-		bind_result := binder.bind(module, file, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
 
 		// GPU validation
-		diagnostics, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, file, &config, arena.allocator)
+		diagnostics, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, file, &config, p.arena.allocator)
 
 		if len(gpu_funcs) > 0 {
 			fmt.printfln("GPU analysis: %s", file)
@@ -2330,7 +1977,7 @@ cmd_gpu :: proc(args: []string) {
 		for func in gpu_funcs {
 			total_funcs += 1
 			// Only extract graph if no errors for this function
-			graph := gpu.extract_graph(func, &bind_result, &type_ctx, arena.allocator)
+			graph := gpu.extract_graph(func, &bind_result, &type_ctx, p.arena.allocator)
 			total_nodes += len(graph.nodes)
 
 			// Summary line
@@ -2373,7 +2020,7 @@ cmd_gpu :: proc(args: []string) {
 			fmt.printfln("mimir gpu: %d @gpu function(s), %d nodes, 0 errors", total_funcs, total_nodes)
 		}
 	} else {
-		fmt.printfln("mimir gpu: no @gpu functions found in %d file(s)", len(files))
+		fmt.printfln("mimir gpu: no @gpu functions found in %d file(s)", len(p.files))
 	}
 }
 
@@ -2458,86 +2105,52 @@ cmd_compile_gpu :: proc(args: []string) {
 		}
 	}
 
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir compile-gpu: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir compile-gpu: no Python files found in '%s'", target)
-		return
-	}
+	p: Pipeline; ok := pipeline_start("compile-gpu", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		#partial switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
-
-	reg := checker.init_registry(arena.allocator)
-	type_ctx := gpu.init_gpu_types(&reg, arena.allocator)
+	reg := checker.init_registry(p.arena.allocator)
+	type_ctx := gpu.init_gpu_types(&reg, p.arena.allocator)
 
 	total_kernels := 0
 
 	backends_to_emit: [dynamic]gpu.Emit_Backend
 	if emit_all {
-		backends_to_emit = make([dynamic]gpu.Emit_Backend, 0, 4, arena.allocator)
+		backends_to_emit = make([dynamic]gpu.Emit_Backend, 0, 4, p.arena.allocator)
 		append(&backends_to_emit, gpu.Emit_Backend.WGSL)
 		append(&backends_to_emit, gpu.Emit_Backend.MSL)
 		append(&backends_to_emit, gpu.Emit_Backend.SPIRV)
 		append(&backends_to_emit, gpu.Emit_Backend.PTX)
 	} else {
-		backends_to_emit = make([dynamic]gpu.Emit_Backend, 0, 1, arena.allocator)
+		backends_to_emit = make([dynamic]gpu.Emit_Backend, 0, 1, p.arena.allocator)
 		append(&backends_to_emit, backend)
 	}
 
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			#partial switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir compile-gpu: %s: %s", file, e.msg)
-			}
-			continue
-		}
+	for file in p.files {
+		module := pipeline_parse_file(&p, "compile-gpu", file)
+		if module == nil { continue }
 
-		bind_result := binder.bind(module, file, arena.allocator)
-		_, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, file, &config, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		_, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, file, &config, p.arena.allocator)
 
 		for func in gpu_funcs {
-			graph := gpu.extract_graph(func, &bind_result, &type_ctx, arena.allocator)
+			graph := gpu.extract_graph(func, &bind_result, &type_ctx, p.arena.allocator)
 
 			// Phase 27: Fusion
 			if fuse_flag {
-				fusion := gpu.fuse_kernels(&graph, arena.allocator)
+				fusion := gpu.fuse_kernels(&graph, p.arena.allocator)
 				if verbose {
 					gpu.print_fusion(&fusion)
 				}
 
 				// Memory plan (with fusion)
 				if plan_flag {
-					mem_plan := gpu.plan_memory(&graph, &fusion, &type_ctx, arena.allocator)
+					mem_plan := gpu.plan_memory(&graph, &fusion, &type_ctx, p.arena.allocator)
 					gpu.print_memory_plan(&mem_plan)
 				}
 
 				// Build node→group map for subgraph extraction
-				node_group_map := make(map[gpu.GPU_Node_ID]int, len(graph.nodes), arena.allocator)
+				node_group_map := make(map[gpu.GPU_Node_ID]int, len(graph.nodes), p.arena.allocator)
 				for &grp in fusion.groups {
 					for nid in grp.node_ids {
 						node_group_map[nid] = grp.id
@@ -2547,10 +2160,10 @@ cmd_compile_gpu :: proc(args: []string) {
 				// Emit each fusion group as a separate kernel
 				for group_idx in fusion.order {
 					grp := &fusion.groups[group_idx]
-					sub := gpu.extract_subgraph(&graph, grp, &node_group_map, arena.allocator)
+					sub := gpu.extract_subgraph(&graph, grp, &node_group_map, p.arena.allocator)
 
 					for be in backends_to_emit {
-						data, is_binary := gpu.emit_kernel(&sub, &type_ctx, be, arena.allocator)
+						data, is_binary := gpu.emit_kernel(&sub, &type_ctx, be, p.arena.allocator)
 						if data == nil { continue }
 						ext := gpu.backend_extension(be)
 						emit_gpu_output(output_dir, fmt.tprintf("%s_%d", graph.func_name, grp.id), ext, data, is_binary, verbose, &graph, be)
@@ -2560,12 +2173,12 @@ cmd_compile_gpu :: proc(args: []string) {
 			} else {
 				// No fusion — emit single kernel (Phase 26 behavior)
 				if plan_flag {
-					mem_plan := gpu.plan_memory(&graph, nil, &type_ctx, arena.allocator)
+					mem_plan := gpu.plan_memory(&graph, nil, &type_ctx, p.arena.allocator)
 					gpu.print_memory_plan(&mem_plan)
 				}
 
 				for be in backends_to_emit {
-					data, is_binary := gpu.emit_kernel(&graph, &type_ctx, be, arena.allocator)
+					data, is_binary := gpu.emit_kernel(&graph, &type_ctx, be, p.arena.allocator)
 					if data == nil { continue }
 					ext := gpu.backend_extension(be)
 					emit_gpu_output(output_dir, graph.func_name, ext, data, is_binary, verbose, &graph, be)
@@ -2575,12 +2188,12 @@ cmd_compile_gpu :: proc(args: []string) {
 
 			// Phase 27: Backward pass generation
 			if backward_flag {
-				backward := gpu.generate_backward(&graph, &type_ctx, arena.allocator)
+				backward := gpu.generate_backward(&graph, &type_ctx, p.arena.allocator)
 				if verbose {
 					fmt.printfln("  Backward: %d nodes (forward: %d)", len(backward.nodes), len(graph.nodes))
 				}
 				for be in backends_to_emit {
-					data, is_binary := gpu.emit_kernel(&backward, &type_ctx, be, arena.allocator)
+					data, is_binary := gpu.emit_kernel(&backward, &type_ctx, be, p.arena.allocator)
 					if data == nil { continue }
 					ext := gpu.backend_extension(be)
 					emit_gpu_output(output_dir, backward.func_name, ext, data, is_binary, verbose, &backward, be)
@@ -2593,7 +2206,7 @@ cmd_compile_gpu :: proc(args: []string) {
 	if total_kernels > 0 {
 		fmt.printfln("mimir compile-gpu: emitted %d kernel(s)", total_kernels)
 	} else {
-		fmt.printfln("mimir compile-gpu: no @gpu functions found in %d file(s)", len(files))
+		fmt.printfln("mimir compile-gpu: no @gpu functions found in %d file(s)", len(p.files))
 	}
 }
 
@@ -2685,54 +2298,20 @@ cmd_compile_wasm :: proc(args: []string) {
 		os.exit(1)
 	}
 
-	files, find_err := core.find_python_files(target)
-	if find_err != nil {
-		fmt.eprintfln("mimir compile-wasm: error reading '%s': %v", target, find_err)
-		os.exit(1)
-	}
-	if len(files) == 0 {
-		fmt.eprintfln("mimir compile-wasm: no Python files found in '%s'", target)
-		return
-	}
+	p: Pipeline; ok := pipeline_start("compile-wasm", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
 
-	bridge, bridge_err := parser.bridge_start()
-	if bridge_err != nil {
-		#partial switch e in bridge_err {
-		case parser.Bridge_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		case parser.Syntax_Error:
-			fmt.eprintfln("mimir: %s", e.msg)
-		}
-		os.exit(1)
-	}
-	defer parser.bridge_stop(&bridge)
-
-	arena: core.Analysis_Arena
-	arena_err := core.arena_init(&arena)
-	if arena_err != nil {
-		fmt.eprintln("mimir: failed to initialize analysis arena")
-		os.exit(1)
-	}
-	defer core.arena_destroy(&arena)
-
-	type_ctx := wasm.init_wasm_types(arena.allocator)
+	type_ctx := wasm.init_wasm_types(p.arena.allocator)
 	total_modules := 0
 	has_errors := false
 
-	for file in files {
-		module, parse_err := parser.bridge_parse(&bridge, file, arena.allocator)
-		if parse_err != nil {
-			#partial switch e in parse_err {
-			case parser.Syntax_Error:
-				fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
-			case parser.Bridge_Error:
-				fmt.eprintfln("mimir compile-wasm: %s: %s", file, e.msg)
-			}
-			continue
-		}
+	for file in p.files {
+		module := pipeline_parse_file(&p, "compile-wasm", file)
+		if module == nil { continue }
 
-		bind_result := binder.bind(module, file, arena.allocator)
-		diags, wasm_funcs := wasm.validate_file(module, &bind_result, &type_ctx, file, &config, arena.allocator)
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		diags, wasm_funcs := wasm.validate_file(module, &bind_result, &type_ctx, file, &config, p.arena.allocator)
 
 		// Print restriction diagnostics
 		for d in diags {
@@ -2743,7 +2322,7 @@ cmd_compile_wasm :: proc(args: []string) {
 		if has_errors || len(wasm_funcs) == 0 { continue }
 
 		// Extract WASM module
-		wasm_module := wasm.extract_wasm_module(module, wasm_funcs, &bind_result, &type_ctx, arena.allocator)
+		wasm_module := wasm.extract_wasm_module(module, wasm_funcs, &bind_result, &type_ctx, p.arena.allocator)
 
 		if verbose {
 			fmt.printfln("  %s: %d @wasm function(s)", file, len(wasm_funcs))
@@ -2755,7 +2334,7 @@ cmd_compile_wasm :: proc(args: []string) {
 
 		// Emit WAT
 		if format_name == "wat" || emit_all {
-			wat_output := wasm.emit_wat(&wasm_module, arena.allocator)
+			wat_output := wasm.emit_wat(&wasm_module, p.arena.allocator)
 			if output_dir != "" {
 				stem := file_stem(file)
 				out_path := fmt.tprintf("%s/%s.wat", output_dir, stem)
@@ -2775,7 +2354,7 @@ cmd_compile_wasm :: proc(args: []string) {
 
 		// Emit WASM binary
 		if format_name == "wasm" || emit_all {
-			wasm_bytes := wasm.emit_wasm_binary(&wasm_module, arena.allocator)
+			wasm_bytes := wasm.emit_wasm_binary(&wasm_module, p.arena.allocator)
 			if output_dir != "" {
 				stem := file_stem(file)
 				out_path := fmt.tprintf("%s/%s.wasm", output_dir, stem)
@@ -2803,7 +2382,7 @@ cmd_compile_wasm :: proc(args: []string) {
 	if total_modules > 0 {
 		fmt.printfln("mimir compile-wasm: emitted %d module(s)", total_modules)
 	} else if !has_errors {
-		fmt.printfln("mimir compile-wasm: no @wasm functions found in %d file(s)", len(files))
+		fmt.printfln("mimir compile-wasm: no @wasm functions found in %d file(s)", len(p.files))
 	}
 }
 

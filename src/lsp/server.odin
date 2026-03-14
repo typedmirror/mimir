@@ -141,7 +141,7 @@ parse_content_length :: proc(header: string) -> (int, bool) {
 		if strings.has_prefix(trimmed, "Content-Length:") {
 			val_str := strings.trim_space(trimmed[len("Content-Length:"):])
 			length, ok := strconv.parse_int(val_str)
-			if ok {
+			if ok && length > 0 {
 				return length, true
 			}
 		}

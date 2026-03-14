@@ -120,45 +120,50 @@ collect_globals :: proc(stmts: []parser.Stmt, globals: ^[dynamic]string) {
 
 // Pass 2: walk statements applying all rules.
 // in_async tracks whether we are inside an async function body.
-check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: bool) {
-	// Collect global variable names declared in this scope (including nested blocks)
-	globals: [dynamic]string
-	defer delete(globals)
-	if ctx.has_threading {
-		collect_globals(stmts, &globals)
+// func_globals carries the globals collected at function scope to avoid re-collecting per block.
+check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: bool, func_globals: []string = nil) {
+	// For function-level entries, collect globals once; nested blocks reuse the parent's list.
+	globals := func_globals
+
+	// Temporary storage only when we are the function-level caller (func_globals is nil)
+	own_globals: [dynamic]string
+	if ctx.has_threading && globals == nil {
+		defer delete(own_globals)
+		collect_globals(stmts, &own_globals)
+		globals = own_globals[:]
 	}
 
 	for stmt in stmts {
 		#partial switch s in stmt {
 		case ^parser.Async_Func_Def:
-			// Enter async scope
+			// Enter async scope — new function, so pass nil to re-collect
 			check_stmts(ctx, s.body, true)
 		case ^parser.Func_Def:
-			// Enter sync scope (resets in_async)
+			// Enter sync scope — new function, so pass nil to re-collect
 			check_stmts(ctx, s.body, false)
 		case ^parser.Class_Def:
 			check_stmts(ctx, s.body, false)
 		case ^parser.If_Stmt:
-			check_stmts(ctx, s.body, in_async)
-			check_stmts(ctx, s.orelse, in_async)
+			check_stmts(ctx, s.body, in_async, globals)
+			check_stmts(ctx, s.orelse, in_async, globals)
 		case ^parser.For_Stmt:
-			check_stmts(ctx, s.body, in_async)
-			check_stmts(ctx, s.orelse, in_async)
+			check_stmts(ctx, s.body, in_async, globals)
+			check_stmts(ctx, s.orelse, in_async, globals)
 		case ^parser.Async_For:
-			check_stmts(ctx, s.body, in_async)
-			check_stmts(ctx, s.orelse, in_async)
+			check_stmts(ctx, s.body, in_async, globals)
+			check_stmts(ctx, s.orelse, in_async, globals)
 		case ^parser.While_Stmt:
-			check_stmts(ctx, s.body, in_async)
-			check_stmts(ctx, s.orelse, in_async)
+			check_stmts(ctx, s.body, in_async, globals)
+			check_stmts(ctx, s.orelse, in_async, globals)
 		case ^parser.With_Stmt:
-			check_stmts(ctx, s.body, in_async)
+			check_stmts(ctx, s.body, in_async, globals)
 		case ^parser.Async_With:
-			check_stmts(ctx, s.body, in_async)
+			check_stmts(ctx, s.body, in_async, globals)
 		case ^parser.Try_Stmt:
-			check_stmts(ctx, s.body, in_async)
-			for h in s.handlers { check_stmts(ctx, h.body, in_async) }
-			check_stmts(ctx, s.orelse, in_async)
-			check_stmts(ctx, s.finalbody, in_async)
+			check_stmts(ctx, s.body, in_async, globals)
+			for h in s.handlers { check_stmts(ctx, h.body, in_async, globals) }
+			check_stmts(ctx, s.orelse, in_async, globals)
+			check_stmts(ctx, s.finalbody, in_async, globals)
 
 		case ^parser.Expr_Stmt:
 			// CONC002: unawaited coroutine (call to async func without await)
@@ -183,7 +188,7 @@ check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: b
 		case ^parser.Aug_Assign:
 			// CONC004: non-atomic compound assignment on global
 			if ctx.has_threading {
-				check_nonatomic(ctx, s, globals[:])
+				check_nonatomic(ctx, s, globals)
 			}
 			if in_async {
 				check_expr_blocking(ctx, s.value)

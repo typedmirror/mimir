@@ -62,7 +62,7 @@ publish_file :: proc(cfg: ^Publish_Config, file_path: string, allocator: mem.All
 	// Write auth header to temp config file to avoid exposing token in process args
 	tmp_dir, tmp_err := os.temp_directory(allocator)
 	if tmp_err != nil { tmp_dir = "/tmp" }
-	curl_cfg_path := strings.concatenate({tmp_dir, "/mimir_curl_cfg"}, allocator)
+	curl_cfg_path := fmt.aprintf("%s/mimir_curl_cfg_%d", tmp_dir, os.get_pid(), allocator = allocator)
 	curl_cfg_content := fmt.tprintf("header = \"Authorization: Bearer %s\"", cfg.token)
 	cfg_write_err := os.write_entire_file(curl_cfg_path, transmute([]byte)curl_cfg_content)
 	if cfg_write_err != nil {

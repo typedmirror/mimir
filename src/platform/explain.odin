@@ -149,12 +149,18 @@ ALL_EXPLANATIONS := [?]Explanation{
 		code = "T007", name = "Attribute error", category = "Type Checker", severity = "Error",
 		description = "An attribute is accessed on a type that doesn't define it. For user-defined\ntypes (classes, instances, modules), mimir checks against registered attributes\nand methods.",
 		example = "    class Foo:\n        x: int = 0\n\n    Foo().y  # T007: 'Foo' has no attribute 'y'",
-		note = "reveal_type() uses T007 with Info severity to display the inferred type.\nAttribute checks are scoped to user-defined types — built-in type method\ntables are intentionally incomplete to avoid false positives.",
+		note = "Attribute checks are scoped to user-defined types — built-in type method\ntables are intentionally incomplete to avoid false positives.",
 	},
 	{
 		code = "T008", name = "TypedDict required key missing", category = "Type Checker", severity = "Error",
 		description = "A TypedDict literal is missing one or more required keys.",
 		example = "    class Config(TypedDict):\n        host: str\n        port: int\n\n    c: Config = {\"host\": \"localhost\"}  # T008: missing required key 'port'",
+	},
+	{
+		code = "T009", name = "Revealed type", category = "Type Checker", severity = "Info",
+		description = "reveal_type() displays the inferred type of an expression at check time.\nUseful for debugging type inference. The expression is evaluated normally.",
+		example = "    x = [1, 2, 3]\n    reveal_type(x)  # T009: Type of expression is 'list[int]'",
+		note = "This is informational — reveal_type() does not cause a check failure.\nAvailable as a builtin in Python 3.11+ or via typing.reveal_type.",
 	},
 
 	// ── Lint ──

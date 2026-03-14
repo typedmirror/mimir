@@ -112,6 +112,11 @@ handle_did_close :: proc(server: ^Server, params: json.Value) {
 
 	uri := get_json_string(td, "uri")
 
+	// Free the Document's cloned strings before removing the entry
+	if old_doc, has_old := server.documents[uri]; has_old {
+		delete(old_doc.uri, server.allocator)
+		delete(old_doc.content, server.allocator)
+	}
 	delete_key(&server.documents, uri)
 	delete_key(&server.analysis_cache, uri)
 

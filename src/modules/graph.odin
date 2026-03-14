@@ -277,10 +277,11 @@ topological_sort :: proc(graph: ^Module_Graph, diagnostics: ^[dynamic]core.Diagn
 	// Process
 	clear(&graph.topo_order)
 	processed := 0
+	queue_head := 0
 
-	for len(queue) > 0 {
-		name := queue[0]
-		ordered_remove(&queue, 0)
+	for queue_head < len(queue) {
+		name := queue[queue_head]
+		queue_head += 1
 		append(&graph.topo_order, name)
 		processed += 1
 

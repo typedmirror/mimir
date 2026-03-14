@@ -419,6 +419,10 @@ walk_expr_tree :: proc(ctx: ^Migration_Context, expr: parser.Expr,
 		for v in e.values { walk_expr_tree(ctx, v, checker) }
 	case ^parser.Set_Expr:
 		for elt in e.elts { walk_expr_tree(ctx, elt, checker) }
+	case ^parser.Starred_Expr:
+		walk_expr_tree(ctx, e.value, checker)
+	case ^parser.Lambda_Expr:
+		walk_expr_tree(ctx, e.body, checker)
 	}
 }
 

@@ -79,6 +79,7 @@ Param_Type :: struct {
 	name:        string,
 	type_id:     Type_ID,
 	has_default: bool,
+	is_variadic: bool, // *args or **kwargs parameter
 }
 
 List_Type :: struct { element: Type_ID }
@@ -145,6 +146,12 @@ Type_Env :: struct {
 
 // ==================== Type Registry ====================
 
+Spec_Cache_Entry :: struct {
+	result:        Type_ID,
+	class_type_id: Type_ID,
+	type_args:     []Type_ID,
+}
+
 Type_Registry :: struct {
 	types:       [dynamic]Type,
 	union_cache: map[u64]Type_ID,
@@ -153,7 +160,7 @@ Type_Registry :: struct {
 	set_cache:   map[Type_ID]Type_ID,
 	class_types:    map[binder.Symbol_ID]Type_ID,
 	instance_cache: map[Type_ID]Type_ID,
-	spec_cache:     map[u64]Type_ID,
+	spec_cache:     map[u64]Spec_Cache_Entry,
 	tensor_cache:   map[u64]Type_ID,
 	overload_sigs:  map[binder.Symbol_ID][dynamic]Type_ID,
 	allocator:      mem.Allocator,
@@ -169,7 +176,7 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.set_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.class_types = make(map[binder.Symbol_ID]Type_ID, 16, allocator)
 	reg.instance_cache = make(map[Type_ID]Type_ID, 16, allocator)
-	reg.spec_cache = make(map[u64]Type_ID, 8, allocator)
+	reg.spec_cache = make(map[u64]Spec_Cache_Entry, 8, allocator)
 	reg.tensor_cache = make(map[u64]Type_ID, 8, allocator)
 	reg.overload_sigs = make(map[binder.Symbol_ID][dynamic]Type_ID, 8, allocator)
 
@@ -266,7 +273,9 @@ make_union_type :: proc(reg: ^Type_Registry, members_in: []Type_ID) -> Type_ID {
 	members_slice := make([]Type_ID, len(flat), reg.allocator)
 	copy(members_slice, flat[:])
 	id := register_type(reg, Union_Type{members = members_slice})
-	reg.union_cache[h] = id
+	if h not_in reg.union_cache {
+		reg.union_cache[h] = id
+	}
 	return id
 }
 
@@ -481,7 +490,7 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		}
 	}
 
-	// Protocol structural subtyping: any Instance with matching methods/attrs satisfies Protocol
+	// Protocol structural subtyping: Instance must have matching methods/attrs with compatible types
 	#partial switch tgt in tgt_type.info {
 	case Protocol_Type:
 		#partial switch src in src_type.info {
@@ -489,11 +498,20 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			cls := get_type(reg, src.class_type)
 			#partial switch cls_info in cls.info {
 			case Class_Type:
-				for method_name, _ in tgt.methods {
-					if _, ok := cls_info.attrs[method_name]; !ok { return false }
+				for method_name, method_type in tgt.methods {
+					cls_attr, ok := cls_info.attrs[method_name]
+					if !ok { return false }
+					// Check type compatibility if both types are known
+					if method_type != TYPE_UNKNOWN && cls_attr != TYPE_UNKNOWN {
+						if !is_assignable(reg, cls_attr, method_type) { return false }
+					}
 				}
-				for attr_name, _ in tgt.attrs {
-					if _, ok := cls_info.attrs[attr_name]; !ok { return false }
+				for attr_name, attr_type in tgt.attrs {
+					cls_attr, ok := cls_info.attrs[attr_name]
+					if !ok { return false }
+					if attr_type != TYPE_UNKNOWN && cls_attr != TYPE_UNKNOWN {
+						if !is_assignable(reg, cls_attr, attr_type) { return false }
+					}
 				}
 				return true
 			}
@@ -874,22 +892,18 @@ specialize_class :: proc(reg: ^Type_Registry, class_type_id: Type_ID, type_args:
 	for arg in type_args {
 		h = h * 31 + u64(arg)
 	}
-	if cached, ok := reg.spec_cache[h]; ok {
-		// Verify cache hit — collision detection
-		// Check that cached result is an Instance_Type wrapping a class with same name+args
-		cached_t := get_type(reg, cached)
-		if inst, is_inst := cached_t.info.(Instance_Type); is_inst {
-			inner := get_type(reg, inst.class_type)
-			if inner_cls, is_cls := inner.info.(Class_Type); is_cls {
-				orig := get_type(reg, class_type_id)
-				if orig_cls, orig_ok := orig.info.(Class_Type); orig_ok {
-					if inner_cls.symbol_id == orig_cls.symbol_id && len(inner_cls.type_params) == 0 {
-						return cached
-					}
-				}
+	if entry, ok := reg.spec_cache[h]; ok {
+		// Verify cache hit — check class and type_args match exactly
+		if entry.class_type_id == class_type_id && len(entry.type_args) == len(type_args) {
+			args_match := true
+			for i := 0; i < len(type_args); i += 1 {
+				if entry.type_args[i] != type_args[i] { args_match = false; break }
+			}
+			if args_match {
+				return entry.result
 			}
 		}
-		// Hash collision — fall through to register new specialization
+		// Hash collision — fall through to create new specialization (overwrites cache)
 	}
 
 	ct := get_type(reg, class_type_id)
@@ -918,6 +932,13 @@ specialize_class :: proc(reg: ^Type_Registry, class_type_id: Type_ID, type_args:
 	})
 
 	result := make_instance_type(reg, spec_id)
-	reg.spec_cache[h] = result
+	// Cache with type_args for collision verification
+	cached_args := make([]Type_ID, len(type_args), reg.allocator)
+	copy(cached_args, type_args)
+	reg.spec_cache[h] = Spec_Cache_Entry{
+		result        = result,
+		class_type_id = class_type_id,
+		type_args     = cached_args,
+	}
 	return result
 }

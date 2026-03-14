@@ -130,131 +130,24 @@ walk_imports_stmts :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
 	}
 }
 
-// Shared AST walkers for security rules
+// Shared AST walker bridge for security rules.
+// Wraps a Security_Context + callback into core.AST_Visitor.
+
+Security_Walker :: struct {
+	sec_ctx:    ^Security_Context,
+	visit_expr: proc(ctx: ^Security_Context, expr: parser.Expr),
+}
 
 walk_stmts :: proc(ctx: ^Security_Context, stmts: []parser.Stmt, visit_expr: proc(ctx: ^Security_Context, expr: parser.Expr)) {
-	for stmt in stmts {
-		walk_stmt(ctx, stmt, visit_expr)
+	sw := Security_Walker{sec_ctx = ctx, visit_expr = visit_expr}
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			w := cast(^Security_Walker)raw_ctx
+			w.visit_expr(w.sec_ctx, expr)
+		},
+		ctx = rawptr(&sw),
 	}
-}
-
-walk_stmt :: proc(ctx: ^Security_Context, stmt: parser.Stmt, visit_expr: proc(ctx: ^Security_Context, expr: parser.Expr)) {
-	#partial switch s in stmt {
-	case ^parser.Expr_Stmt:
-		walk_expr(ctx, s.value, visit_expr)
-	case ^parser.Assign:
-		walk_expr(ctx, s.value, visit_expr)
-		for t in s.targets { walk_expr(ctx, t, visit_expr) }
-	case ^parser.Ann_Assign:
-		if s.value != nil { walk_expr(ctx, s.value, visit_expr) }
-	case ^parser.Return_Stmt:
-		if s.value != nil { walk_expr(ctx, s.value, visit_expr) }
-	case ^parser.Func_Def:
-		for st in s.body { walk_stmt(ctx, st, visit_expr) }
-	case ^parser.Async_Func_Def:
-		for st in s.body { walk_stmt(ctx, st, visit_expr) }
-	case ^parser.Class_Def:
-		for st in s.body { walk_stmt(ctx, st, visit_expr) }
-	case ^parser.If_Stmt:
-		walk_expr(ctx, s.test, visit_expr)
-		for st in s.body { walk_stmt(ctx, st, visit_expr) }
-		for st in s.orelse { walk_stmt(ctx, st, visit_expr) }
-	case ^parser.For_Stmt:
-		for st in s.body { walk_stmt(ctx, st, visit_expr) }
-		for st in s.orelse { walk_stmt(ctx, st, visit_expr) }
-	case ^parser.While_Stmt:
-		walk_expr(ctx, s.test, visit_expr)
-		for st in s.body { walk_stmt(ctx, st, visit_expr) }
-		for st in s.orelse { walk_stmt(ctx, st, visit_expr) }
-	case ^parser.With_Stmt:
-		for st in s.body { walk_stmt(ctx, st, visit_expr) }
-	case ^parser.Try_Stmt:
-		for st in s.body { walk_stmt(ctx, st, visit_expr) }
-		for h in s.handlers { for st in h.body { walk_stmt(ctx, st, visit_expr) } }
-		for st in s.orelse { walk_stmt(ctx, st, visit_expr) }
-		for st in s.finalbody { walk_stmt(ctx, st, visit_expr) }
-	case ^parser.Assert_Stmt:
-		walk_expr(ctx, s.test, visit_expr)
-		if s.msg != nil { walk_expr(ctx, s.msg, visit_expr) }
-	case ^parser.Raise_Stmt:
-		if s.exc != nil { walk_expr(ctx, s.exc, visit_expr) }
-	case ^parser.Aug_Assign:
-		walk_expr(ctx, s.value, visit_expr)
-		walk_expr(ctx, s.target, visit_expr)
-	}
-}
-
-walk_expr :: proc(ctx: ^Security_Context, expr: parser.Expr, visit: proc(ctx: ^Security_Context, expr: parser.Expr)) {
-	if expr == nil { return }
-	visit(ctx, expr)
-
-	#partial switch e in expr {
-	case ^parser.Call_Expr:
-		walk_expr(ctx, e.func, visit)
-		for a in e.args { walk_expr(ctx, a, visit) }
-		for kw in e.keywords { walk_expr(ctx, kw.value, visit) }
-	case ^parser.Bin_Op_Expr:
-		walk_expr(ctx, e.left, visit)
-		walk_expr(ctx, e.right, visit)
-	case ^parser.Unary_Op_Expr:
-		walk_expr(ctx, e.operand, visit)
-	case ^parser.Bool_Op_Expr:
-		for v in e.values { walk_expr(ctx, v, visit) }
-	case ^parser.Compare_Expr:
-		walk_expr(ctx, e.left, visit)
-		for c in e.comparators { walk_expr(ctx, c, visit) }
-	case ^parser.If_Expr:
-		walk_expr(ctx, e.test, visit)
-		walk_expr(ctx, e.body, visit)
-		walk_expr(ctx, e.orelse, visit)
-	case ^parser.Dict_Expr:
-		for k in e.keys { walk_expr(ctx, k, visit) }
-		for v in e.values { walk_expr(ctx, v, visit) }
-	case ^parser.Set_Expr:
-		for elt in e.elts { walk_expr(ctx, elt, visit) }
-	case ^parser.List_Expr:
-		for elt in e.elts { walk_expr(ctx, elt, visit) }
-	case ^parser.Tuple_Expr:
-		for elt in e.elts { walk_expr(ctx, elt, visit) }
-	case ^parser.Joined_Str:
-		for v in e.values { walk_expr(ctx, v, visit) }
-	case ^parser.Formatted_Value:
-		walk_expr(ctx, e.value, visit)
-	case ^parser.Attribute_Expr:
-		walk_expr(ctx, e.value, visit)
-	case ^parser.Subscript_Expr:
-		walk_expr(ctx, e.value, visit)
-		walk_expr(ctx, e.slice, visit)
-	case ^parser.Starred_Expr:
-		walk_expr(ctx, e.value, visit)
-	case ^parser.Named_Expr:
-		walk_expr(ctx, e.value, visit)
-	case ^parser.List_Comp:
-		walk_expr(ctx, e.elt, visit)
-		for gen in e.generators {
-			walk_expr(ctx, gen.iter, visit)
-			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
-		}
-	case ^parser.Set_Comp:
-		walk_expr(ctx, e.elt, visit)
-		for gen in e.generators {
-			walk_expr(ctx, gen.iter, visit)
-			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
-		}
-	case ^parser.Dict_Comp:
-		walk_expr(ctx, e.key, visit)
-		walk_expr(ctx, e.value, visit)
-		for gen in e.generators {
-			walk_expr(ctx, gen.iter, visit)
-			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
-		}
-	case ^parser.Generator_Expr:
-		walk_expr(ctx, e.elt, visit)
-		for gen in e.generators {
-			walk_expr(ctx, gen.iter, visit)
-			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
-		}
-	}
+	core.walk_all_stmts(&visitor, stmts)
 }
 
 // Resolve a Call_Expr's callee to (module, function_name).
@@ -279,13 +172,21 @@ resolve_call :: proc(ctx: ^Security_Context, call: ^parser.Call_Expr) -> (module
 			if mod, ok2 := ctx.import_map[name.id]; ok2 {
 				return mod, f.attr
 			}
-			// Check if object is an aliased module: sp = subprocess → sp.run()
 			if alias, ok2 := ctx.name_aliases[name.id]; ok2 {
 				if alias.module != "" {
 					return alias.module, f.attr
 				}
 			}
 			return "", f.attr
+		}
+		// Chained attribute: os.path.join(), flask.request.form.get()
+		// Resolve innermost to module, use outermost attr as func name
+		if inner_attr, ok := f.value.(^parser.Attribute_Expr); ok {
+			if name, ok2 := inner_attr.value.(^parser.Name_Expr); ok2 {
+				if mod, ok3 := ctx.import_map[name.id]; ok3 {
+					return mod, f.attr
+				}
+			}
 		}
 	}
 	return "", ""
@@ -303,7 +204,10 @@ walk_alias_stmts :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
 		case ^parser.Assign:
 			if len(s.targets) == 1 {
 				if target, ok := s.targets[0].(^parser.Name_Expr); ok {
-					resolve_alias_rhs(ctx, target.id, s.value)
+					if !resolve_alias_rhs(ctx, target.id, s.value) {
+						// RHS is not an alias — invalidate any stale alias for this name
+						delete_key(&ctx.name_aliases, target.id)
+					}
 				}
 			}
 		case ^parser.Func_Def:
@@ -328,30 +232,29 @@ walk_alias_stmts :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
 	}
 }
 
-resolve_alias_rhs :: proc(ctx: ^Security_Context, target_name: string, value: parser.Expr) {
-	if value == nil { return }
+resolve_alias_rhs :: proc(ctx: ^Security_Context, target_name: string, value: parser.Expr) -> bool {
+	if value == nil { return false }
 	#partial switch v in value {
 	case ^parser.Name_Expr:
 		// x = eval, x = subprocess, x = aliased_name
-		// Follow chain if already aliased
 		if alias, ok := ctx.name_aliases[v.id]; ok {
 			ctx.name_aliases[target_name] = alias
 		} else if mod, ok := ctx.import_map[v.id]; ok {
-			// x = md5 (from hashlib import md5) → {module=hashlib, name=md5}
-			// x = subprocess (import subprocess) → {module=subprocess, name=subprocess}
 			ctx.name_aliases[target_name] = taint.Alias_Info{module = mod, name = v.id}
 		} else {
-			// Builtin like eval, exec, open — not in import_map
 			ctx.name_aliases[target_name] = taint.Alias_Info{module = "", name = v.id}
 		}
+		return true
 	case ^parser.Attribute_Expr:
 		// x = subprocess.run → {module=subprocess, name=run}
 		if name, ok := v.value.(^parser.Name_Expr); ok {
 			if mod, ok2 := ctx.import_map[name.id]; ok2 {
 				ctx.name_aliases[target_name] = taint.Alias_Info{module = mod, name = v.attr}
+				return true
 			}
 		}
 	}
+	return false
 }
 
 // Check if a variable name contains any security-relevant keyword

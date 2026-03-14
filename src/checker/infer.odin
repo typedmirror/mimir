@@ -132,6 +132,10 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			}
 			return TYPE_UNKNOWN
 		}
+		// Slicing returns the same container type; indexing returns element type
+		if _, is_slice := e.slice.(^parser.Slice_Expr); is_slice {
+			return container
+		}
 		return get_subscript_type(container, ctx.reg)
 
 	case ^parser.List_Expr:
@@ -275,7 +279,13 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		return val_type
 
 	case ^parser.Await_Expr:
-		return infer_expr(e.value, ctx)
+		val_type := infer_expr(e.value, ctx)
+		// If the awaited value is a Callable (coroutine), unwrap to its return type
+		vt := get_type(ctx.reg, val_type)
+		if ct, ok := vt.info.(Callable_Type); ok {
+			return ct.return_type
+		}
+		return val_type
 
 	case ^parser.Yield_Expr:
 		if e.value != nil {
@@ -300,7 +310,8 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		val := infer_expr(e.value, ctx)
 		return make_dict_type(ctx.reg, key, val)
 	case ^parser.Generator_Expr:
-		return TYPE_ANY
+		infer_comprehension_vars(e.generators, ctx)
+		return infer_expr(e.elt, ctx)
 
 	case ^parser.Formatted_Value:
 		return TYPE_STR
@@ -308,6 +319,7 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		return TYPE_STR
 
 	case ^parser.Slice_Expr:
+		// Bare slice object (1:3) — type inferred at Subscript_Expr level
 		return TYPE_ANY
 	}
 
@@ -568,9 +580,9 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 				fmt_arg_count_error(n_params, n_total, ctx.reg),
 				"Remove extra arguments")
 		} else {
-			// Check if last param is *args (has_default used as approximation)
+			// Check if last param is *args (explicit flag) or builtin with Any type (implicit)
 			last := func_info.params[n_params - 1]
-			if last.type_id != TYPE_ANY { // non-variadic
+			if !last.is_variadic && last.type_id != TYPE_ANY {
 				emit_diagnostic(ctx, e.loc, "T004", .Error,
 					"Too many arguments",
 					fmt_arg_count_error(n_params, n_total, ctx.reg),
@@ -740,8 +752,10 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 			case "items":
 				return make_callable_type(reg, no_params, TYPE_ANY)
 			case "get":
+				// dict.get() returns V|None when no default provided
+				get_ret := make_union_type(reg, {info.value, TYPE_NONE})
 				return make_callable_type(reg,
-					make_params(reg, {info.key, info.value}, {false, true}), info.value)
+					make_params(reg, {info.key, info.value}, {false, true}), get_ret)
 			case "pop":
 				return make_callable_type(reg,
 					make_params(reg, {info.key, info.value}, {false, true}), info.value)
@@ -922,6 +936,7 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 			name = args.vararg.arg,
 			type_id = TYPE_ANY,
 			has_default = true,
+			is_variadic = true,
 		}
 		idx += 1
 	}
@@ -943,6 +958,7 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 			name = args.kwarg.arg,
 			type_id = TYPE_ANY,
 			has_default = true,
+			is_variadic = true,
 		}
 		idx += 1
 	}
@@ -1058,7 +1074,7 @@ handle_assert_type :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID
 
 handle_reveal_type :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 	if len(e.args) != 1 {
-		emit_diagnostic(ctx, e.loc, "T007", .Error,
+		emit_diagnostic(ctx, e.loc, "T009", .Error,
 			len(e.args) < 1 ? "Too few arguments" : "Too many arguments",
 			fmt.aprintf("reveal_type requires exactly 1 argument, got %d", len(e.args),
 				allocator = ctx.reg.allocator),
@@ -1068,7 +1084,7 @@ handle_reveal_type :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID
 	}
 
 	val_type := infer_expr(e.args[0], ctx)
-	emit_diagnostic(ctx, e.loc, "T007", .Info,
+	emit_diagnostic(ctx, e.loc, "T009", .Info,
 		"Revealed type",
 		fmt.aprintf("Type of expression is '%s'",
 			type_to_string(ctx.reg, val_type),

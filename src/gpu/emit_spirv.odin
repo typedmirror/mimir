@@ -205,6 +205,9 @@ emit_spirv :: proc(
 	float_id := spirv_alloc_id(&m)
 	spirv_emit(&m.types, SPIRV_OP_TYPE_FLOAT, float_id, 32)
 
+	bool_type_id := spirv_alloc_id(&m)
+	spirv_emit(&m.types, SPIRV_OP_TYPE_BOOL, bool_type_id)
+
 	uint_id := spirv_alloc_id(&m)
 	spirv_emit(&m.types, SPIRV_OP_TYPE_INT, uint_id, 32, 0) // 32-bit unsigned
 
@@ -305,7 +308,7 @@ emit_spirv :: proc(
 	// Emit each node
 	for &node in graph.nodes {
 		result_id := spirv_emit_graph_node(&m, graph, &node, &node_ids, &param_var_ids,
-			float_id, uint_id, ptr_float_id, const_0_uint, const_0_float, const_1_float,
+			float_id, uint_id, bool_type_id, ptr_float_id, const_0_uint, const_0_float, const_1_float,
 			tid_id, glsl_id, allocator)
 		if result_id != 0 {
 			node_ids[node.id] = result_id
@@ -336,7 +339,7 @@ spirv_emit_graph_node :: proc(
 	node: ^GPU_Node,
 	node_ids: ^map[GPU_Node_ID]u32,
 	param_var_ids: ^map[GPU_Node_ID]u32,
-	float_id, uint_id, ptr_float_id, const_0_uint, const_0_float, const_1_float: u32,
+	float_id, uint_id, bool_type_id, ptr_float_id, const_0_uint, const_0_float, const_1_float: u32,
 	tid_id: u32,
 	glsl_id: u32,
 	allocator: mem.Allocator,
@@ -449,7 +452,7 @@ spirv_emit_graph_node :: proc(
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		bool_id := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FORD_EQUAL, float_id, bool_id, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_FORD_EQUAL, bool_type_id, bool_id, a, b)
 		result := spirv_alloc_id(m)
 		spirv_emit(&m.functions, SPIRV_OP_SELECT, float_id, result, bool_id, const_1_float, const_0_float)
 		return result
@@ -458,7 +461,7 @@ spirv_emit_graph_node :: proc(
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		bool_id := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FORD_LESS_THAN, float_id, bool_id, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_FORD_LESS_THAN, bool_type_id, bool_id, a, b)
 		result := spirv_alloc_id(m)
 		spirv_emit(&m.functions, SPIRV_OP_SELECT, float_id, result, bool_id, const_1_float, const_0_float)
 		return result
@@ -467,7 +470,7 @@ spirv_emit_graph_node :: proc(
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		bool_id := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FORD_GREATER_THAN, float_id, bool_id, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_FORD_GREATER_THAN, bool_type_id, bool_id, a, b)
 		result := spirv_alloc_id(m)
 		spirv_emit(&m.functions, SPIRV_OP_SELECT, float_id, result, bool_id, const_1_float, const_0_float)
 		return result
@@ -476,7 +479,7 @@ spirv_emit_graph_node :: proc(
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		bool_id := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FORD_LESS_THAN_EQ, float_id, bool_id, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_FORD_LESS_THAN_EQ, bool_type_id, bool_id, a, b)
 		result := spirv_alloc_id(m)
 		spirv_emit(&m.functions, SPIRV_OP_SELECT, float_id, result, bool_id, const_1_float, const_0_float)
 		return result
@@ -485,7 +488,7 @@ spirv_emit_graph_node :: proc(
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		bool_id := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FORD_GREATER_THAN_EQ, float_id, bool_id, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_FORD_GREATER_THAN_EQ, bool_type_id, bool_id, a, b)
 		result := spirv_alloc_id(m)
 		spirv_emit(&m.functions, SPIRV_OP_SELECT, float_id, result, bool_id, const_1_float, const_0_float)
 		return result

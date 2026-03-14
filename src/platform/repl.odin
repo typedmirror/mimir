@@ -11,30 +11,86 @@ import flow    "mimir:flow"
 import checker "mimir:checker"
 import core    "mimir:core"
 
+REPL_EXEC_SCRIPT := string(#load("../../data/repl_exec.py"))
+
 // ==================== REPL State ====================
 
 Repl_State :: struct {
-	accumulated_source: strings.Builder,  // all entered lines
+	accumulated_source: strings.Builder,  // all entered lines (for type checking)
 	prev_diag_count:    int,              // total diagnostics from last run
-	prev_output_len:    int,              // stdout bytes from last execution
 	in_continuation:    bool,             // multi-line input mode
 	continuation_lines: strings.Builder,  // buffered continuation lines
 	open_brackets:      int,              // ( [ { nesting depth
 	bridge:             ^parser.Bridge,
 	temp_path:          string,
 	allocator:          mem.Allocator,
+	// Persistent Python execution process
+	exec_proc:          os.Process,
+	exec_stdin:         ^os.File,
+	exec_stdout:        ^os.File,
+	exec_running:       bool,
+	exec_script_path:   string,
 }
+
+// Sentinels include \x00 to prevent injection via normal Python input/output
+EXEC_SENTINEL :: "\x00__MIMIR_EXEC__\x00"
+DONE_SENTINEL :: "\x00__MIMIR_DONE__\x00"
 
 // ==================== Public API ====================
 
 init_repl :: proc(bridge: ^parser.Bridge, allocator: mem.Allocator) -> Repl_State {
-	return Repl_State{
+	pid := os.get_pid()
+	state := Repl_State{
 		accumulated_source = strings.builder_make(0, 1024, allocator),
 		continuation_lines = strings.builder_make(0, 256, allocator),
 		bridge             = bridge,
-		temp_path          = fmt.aprintf("/tmp/mimir_repl_%d.py", os.get_pid(), allocator = allocator),
+		temp_path          = fmt.aprintf("/tmp/mimir_repl_%d.py", pid, allocator = allocator),
+		exec_script_path   = fmt.aprintf("/tmp/mimir_repl_exec_%d.py", pid, allocator = allocator),
 		allocator          = allocator,
 	}
+
+	// Start persistent Python execution subprocess
+	write_err := os.write_entire_file(state.exec_script_path, transmute([]byte)REPL_EXEC_SCRIPT)
+	if write_err != nil {
+		fmt.eprintln("repl: warning: could not start execution subprocess")
+		return state
+	}
+
+	stdin_r, stdin_w, pipe1_err := os.pipe()
+	if pipe1_err != nil {
+		return state
+	}
+	stdout_r, stdout_w, pipe2_err := os.pipe()
+	if pipe2_err != nil {
+		os.close(stdin_r)
+		os.close(stdin_w)
+		return state
+	}
+
+	py_process, proc_err := os.process_start({
+		command = {"python3", "-u", state.exec_script_path},
+		stdin   = stdin_r,
+		stdout  = stdout_w,
+		stderr  = stdout_w,
+	})
+	if proc_err != nil {
+		os.close(stdin_r)
+		os.close(stdin_w)
+		os.close(stdout_r)
+		os.close(stdout_w)
+		return state
+	}
+
+	// Close child-side pipe ends
+	os.close(stdin_r)
+	os.close(stdout_w)
+
+	state.exec_proc = py_process
+	state.exec_stdin = stdin_w
+	state.exec_stdout = stdout_r
+	state.exec_running = true
+
+	return state
 }
 
 run_repl :: proc(state: ^Repl_State) {
@@ -93,6 +149,9 @@ run_repl :: proc(state: ^Repl_State) {
 
 		repl_process_input(state, line)
 	}
+
+	// Clean up persistent Python process
+	repl_stop_exec(state)
 }
 
 // ==================== Input Reading ====================
@@ -129,7 +188,7 @@ repl_process_input :: proc(state: ^Repl_State, input: string) {
 
 	source := strings.to_string(state.accumulated_source)
 
-	// Write to temp file for parsing
+	// Write full accumulated source to temp file for parsing
 	write_err := os.write_entire_file(state.temp_path, transmute([]byte)source)
 	if write_err != nil {
 		fmt.eprintln("repl: failed to write temp file")
@@ -196,9 +255,9 @@ repl_process_input :: proc(state: ^Repl_State, input: string) {
 		repl_display_type(last_stmt, &check_result)
 	}
 
-	// Execute if no new type errors
+	// Execute ONLY the new input (not accumulated) if no type errors
 	if !has_errors {
-		repl_execute(state)
+		repl_execute(state, input)
 	}
 }
 
@@ -240,44 +299,73 @@ repl_display_type :: proc(stmt: parser.Stmt, result: ^checker.Check_Result) {
 
 // ==================== Execution ====================
 
-repl_execute :: proc(state: ^Repl_State) {
-	proc_state, stdout, stderr, exec_err := os.process_exec({
-		command = {"python3", state.temp_path},
-	}, state.allocator)
+repl_execute :: proc(state: ^Repl_State, input: string) {
+	if !state.exec_running { return }
 
-	if exec_err != nil {
-		return
+	// Send only the NEW input to the persistent Python process
+	code := input
+	if len(code) == 0 { return }
+
+	os.write(state.exec_stdin, transmute([]byte)code)
+	// Ensure trailing newline before sentinel
+	if code[len(code) - 1] != '\n' {
+		os.write(state.exec_stdin, transmute([]byte)string("\n"))
 	}
+	os.write(state.exec_stdin, transmute([]byte)string(EXEC_SENTINEL))
+	os.write(state.exec_stdin, transmute([]byte)string("\n"))
 
-	output := string(stdout)
-
-	// Show only new output (beyond previously shown)
-	if len(output) > state.prev_output_len {
-		new_output := output[state.prev_output_len:]
-		if len(new_output) > 0 {
-			fmt.print(new_output)
-			if new_output[len(new_output) - 1] != '\n' {
-				fmt.println()
-			}
+	// Read output until DONE sentinel
+	output := repl_read_until_sentinel(state.exec_stdout, DONE_SENTINEL, state.allocator)
+	if len(output) > 0 {
+		fmt.print(output)
+		if output[len(output) - 1] != '\n' {
+			fmt.println()
 		}
 	}
+}
 
-	if proc_state.exit_code != 0 && len(stderr) > 0 {
-		err_str := strings.trim_space(string(stderr))
-		// Show just the last line (the actual error message)
-		last_line := err_str
-		for i := len(err_str) - 1; i >= 0; i -= 1 {
-			if err_str[i] == '\n' {
-				last_line = err_str[i + 1:]
+repl_stop_exec :: proc(state: ^Repl_State) {
+	if !state.exec_running { return }
+	os.close(state.exec_stdin)
+	os.close(state.exec_stdout)
+	_, _ = os.process_wait(state.exec_proc)
+	os.remove(state.exec_script_path)
+	os.remove(state.temp_path)
+	state.exec_running = false
+}
+
+// Read lines from pipe until sentinel line, return everything before it.
+repl_read_until_sentinel :: proc(f: ^os.File, sentinel: string, allocator: mem.Allocator) -> string {
+	result: strings.Builder
+	strings.builder_init(&result, 0, 256, allocator)
+	line_buf: [4096]byte
+	pos := 0
+
+	for {
+		bytes_read, err := os.read(f, line_buf[pos:pos + 1])
+		if err != nil || bytes_read == 0 {
+			// Process died or pipe closed
+			break
+		}
+		if line_buf[pos] == '\n' {
+			line := string(line_buf[:pos])
+			if line == sentinel {
 				break
 			}
-		}
-		if len(last_line) > 0 {
-			fmt.eprintfln("  runtime: %s", last_line)
+			strings.write_string(&result, line)
+			strings.write_byte(&result, '\n')
+			pos = 0
+		} else {
+			pos += 1
+			if pos >= len(line_buf) - 1 {
+				// Line too long — flush what we have
+				strings.write_string(&result, string(line_buf[:pos]))
+				pos = 0
+			}
 		}
 	}
 
-	state.prev_output_len = len(output)
+	return strings.to_string(result)
 }
 
 // ==================== Multi-Line Detection ====================
@@ -289,24 +377,47 @@ repl_needs_continuation :: proc(line: string) -> bool {
 	// Lines ending with : start a block
 	if trimmed[len(trimmed) - 1] == ':' { return true }
 
-	// Check for unclosed brackets/parens
+	// Check for unclosed brackets/parens (skip brackets inside strings)
+	return repl_count_brackets(line) > 0
+}
+
+repl_update_brackets :: proc(state: ^Repl_State, line: string) {
+	state.open_brackets += repl_count_brackets(line)
+}
+
+// Count net open brackets in a line, skipping brackets inside string literals and comments.
+repl_count_brackets :: proc(line: string) -> int {
 	opens := 0
-	for c in line {
+	in_string: u8 = 0  // 0 = not in string, '\'' or '"' = quote char
+	escaped := false
+	for i := 0; i < len(line); i += 1 {
+		c := line[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && in_string != 0 {
+			escaped = true
+			continue
+		}
+		if in_string != 0 {
+			if c == in_string {
+				in_string = 0
+			}
+			continue
+		}
+		// Not in string
+		if c == '#' { break }  // rest of line is comment
+		if c == '\'' || c == '"' {
+			in_string = c
+			continue
+		}
 		switch c {
 		case '(', '[', '{': opens += 1
 		case ')', ']', '}': opens -= 1
 		}
 	}
-	return opens > 0
-}
-
-repl_update_brackets :: proc(state: ^Repl_State, line: string) {
-	for c in line {
-		switch c {
-		case '(', '[', '{': state.open_brackets += 1
-		case ')', ']', '}': state.open_brackets -= 1
-		}
-	}
+	return opens
 }
 
 // ==================== Helpers ====================

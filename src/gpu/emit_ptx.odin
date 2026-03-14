@@ -56,11 +56,11 @@ emit_ptx :: proc(
 	// Count how many virtual registers we need
 	vreg_count := len(graph.nodes) + len(graph.inputs) + 4
 	if is_float {
-		fmt.sbprintf(&b, "    .reg .f32 %%v<{0:d}>;\n", vreg_count)
+		fmt.sbprintf(&b, "    .reg .f32 %%v<%d>;\n", vreg_count)
 	} else {
-		fmt.sbprintf(&b, "    .reg .s32 %%v<{0:d}>;\n", vreg_count)
+		fmt.sbprintf(&b, "    .reg .s32 %%v<%d>;\n", vreg_count)
 	}
-	fmt.sbprintf(&b, "    .reg .u64 %%p<{0:d}>;\n", len(graph.inputs) + len(graph.outputs) + 2)
+	fmt.sbprintf(&b, "    .reg .u64 %%p<%d>;\n", len(graph.inputs) + len(graph.outputs) + 2)
 	fmt.sbprint(&b, "\n")
 
 	// Get thread ID
@@ -153,16 +153,18 @@ ptx_emit_node :: proc(
 		}
 
 	case .Sigmoid:
-		// 1 / (1 + exp(-x))
+		// 1 / (1 + exp(-x)), using ex2: exp(x) = ex2(x * log2(e)), log2(e) = 0x3FB8AA3B
 		fmt.sbprintf(b, "    neg.f32 %%v%d, %%v%d;\n", id, int(node.inputs[0]))
-		fmt.sbprintf(b, "    ex2.approx.f32 %%v%d, %%v%d; // approx exp via ex2\n", id, id)
+		fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3FB8AA3B; // * log2(e)\n", id, id)
+		fmt.sbprintf(b, "    ex2.approx.f32 %%v%d, %%v%d;\n", id, id)
 		fmt.sbprintf(b, "    add.f32 %%v%d, %%v%d, 0f3F800000; // +1.0\n", id, id)
 		fmt.sbprintf(b, "    rcp.approx.f32 %%v%d, %%v%d;\n", id, id)
 
 	case .Tanh:
-		// tanh(x) = 2*sigmoid(2x) - 1 (approximation)
+		// tanh(x) = 2*sigmoid(2x) - 1, using ex2: exp(x) = ex2(x * log2(e))
 		fmt.sbprintf(b, "    add.f32 %%v%d, %%v%d, %%v%d; // 2x\n", id, int(node.inputs[0]), int(node.inputs[0]))
 		fmt.sbprintf(b, "    neg.f32 %%v%d, %%v%d;\n", id, id)
+		fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3FB8AA3B; // * log2(e)\n", id, id)
 		fmt.sbprintf(b, "    ex2.approx.f32 %%v%d, %%v%d;\n", id, id)
 		fmt.sbprintf(b, "    add.f32 %%v%d, %%v%d, 0f3F800000;\n", id, id)
 		fmt.sbprintf(b, "    rcp.approx.f32 %%v%d, %%v%d;\n", id, id)
@@ -170,7 +172,9 @@ ptx_emit_node :: proc(
 		fmt.sbprintf(b, "    sub.f32 %%v%d, %%v%d, 0f3F800000; // -1.0\n", id, id)
 
 	case .Softmax:
-		fmt.sbprintf(b, "    ex2.approx.f32 %%v%d, %%v%d; // softmax: exp\n", id, int(node.inputs[0]))
+		// exp(x) = ex2(x * log2(e))
+		fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3FB8AA3B; // * log2(e)\n", id, int(node.inputs[0]))
+		fmt.sbprintf(b, "    ex2.approx.f32 %%v%d, %%v%d; // softmax: exp\n", id, id)
 
 	case .Equal, .Less, .Greater, .LessEq, .GreaterEq:
 		cmp_op := "eq"

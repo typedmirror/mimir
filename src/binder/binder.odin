@@ -419,30 +419,42 @@ scan_expr_for_scopes :: proc(b: ^Binder, expr: parser.Expr) {
 		pop_scope(b)
 
 	case ^parser.List_Comp:
+		// First generator's iter is evaluated in enclosing scope (Python semantics)
+		if len(e.generators) > 0 {
+			scan_expr_for_scopes(b, e.generators[0].iter)
+		}
 		push_scope(b, .Comprehension, "<listcomp>", e.loc)
-		for gen in e.generators {
+		for gen, idx in e.generators {
 			collect_def_target(b, gen.target)
-			scan_expr_for_scopes(b, gen.iter)
+			if idx > 0 { scan_expr_for_scopes(b, gen.iter) }
 			for if_expr in gen.ifs { scan_expr_for_scopes(b, if_expr) }
 		}
 		scan_expr_for_scopes(b, e.elt)
 		pop_scope(b)
 
 	case ^parser.Set_Comp:
+		// First generator's iter is evaluated in enclosing scope (Python semantics)
+		if len(e.generators) > 0 {
+			scan_expr_for_scopes(b, e.generators[0].iter)
+		}
 		push_scope(b, .Comprehension, "<setcomp>", e.loc)
-		for gen in e.generators {
+		for gen, idx in e.generators {
 			collect_def_target(b, gen.target)
-			scan_expr_for_scopes(b, gen.iter)
+			if idx > 0 { scan_expr_for_scopes(b, gen.iter) }
 			for if_expr in gen.ifs { scan_expr_for_scopes(b, if_expr) }
 		}
 		scan_expr_for_scopes(b, e.elt)
 		pop_scope(b)
 
 	case ^parser.Dict_Comp:
+		// First generator's iter is evaluated in enclosing scope (Python semantics)
+		if len(e.generators) > 0 {
+			scan_expr_for_scopes(b, e.generators[0].iter)
+		}
 		push_scope(b, .Comprehension, "<dictcomp>", e.loc)
-		for gen in e.generators {
+		for gen, idx in e.generators {
 			collect_def_target(b, gen.target)
-			scan_expr_for_scopes(b, gen.iter)
+			if idx > 0 { scan_expr_for_scopes(b, gen.iter) }
 			for if_expr in gen.ifs { scan_expr_for_scopes(b, if_expr) }
 		}
 		scan_expr_for_scopes(b, e.key)
@@ -450,24 +462,38 @@ scan_expr_for_scopes :: proc(b: ^Binder, expr: parser.Expr) {
 		pop_scope(b)
 
 	case ^parser.Generator_Expr:
+		// First generator's iter is evaluated in enclosing scope (Python semantics)
+		if len(e.generators) > 0 {
+			scan_expr_for_scopes(b, e.generators[0].iter)
+		}
 		push_scope(b, .Comprehension, "<genexpr>", e.loc)
-		for gen in e.generators {
+		for gen, idx in e.generators {
 			collect_def_target(b, gen.target)
-			scan_expr_for_scopes(b, gen.iter)
+			if idx > 0 { scan_expr_for_scopes(b, gen.iter) }
 			for if_expr in gen.ifs { scan_expr_for_scopes(b, if_expr) }
 		}
 		scan_expr_for_scopes(b, e.elt)
 		pop_scope(b)
 
 	case ^parser.Named_Expr:
-		// Walrus operator: in a comprehension, binds in the ENCLOSING scope
+		// Walrus operator (PEP 572): binds in the enclosing non-comprehension scope
 		scope := get_scope(b, current_scope(b))
 		if scope != nil && scope.kind == .Comprehension {
-			// Temporarily pop to enclosing scope to add the binding
-			saved := current_scope(b)
-			pop_scope(b)
+			// Walk up through ALL nested comprehension scopes
+			saved: [8]Scope_ID // max nesting depth for comprehensions
+			pop_count := 0
+			for {
+				s := get_scope(b, current_scope(b))
+				if s == nil || s.kind != .Comprehension || pop_count >= 8 { break }
+				saved[pop_count] = current_scope(b)
+				pop_scope(b)
+				pop_count += 1
+			}
 			collect_def_target(b, e.target)
-			append(&b.scope_stack, saved)
+			// Restore comprehension scopes in reverse order
+			for i := pop_count - 1; i >= 0; i -= 1 {
+				append(&b.scope_stack, saved[i])
+			}
 		} else {
 			collect_def_target(b, e.target)
 		}
