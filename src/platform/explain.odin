@@ -466,6 +466,27 @@ ALL_EXPLANATIONS := [?]Explanation{
 		example = "    if isinstance(x, int):    # MIG008\n        ...\n    elif isinstance(x, str):\n        ...\n    elif isinstance(x, list):\n        ...",
 	},
 
+	// ── JSON ──
+
+	{
+		code = "JSON001", name = "Non-serializable type", category = "JSON", severity = "Error",
+		description = "A value passed to json.dumps(), json.dump(), mimir.json.serialize(), or\nmimir.json.write() has a type that is not JSON-serializable. JSON only\nsupports str, int, float, bool, None, list, and dict[str, ...].",
+		example = "    import json\n    json.dumps({1, 2, 3})  # JSON001: set is not serializable",
+		note = "Convert to a serializable type (e.g., list(my_set)) or use a custom encoder.",
+	},
+	{
+		code = "JSON002", name = "Invalid JSON schema type", category = "JSON", severity = "Error",
+		description = "The schema argument to mimir.json.parse() or mimir.json.read() is not a\nTypedDict or class. The schema must be a structured type so that fields\ncan be validated.",
+		example = "    from mimir.json import parse\n    data = parse(text, int)  # JSON002: int is not a schema type",
+		note = "Use a TypedDict or dataclass as the schema argument.",
+	},
+	{
+		code = "JSON003", name = "Non-serializable schema field", category = "JSON", severity = "Error",
+		description = "A TypedDict used as a JSON schema contains a field whose type is not JSON\nserializable (e.g., set, bytes, custom class).",
+		example = "    class Config(TypedDict):\n        tags: set  # JSON003: set is not serializable",
+		note = "Change the field type to a JSON-compatible type (e.g., list instead of set).",
+	},
+
 	// ── GPU ──
 
 	{

@@ -165,6 +165,12 @@ Type_Registry :: struct {
 	overload_sigs:  map[binder.Symbol_ID][dynamic]Type_ID,
 	http_request_type:  Type_ID,   // Instance_Type for mimir.http.Request (0 if not registered)
 	http_response_type: Type_ID,   // Instance_Type for mimir.http.Response (0 if not registered)
+	json_parse_type:     Type_ID,  // mimir.json.parse callable (0 if not registered)
+	json_read_type:      Type_ID,  // mimir.json.read callable (0 if not registered)
+	json_serialize_type: Type_ID,  // mimir.json.serialize callable (0 if not registered)
+	json_write_type:     Type_ID,  // mimir.json.write callable (0 if not registered)
+	json_dump_type:      Type_ID,  // mimir.json.dump callable (0 if not registered)
+	json_dumps_type:     Type_ID,  // mimir.json.dumps callable (0 if not registered)
 	allocator:      mem.Allocator,
 }
 

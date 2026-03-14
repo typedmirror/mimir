@@ -542,6 +542,35 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			return infer_generic_call(e, &info, ctx)
 		}
 		check_call_args(e, &info, ctx)
+		// mimir.json typed parse/read — override return type with schema argument
+		if ctx.reg.json_parse_type != 0 &&
+		   (func_type == ctx.reg.json_parse_type || func_type == ctx.reg.json_read_type) {
+			if len(e.args) >= 2 {
+				schema_type := resolve_annotation(e.args[1], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+				if schema_type != TYPE_UNKNOWN && schema_type != TYPE_ANY {
+					st := get_type(ctx.reg, schema_type)
+					if st != nil {
+						#partial switch _ in st.info {
+						case TypedDict_Type:
+							check_json_schema_fields(ctx, schema_type, e.loc)
+							return schema_type
+						case Class_Type:
+							return make_instance_type(ctx.reg, schema_type)
+						case Instance_Type:
+							return schema_type
+						}
+					}
+					// JSON002: schema is not a TypedDict or class
+					emit_diagnostic(ctx, e.loc, "JSON002", .Error,
+						"Invalid JSON schema type",
+						fmt.aprintf("Expected TypedDict or class, got '%s'",
+							type_to_string(ctx.reg, schema_type),
+							allocator = ctx.reg.allocator),
+						"Use a TypedDict as the schema argument")
+				}
+			}
+			return info.return_type
+		}
 		// Shape-aware tensor return: if this is a mimir.array function, compute shaped result
 		if ctx.shape_reg != nil {
 			if shaped := infer_shaped_return(e, info.return_type, ctx); shaped != TYPE_UNKNOWN {

@@ -33,6 +33,9 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.http
 	register_mimir_http(&vreg, reg)
 
+	// Register mimir.json
+	register_mimir_json(&vreg, reg)
+
 	return vreg
 }
 
@@ -357,6 +360,87 @@ register_mimir_http :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.http"] = Virtual_Module{
 		name    = "mimir.http",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.json ====================
+
+register_mimir_json :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 16, reg.allocator)
+	dict_str_any := make_dict_type(reg, TYPE_STR, TYPE_ANY)
+
+	// Schema-aware: parse(data: str, schema: type) -> Any
+	// Return type overridden in infer_call when schema resolves to TypedDict/class
+	parse_type := make_callable_type(reg,
+		{
+			Param_Type{name = "data",   type_id = TYPE_STR},
+			Param_Type{name = "schema", type_id = TYPE_ANY},
+		},
+		TYPE_ANY,
+	)
+	exports["parse"] = parse_type
+	reg.json_parse_type = parse_type
+
+	// read(path: str, schema: type) -> Any
+	read_type := make_callable_type(reg,
+		{
+			Param_Type{name = "path",   type_id = TYPE_STR},
+			Param_Type{name = "schema", type_id = TYPE_ANY},
+		},
+		TYPE_ANY,
+	)
+	exports["read"] = read_type
+	reg.json_read_type = read_type
+
+	// serialize(obj) -> str  (serializability checked post-inference)
+	serialize_type := make_callable_type(reg,
+		{Param_Type{name = "obj", type_id = TYPE_ANY}},
+		TYPE_STR,
+	)
+	exports["serialize"] = serialize_type
+	reg.json_serialize_type = serialize_type
+
+	// write(obj, path: str) -> None
+	write_type := make_callable_type(reg,
+		{
+			Param_Type{name = "obj",  type_id = TYPE_ANY},
+			Param_Type{name = "path", type_id = TYPE_STR},
+		},
+		TYPE_NONE,
+	)
+	exports["write"] = write_type
+	reg.json_write_type = write_type
+
+	// Standard (untyped) operations — mirror stdlib json
+	exports["load"] = make_callable_type(reg,
+		{Param_Type{name = "path", type_id = TYPE_STR}},
+		dict_str_any,
+	)
+	exports["loads"] = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_STR}},
+		dict_str_any,
+	)
+
+	dump_type := make_callable_type(reg,
+		{
+			Param_Type{name = "obj",  type_id = TYPE_ANY},
+			Param_Type{name = "path", type_id = TYPE_STR},
+		},
+		TYPE_NONE,
+	)
+	exports["dump"] = dump_type
+	reg.json_dump_type = dump_type
+
+	dumps_type := make_callable_type(reg,
+		{Param_Type{name = "obj", type_id = TYPE_ANY}},
+		TYPE_STR,
+	)
+	exports["dumps"] = dumps_type
+	reg.json_dumps_type = dumps_type
+
+	vreg.modules["mimir.json"] = Virtual_Module{
+		name    = "mimir.json",
 		exports = exports,
 	}
 }
