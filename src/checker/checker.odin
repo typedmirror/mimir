@@ -35,6 +35,12 @@ check :: proc(
 
 	builtins := init_builtins(&result.registry)
 
+	// Initialize virtual module registry (mimir.* ecosystem stubs)
+	vreg := init_virtual_registry(&result.registry)
+
+	// Resolve virtual imports (mimir.array, etc.) for single-file mode
+	virtual_imports := resolve_virtual_imports(&vreg, bind_result, &result.registry)
+
 	// Pre-register all classes so return type annotations can reference them
 	pre_register_classes(module.body, bind_result, &result.registry)
 
@@ -43,6 +49,12 @@ check :: proc(
 	func_args_map := make(map[binder.Scope_ID]^parser.Arguments, 16, allocator)
 	collect_func_return_types(module.body, bind_result, &result.registry, &builtins, &return_type_map)
 	collect_func_args(module.body, bind_result, &func_args_map)
+
+	// Use virtual imports if present
+	virtual_import_ptr: ^map[binder.Symbol_ID]Type_ID = nil
+	if len(virtual_imports) > 0 {
+		virtual_import_ptr = &virtual_imports
+	}
 
 	// Process each scope's CFG
 	for &cfg in flow_result.cfgs {
@@ -59,6 +71,7 @@ check :: proc(
 			file_path = file_path,
 			declared_return = declared_return,
 			func_args_map = &func_args_map,
+			import_types = virtual_import_ptr,
 		)
 	}
 

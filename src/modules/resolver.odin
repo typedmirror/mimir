@@ -62,11 +62,20 @@ collect_exports :: proc(
 resolve_imports :: proc(
 	info: ^Module_Info,
 	ctx: ^Resolution_Context,
+	vreg: ^checker.Virtual_Registry = nil,
 ) -> map[binder.Symbol_ID]checker.Type_ID {
 	result := make(map[binder.Symbol_ID]checker.Type_ID, 16, ctx.allocator)
 
 	mod_scope := binder.result_get_scope(&info.bind_result, info.bind_result.module_scope)
 	if mod_scope == nil { return result }
+
+	// Resolve virtual module imports (mimir.* ecosystem stubs)
+	if vreg != nil {
+		virtual := checker.resolve_virtual_imports(vreg, &info.bind_result, ctx.registry)
+		for sym_id, type_id in virtual {
+			result[sym_id] = type_id
+		}
+	}
 
 	// Walk import records and corresponding import edges in parallel
 	n_imports := min(len(info.bind_result.imports), len(info.imports))
@@ -74,6 +83,11 @@ resolve_imports :: proc(
 	for i := 0; i < n_imports; i += 1 {
 		imp := info.bind_result.imports[i]
 		edge := info.imports[i]
+
+		// Skip virtual modules — already resolved above
+		if vreg != nil && checker.is_virtual_module(vreg, imp.module_name) {
+			continue
+		}
 
 		// Look up target module's exports
 		target_exports, has_exports := ctx.exports[edge.target_module]

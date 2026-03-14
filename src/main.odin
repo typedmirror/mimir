@@ -251,8 +251,9 @@ cmd_check_multi :: proc(
 		core.diagnostic_print(d)
 	}
 
-	// 6. Init resolution context
+	// 6. Init resolution context + virtual module registry
 	res_ctx := modules.init_resolution_context(&registry, arena.allocator)
+	vreg := checker.init_virtual_registry(&registry)
 
 	// 7. For each module in topo order: resolve → flow → check → export
 	error_count := parse_errors
@@ -267,7 +268,7 @@ cmd_check_multi :: proc(
 		}
 
 		// a. Resolve imports
-		import_types := modules.resolve_imports(info, &res_ctx)
+		import_types := modules.resolve_imports(info, &res_ctx, &vreg)
 
 		// b. Flow analysis
 		flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, arena.allocator)
