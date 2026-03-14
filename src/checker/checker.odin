@@ -183,7 +183,7 @@ check_with_imports :: proc(
 		)
 	}
 
-	backfill_inferred_returns(&result, bind_result)
+	backfill_inferred_returns(&result, bind_result, registry)
 
 	// Cross-function fixpoint refinement pass
 	if len(result.inferred_returns) > 0 {
@@ -213,12 +213,15 @@ check_with_imports :: proc(
 			)
 		}
 
-		backfill_inferred_returns(&result, bind_result)
+		backfill_inferred_returns(&result, bind_result, registry)
 	}
 
 	if len(result.inferred_returns) > 0 {
-		revalidate_module_calls(module.body, &result, bind_result, builtins, file_path)
+		revalidate_module_calls(module.body, &result, bind_result, builtins, file_path, registry)
 	}
+
+	// Refresh registry snapshot — now includes all types registered during checking
+	result.registry = registry^
 
 	return result
 }
@@ -1512,8 +1515,9 @@ revalidate_module_calls :: proc(
 	bind_result: ^binder.Bind_Result,
 	builtins: ^Builtin_Names,
 	file_path: string,
+	reg_override: ^Type_Registry = nil,
 ) {
-	reg := &result.registry
+	reg := reg_override if reg_override != nil else &result.registry
 
 	for stmt in stmts {
 		#partial switch s in stmt {
@@ -1620,8 +1624,8 @@ emit_diagnostic_raw :: proc(
 // After all scopes are checked, update Callable_Types with body-inferred return types.
 // This makes return types visible to symbol_types queries, LSP hover, and cross-module callers.
 // Within-module callers in the same check pass won't see the update (Phase II: iterative fixpoint).
-backfill_inferred_returns :: proc(result: ^Check_Result, bind_result: ^binder.Bind_Result) {
-	reg := &result.registry
+backfill_inferred_returns :: proc(result: ^Check_Result, bind_result: ^binder.Bind_Result, reg_override: ^Type_Registry = nil) {
+	reg := reg_override if reg_override != nil else &result.registry
 
 	for scope_id, inferred_ret in result.inferred_returns {
 		// Find the function's symbol via scope
