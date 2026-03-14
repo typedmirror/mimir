@@ -10,10 +10,11 @@ import core   "mimir:core"
 // ==================== Check Result ====================
 
 Check_Result :: struct {
-	registry:     Type_Registry,
-	symbol_types: map[binder.Symbol_ID]Type_ID,
-	expr_types:   map[rawptr]Type_ID,
-	diagnostics:  [dynamic]core.Diagnostic,
+	registry:        Type_Registry,
+	symbol_types:    map[binder.Symbol_ID]Type_ID,
+	expr_types:      map[rawptr]Type_ID,
+	diagnostics:     [dynamic]core.Diagnostic,
+	inferred_returns: map[binder.Scope_ID]Type_ID, // Body-inferred return types for unannotated functions
 }
 
 // ==================== Entry Point ====================
@@ -30,6 +31,7 @@ check :: proc(
 	result.symbol_types = make(map[binder.Symbol_ID]Type_ID, 128, allocator)
 	result.expr_types = make(map[rawptr]Type_ID, 256, allocator)
 	result.diagnostics = make([dynamic]core.Diagnostic, 0, 32, allocator)
+	result.inferred_returns = make(map[binder.Scope_ID]Type_ID, 16, allocator)
 
 	builtins := init_builtins(&result.registry)
 
@@ -60,6 +62,14 @@ check :: proc(
 		)
 	}
 
+	// Post-check: backfill inferred return types into Callable_Types
+	backfill_inferred_returns(&result, bind_result)
+
+	// Re-validate module-level assignments against updated return types
+	if len(result.inferred_returns) > 0 {
+		revalidate_module_calls(module.body, &result, bind_result, &builtins, file_path)
+	}
+
 	return result
 }
 
@@ -80,6 +90,7 @@ check_with_imports :: proc(
 	result.symbol_types = make(map[binder.Symbol_ID]Type_ID, 128, allocator)
 	result.expr_types = make(map[rawptr]Type_ID, 256, allocator)
 	result.diagnostics = make([dynamic]core.Diagnostic, 0, 32, allocator)
+	result.inferred_returns = make(map[binder.Scope_ID]Type_ID, 16, allocator)
 
 	// Register imported class types in the shared registry's class_types cache
 	for sym_id, type_id in import_types {
@@ -117,6 +128,12 @@ check_with_imports :: proc(
 			reg_override  = registry,
 			import_types  = &local_import_types,
 		)
+	}
+
+	backfill_inferred_returns(&result, bind_result)
+
+	if len(result.inferred_returns) > 0 {
+		revalidate_module_calls(module.body, &result, bind_result, builtins, file_path)
 	}
 
 	return result
@@ -353,6 +370,20 @@ check_scope :: proc(
 			for sym_id, type_id in envs[i].types {
 				result.symbol_types[sym_id] = type_id
 			}
+		}
+	}
+
+	// Infer function return type from body when no annotation present
+	if declared_return == TYPE_UNKNOWN && scope != nil &&
+	   (scope.kind == .Function || scope.kind == .Lambda) {
+		inferred_ret := TYPE_NONE // default: implicit None return
+		if len(return_types) == 1 {
+			inferred_ret = return_types[0]
+		} else if len(return_types) > 1 {
+			inferred_ret = make_union_type(reg, return_types[:])
+		}
+		if inferred_ret != TYPE_UNKNOWN {
+			result.inferred_returns[cfg.scope_id] = inferred_ret
 		}
 	}
 }
@@ -1366,6 +1397,159 @@ collect_func_args :: proc(
 			collect_func_args(s.finalbody, bind_result, out)
 		case ^parser.With_Stmt:
 			collect_func_args(s.body, bind_result, out)
+		}
+	}
+}
+
+// ==================== Post-Backfill Revalidation ====================
+
+// After inferred return types are backfilled into Callable_Types, re-check module-level
+// assignments that reference those functions. Without this, `x: int = f()` passes during
+// initial check (f returns TYPE_UNKNOWN), but should fail after backfill reveals f returns str.
+revalidate_module_calls :: proc(
+	stmts: []parser.Stmt,
+	result: ^Check_Result,
+	bind_result: ^binder.Bind_Result,
+	builtins: ^Builtin_Names,
+	file_path: string,
+) {
+	reg := &result.registry
+
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Ann_Assign:
+			if s.value == nil { continue }
+			declared := resolve_annotation(s.annotation, reg, bind_result, builtins)
+			if declared == TYPE_UNKNOWN || declared == TYPE_ANY { continue }
+
+			call_type := reinfer_call_return(s.value, result, bind_result, reg, builtins)
+			if call_type == TYPE_UNKNOWN || call_type == TYPE_ANY { continue }
+
+			if !is_assignable(reg, call_type, declared) {
+				emit_diagnostic_raw(&result.diagnostics, file_path, s.loc, "T001", .Error,
+					"Incompatible types in assignment",
+					fmt_type_mismatch(call_type, declared, reg),
+					"Change the value or the annotation")
+			}
+
+		case ^parser.Assign:
+			if s.value == nil { continue }
+			if len(s.targets) != 1 { continue }
+
+			// Check if target has a declared type
+			if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+				sym_id, ref_ok := binder.get_ref(bind_result, rawptr(name))
+				if !ref_ok { continue }
+
+				// Check declared annotation types from symbol_types
+				declared, has_declared := result.symbol_types[sym_id]
+				if !has_declared || declared == TYPE_UNKNOWN || declared == TYPE_ANY { continue }
+
+				call_type := reinfer_call_return(s.value, result, bind_result, reg, builtins)
+				if call_type == TYPE_UNKNOWN || call_type == TYPE_ANY { continue }
+
+				if !is_assignable(reg, call_type, declared) {
+					emit_diagnostic_raw(&result.diagnostics, file_path, s.loc, "T001", .Error,
+						"Incompatible types in assignment",
+						fmt_type_mismatch(call_type, declared, reg),
+						"Change the value or the annotation")
+				}
+			}
+		}
+	}
+}
+
+// Re-infer the return type of a call expression using updated callable types
+reinfer_call_return :: proc(
+	expr: parser.Expr,
+	result: ^Check_Result,
+	bind_result: ^binder.Bind_Result,
+	reg: ^Type_Registry,
+	builtins: ^Builtin_Names,
+) -> Type_ID {
+	if expr == nil { return TYPE_UNKNOWN }
+
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return TYPE_UNKNOWN }
+
+	// Get the function being called
+	if name, name_ok := call.func.(^parser.Name_Expr); name_ok {
+		sym_id, ref_ok := binder.get_ref(bind_result, rawptr(name))
+		if !ref_ok { return TYPE_UNKNOWN }
+
+		func_type_id, has_type := result.symbol_types[sym_id]
+		if !has_type { return TYPE_UNKNOWN }
+
+		t := get_type(reg, func_type_id)
+		#partial switch info in t.info {
+		case Callable_Type:
+			return info.return_type
+		}
+	}
+
+	return TYPE_UNKNOWN
+}
+
+// Emit a diagnostic without requiring an Infer_Context
+emit_diagnostic_raw :: proc(
+	diagnostics: ^[dynamic]core.Diagnostic,
+	file_path: string,
+	loc: parser.Src_Loc,
+	code: string,
+	severity: core.Severity,
+	what: string,
+	why: string,
+	fix: string,
+) {
+	append(diagnostics, core.Diagnostic{
+		severity = severity,
+		location = core.Location{
+			file   = file_path,
+			line   = int(loc.line),
+			column = int(loc.col),
+		},
+		code = code,
+		what = what,
+		why  = why,
+		fix  = fix,
+	})
+}
+
+// ==================== Return Type Backfill ====================
+
+// After all scopes are checked, update Callable_Types with body-inferred return types.
+// This makes return types visible to symbol_types queries, LSP hover, and cross-module callers.
+// Within-module callers in the same check pass won't see the update (Phase II: iterative fixpoint).
+backfill_inferred_returns :: proc(result: ^Check_Result, bind_result: ^binder.Bind_Result) {
+	reg := &result.registry
+
+	for scope_id, inferred_ret in result.inferred_returns {
+		// Find the function's symbol via scope
+		scope := binder.result_get_scope(bind_result, scope_id)
+		if scope == nil { continue }
+
+		// Look up the parent scope to find the function symbol
+		parent := binder.result_get_scope(bind_result, scope.parent_id)
+		if parent == nil { continue }
+
+		// Find function symbol by name in parent scope
+		func_sym_id, found := parent.symbols[scope.name]
+		if !found { continue }
+
+		// Skip overloaded functions — callers use overload resolution, not body inference
+		if func_sym_id in reg.overload_sigs { continue }
+
+		// Get the function's type from symbol_types
+		func_type_id, has_type := result.symbol_types[func_sym_id]
+		if !has_type { continue }
+
+		// Update the Callable_Type's return_type in-place
+		t := get_type(reg, func_type_id)
+		#partial switch &info in t.info {
+		case Callable_Type:
+			if info.return_type == TYPE_UNKNOWN {
+				info.return_type = inferred_ret
+			}
 		}
 	}
 }
