@@ -39,6 +39,12 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.data
 	register_mimir_data(&vreg, reg)
 
+	// Register mimir.db
+	register_mimir_db(&vreg, reg)
+
+	// Register mimir.crypt
+	register_mimir_crypt(&vreg, reg)
+
 	return vreg
 }
 
@@ -519,6 +525,197 @@ register_mimir_data :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.data"] = Virtual_Module{
 		name    = "mimir.data",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.db ====================
+
+register_mimir_db :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 16, reg.allocator)
+
+	dict_str_any := make_dict_type(reg, TYPE_STR, TYPE_ANY)
+	list_dict := make_list_type(reg, dict_str_any)
+
+	// ---- Connection class ----
+	conn_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	conn_attrs["close"] = make_callable_type(reg, {}, TYPE_NONE)
+	conn_attrs["in_transaction"] = TYPE_BOOL
+
+	connection_class := register_type(reg, Class_Type{
+		name  = "Connection",
+		attrs = conn_attrs,
+	})
+	connection_instance := make_instance_type(reg, connection_class)
+	exports["Connection"] = connection_class
+
+	// ---- Transaction class ----
+	tx_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	tx_attrs["commit"]   = make_callable_type(reg, {}, TYPE_NONE)
+	tx_attrs["rollback"] = make_callable_type(reg, {}, TYPE_NONE)
+
+	transaction_class := register_type(reg, Class_Type{
+		name  = "Transaction",
+		attrs = tx_attrs,
+	})
+	exports["Transaction"] = transaction_class
+
+	// ---- connect(url: str) -> Connection ----
+	exports["connect"] = make_callable_type(reg,
+		{Param_Type{name = "url", type_id = TYPE_STR}},
+		connection_instance,
+	)
+
+	// ---- query(conn, sql, params=[], result=Any) -> list[dict[str, Any]] ----
+	query_type := make_callable_type(reg,
+		{
+			Param_Type{name = "conn",   type_id = connection_instance},
+			Param_Type{name = "sql",    type_id = TYPE_STR},
+			Param_Type{name = "params", type_id = make_list_type(reg, TYPE_ANY), has_default = true},
+			Param_Type{name = "result", type_id = TYPE_ANY, has_default = true},
+		},
+		list_dict,
+	)
+	exports["query"] = query_type
+	reg.db_query_type = query_type
+
+	// ---- execute(conn, sql, params=[]) -> int ----
+	execute_type := make_callable_type(reg,
+		{
+			Param_Type{name = "conn",   type_id = connection_instance},
+			Param_Type{name = "sql",    type_id = TYPE_STR},
+			Param_Type{name = "params", type_id = make_list_type(reg, TYPE_ANY), has_default = true},
+		},
+		TYPE_INT,
+	)
+	exports["execute"] = execute_type
+	reg.db_execute_type = execute_type
+
+	// ---- transaction(conn) -> Transaction ----
+	transaction_instance := make_instance_type(reg, transaction_class)
+	exports["transaction"] = make_callable_type(reg,
+		{Param_Type{name = "conn", type_id = connection_instance}},
+		transaction_instance,
+	)
+
+	// ---- Add query/execute methods to Connection (in-place update) ----
+	conn_type := get_type(reg, connection_class)
+	if conn_type != nil {
+		if ct, ok := &conn_type.info.(Class_Type); ok {
+			// Connection.query(sql, params=[], result=Any) -> list[dict[str, Any]]
+			conn_query := make_callable_type(reg,
+				{
+					Param_Type{name = "sql",    type_id = TYPE_STR},
+					Param_Type{name = "params", type_id = make_list_type(reg, TYPE_ANY), has_default = true},
+					Param_Type{name = "result", type_id = TYPE_ANY, has_default = true},
+				},
+				list_dict,
+			)
+			ct.attrs["query"] = conn_query
+			reg.db_conn_query_type = conn_query
+
+			// Connection.execute(sql, params=[]) -> int
+			conn_execute := make_callable_type(reg,
+				{
+					Param_Type{name = "sql",    type_id = TYPE_STR},
+					Param_Type{name = "params", type_id = make_list_type(reg, TYPE_ANY), has_default = true},
+				},
+				TYPE_INT,
+			)
+			ct.attrs["execute"] = conn_execute
+			reg.db_conn_execute_type = conn_execute
+		}
+	}
+
+	vreg.modules["mimir.db"] = Virtual_Module{
+		name    = "mimir.db",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.crypt ====================
+
+register_mimir_crypt :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 8, reg.allocator)
+
+	// Helper: make a namespace (Instance_Type wrapping a Class_Type with method attrs)
+	make_namespace :: proc(reg: ^Type_Registry, name: string, attrs: map[string]Type_ID) -> Type_ID {
+		class_id := register_type(reg, Class_Type{
+			name  = name,
+			attrs = attrs,
+		})
+		return make_instance_type(reg, class_id)
+	}
+
+	// ---- hash namespace ----
+	hash_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	hash_attrs["bcrypt"]   = make_callable_type(reg, {Param_Type{name = "password", type_id = TYPE_STR}}, TYPE_STR)
+	hash_attrs["argon2"]   = make_callable_type(reg, {Param_Type{name = "password", type_id = TYPE_STR}}, TYPE_STR)
+	hash_attrs["sha256"]   = make_callable_type(reg, {Param_Type{name = "data", type_id = TYPE_BYTES}}, TYPE_STR)
+	hash_attrs["sha512"]   = make_callable_type(reg, {Param_Type{name = "data", type_id = TYPE_BYTES}}, TYPE_STR)
+	hash_attrs["sha3_256"] = make_callable_type(reg, {Param_Type{name = "data", type_id = TYPE_BYTES}}, TYPE_STR)
+	hash_attrs["md5"]      = make_callable_type(reg, {Param_Type{name = "data", type_id = TYPE_BYTES}}, TYPE_STR)
+	hash_attrs["sha1"]     = make_callable_type(reg, {Param_Type{name = "data", type_id = TYPE_BYTES}}, TYPE_STR)
+	exports["hash"] = make_namespace(reg, "hash", hash_attrs)
+
+	// ---- verify namespace ----
+	verify_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	verify_params := []Param_Type{
+		{name = "password", type_id = TYPE_STR},
+		{name = "hashed",   type_id = TYPE_STR},
+	}
+	verify_attrs["bcrypt"] = make_callable_type(reg, verify_params, TYPE_BOOL)
+	verify_attrs["argon2"] = make_callable_type(reg, verify_params, TYPE_BOOL)
+	exports["verify"] = make_namespace(reg, "verify", verify_attrs)
+
+	// ---- encrypt namespace ----
+	encrypt_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	enc_params := []Param_Type{
+		{name = "key",       type_id = TYPE_BYTES},
+		{name = "plaintext", type_id = TYPE_BYTES},
+	}
+	encrypt_attrs["aes_gcm"]  = make_callable_type(reg, enc_params, TYPE_BYTES)
+	encrypt_attrs["aes_cbc"]  = make_callable_type(reg, enc_params, TYPE_BYTES)
+	encrypt_attrs["aes_ctr"]  = make_callable_type(reg, enc_params, TYPE_BYTES)
+	encrypt_attrs["aes_ecb"]  = make_callable_type(reg, enc_params, TYPE_BYTES)
+	encrypt_attrs["chacha20"] = make_callable_type(reg, enc_params, TYPE_BYTES)
+	exports["encrypt"] = make_namespace(reg, "encrypt", encrypt_attrs)
+
+	// ---- decrypt namespace ----
+	decrypt_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	dec_params := []Param_Type{
+		{name = "key",        type_id = TYPE_BYTES},
+		{name = "ciphertext", type_id = TYPE_BYTES},
+	}
+	decrypt_attrs["aes_gcm"]  = make_callable_type(reg, dec_params, TYPE_BYTES)
+	decrypt_attrs["aes_cbc"]  = make_callable_type(reg, dec_params, TYPE_BYTES)
+	decrypt_attrs["aes_ctr"]  = make_callable_type(reg, dec_params, TYPE_BYTES)
+	decrypt_attrs["aes_ecb"]  = make_callable_type(reg, dec_params, TYPE_BYTES)
+	decrypt_attrs["chacha20"] = make_callable_type(reg, dec_params, TYPE_BYTES)
+	exports["decrypt"] = make_namespace(reg, "decrypt", decrypt_attrs)
+
+	// ---- token namespace ----
+	token_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	n_param := []Param_Type{{name = "n", type_id = TYPE_INT}}
+	token_attrs["bytes"]   = make_callable_type(reg, n_param, TYPE_BYTES)
+	token_attrs["urlsafe"] = make_callable_type(reg, n_param, TYPE_STR)
+	token_attrs["digits"]  = make_callable_type(reg, n_param, TYPE_STR)
+	token_attrs["hex"]     = make_callable_type(reg, n_param, TYPE_STR)
+	exports["token"] = make_namespace(reg, "token", token_attrs)
+
+	// ---- sign namespace ----
+	sign_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	sign_params := []Param_Type{
+		{name = "key",     type_id = TYPE_BYTES},
+		{name = "message", type_id = TYPE_BYTES},
+	}
+	sign_attrs["hmac_sha256"] = make_callable_type(reg, sign_params, TYPE_BYTES)
+	sign_attrs["hmac_sha512"] = make_callable_type(reg, sign_params, TYPE_BYTES)
+	sign_attrs["ed25519"]     = make_callable_type(reg, sign_params, TYPE_BYTES)
+	exports["sign"] = make_namespace(reg, "sign", sign_attrs)
+
+	vreg.modules["mimir.crypt"] = Virtual_Module{
+		name    = "mimir.crypt",
 		exports = exports,
 	}
 }

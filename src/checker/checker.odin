@@ -156,6 +156,12 @@ check :: proc(
 	// JSON analysis pass — validate JSON serializability
 	analyze_json(module, bind_result, &result.registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
 
+	// DB analysis pass — detect unsafe SQL construction in mimir.db calls
+	analyze_db(module, bind_result, &result.registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+
+	// Crypt analysis pass — detect cryptographic misuse in mimir.crypt calls
+	analyze_crypt(module, bind_result, &result.registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
@@ -291,6 +297,12 @@ check_with_imports :: proc(
 
 	// JSON analysis pass — validate JSON serializability
 	analyze_json(module, bind_result, registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+
+	// DB analysis pass — detect unsafe SQL construction in mimir.db calls
+	analyze_db(module, bind_result, registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+
+	// Crypt analysis pass — detect cryptographic misuse in mimir.crypt calls
+	analyze_crypt(module, bind_result, registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
 
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)

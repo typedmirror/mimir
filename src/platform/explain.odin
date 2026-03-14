@@ -508,6 +508,42 @@ ALL_EXPLANATIONS := [?]Explanation{
 		note = "Use a numeric column, or convert the column type first.",
 	},
 
+	// ── Database ──
+
+	{
+		code = "DB001", name = "Unsafe SQL construction", category = "Database", severity = "Error",
+		description = "A SQL query string is constructed dynamically using f-strings, string\nconcatenation, or .format(). This is vulnerable to SQL injection regardless\nof whether the interpolated values come from user input.",
+		example = "    from mimir.db import query\n    query(db, f\"SELECT * FROM users WHERE id = {uid}\")  # DB001\n    query(db, \"SELECT * FROM users WHERE id = ?\", params=[uid])  # OK",
+		note = "Always use parameterized queries with ? placeholders and pass values via params=[].",
+	},
+	{
+		code = "DB002", name = "Invalid query result schema", category = "Database", severity = "Error",
+		description = "The result= argument to query() is not a TypedDict or class. The result type\nmust be a structured type so row fields can be validated.",
+		example = "    from mimir.db import query\n    query(db, sql, result=int)  # DB002: expected TypedDict or class",
+		note = "Use a TypedDict as the result argument.",
+	},
+
+	// ── Cryptography ──
+
+	{
+		code = "CRYPT001", name = "Insecure encryption mode", category = "Cryptography", severity = "Error",
+		description = "ECB (Electronic Codebook) mode encrypts identical plaintext blocks to identical\nciphertext blocks, leaking patterns in the data. It does not provide semantic\nsecurity and should never be used.",
+		example = "    from mimir.crypt import encrypt\n    ciphertext = encrypt.aes_ecb(key, data)  # CRYPT001: ECB is insecure",
+		note = "Use encrypt.aes_gcm() for authenticated encryption (recommended) or\nencrypt.aes_cbc() for compatibility. GCM also provides integrity checking.",
+	},
+	{
+		code = "CRYPT002", name = "Weak hash for password hashing", category = "Cryptography", severity = "Warning",
+		description = "MD5 and SHA-1 are fast general-purpose hash algorithms that are unsuitable for\npassword hashing. They can be brute-forced at billions of hashes per second\non modern GPUs.",
+		example = "    from mimir.crypt import hash\n    hashed = hash.md5(password)   # CRYPT002: too fast for passwords\n    hashed = hash.sha1(password)  # CRYPT002: too fast for passwords",
+		note = "Use hash.bcrypt() or hash.argon2() for password hashing. These are\ndeliberately slow and include salting to resist brute-force attacks.",
+	},
+	{
+		code = "CRYPT003", name = "Insufficient key/token length", category = "Cryptography", severity = "Warning",
+		description = "A cryptographic token or key is generated with fewer than 16 bytes (128 bits),\nwhich may be vulnerable to brute-force attacks.",
+		example = "    from mimir.crypt import token\n    key = token.bytes(8)  # CRYPT003: only 64 bits of entropy",
+		note = "Use at least 16 bytes (128 bits) for tokens. For AES keys, use 32 bytes\n(256 bits). NIST recommends 128-bit minimum for symmetric keys.",
+	},
+
 	// ── GPU ──
 
 	{

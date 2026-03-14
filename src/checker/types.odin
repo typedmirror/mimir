@@ -186,6 +186,10 @@ Type_Registry :: struct {
 	data_read_json_type: Type_ID,  // mimir.data.read_json callable (0 if not registered)
 	data_read_parquet_type: Type_ID, // mimir.data.read_parquet callable (0 if not registered)
 	data_dataframe_type: Type_ID,  // mimir.data.DataFrame constructor callable (0 if not registered)
+	db_query_type:   Type_ID,  // mimir.db.query callable (0 if not registered)
+	db_execute_type: Type_ID,  // mimir.db.execute callable (0 if not registered)
+	db_conn_query_type:   Type_ID,  // Connection.query method callable (0 if not registered)
+	db_conn_execute_type: Type_ID,  // Connection.execute method callable (0 if not registered)
 	allocator:      mem.Allocator,
 }
 

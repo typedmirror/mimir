@@ -615,6 +615,37 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			}
 			return make_dataframe_type(ctx.reg, {})
 		}
+		// mimir.db typed query — override return type with result= keyword schema
+		if ctx.reg.db_query_type != 0 &&
+		   (func_type == ctx.reg.db_query_type || func_type == ctx.reg.db_conn_query_type) {
+			for kw in e.keywords {
+				if kw.arg == "result" {
+					schema_type := resolve_annotation(kw.value, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					if schema_type != TYPE_UNKNOWN && schema_type != TYPE_ANY {
+						st := get_type(ctx.reg, schema_type)
+						if st != nil {
+							#partial switch _ in st.info {
+							case TypedDict_Type:
+								return make_list_type(ctx.reg, schema_type)
+							case Class_Type:
+								return make_list_type(ctx.reg, make_instance_type(ctx.reg, schema_type))
+							case Instance_Type:
+								return make_list_type(ctx.reg, schema_type)
+							}
+						}
+						// DB002: result is not a TypedDict or class
+						emit_diagnostic(ctx, e.loc, "DB002", .Error,
+							"Invalid query result schema",
+							fmt.aprintf("Expected TypedDict or class, got '%s'",
+								type_to_string(ctx.reg, schema_type),
+								allocator = ctx.reg.allocator),
+							"Use a TypedDict as the result argument")
+					}
+					break
+				}
+			}
+			return info.return_type
+		}
 		// Shape-aware tensor return: if this is a mimir.array function, compute shaped result
 		if ctx.shape_reg != nil {
 			if shaped := infer_shaped_return(e, info.return_type, ctx); shaped != TYPE_UNKNOWN {
