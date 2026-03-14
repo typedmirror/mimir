@@ -210,9 +210,10 @@ compute_reaching :: proc(dfg: ^DFG, cfg: ^CFG, allocator: mem.Allocator) {
 		}
 	}
 
-	for len(worklist) > 0 {
-		block_id := worklist[0]
-		ordered_remove(&worklist, 0)
+	wl_head := 0
+	for wl_head < len(worklist) {
+		block_id := worklist[wl_head]
+		wl_head += 1
 		block_idx := int(block_id) - 1
 		in_worklist[block_idx] = false
 

@@ -11,6 +11,8 @@ Flow_Result :: struct {
 	cfgs:         [dynamic]CFG,
 	scope_to_cfg: map[binder.Scope_ID]int,
 	guards:       [dynamic]Guard,
+	dfgs:         map[binder.Scope_ID]DFG,
+	const_maps:   map[binder.Scope_ID]Const_Map,
 	diagnostics:  [dynamic]core.Diagnostic,
 }
 
@@ -22,6 +24,8 @@ analyze :: proc(module: ^parser.Module, bind_result: ^binder.Bind_Result, file_p
 	result.scope_to_cfg = make(map[binder.Scope_ID]int, 16, allocator)
 	result.guards = make([dynamic]Guard, 0, 16, allocator)
 	result.diagnostics = make([dynamic]core.Diagnostic, 0, 8, allocator)
+	result.dfgs = make(map[binder.Scope_ID]DFG, 16, allocator)
+	result.const_maps = make(map[binder.Scope_ID]Const_Map, 16, allocator)
 
 	// Build CFG for module body
 	module_cfg := build_cfg_for_stmts(
@@ -35,9 +39,17 @@ analyze :: proc(module: ^parser.Module, bind_result: ^binder.Bind_Result, file_p
 	// Walk AST to find all function and class definitions
 	build_cfgs_for_defs(&result, module.body, bind_result, file_path, allocator)
 
-	// NOTE: DFG (reaching definitions) computation removed — it was computed but
-	// never stored in Flow_Result, making it dead code (REVIEW H10). Re-add when
-	// a consumer (e.g. unused variable detection, constant propagation) needs it.
+	// Build DFG (reaching definitions) for each scope
+	for &cfg in result.cfgs {
+		dfg := collect_definitions(&cfg, bind_result, allocator)
+		compute_gen_kill(&dfg, &cfg)
+		compute_reaching(&dfg, &cfg, allocator)
+		result.dfgs[cfg.scope_id] = dfg
+
+		// Constant propagation over this scope's DFG
+		cm := propagate_constants(&dfg, &cfg, bind_result, module, allocator)
+		result.const_maps[cfg.scope_id] = cm
+	}
 
 	// Extract narrowing guards from all CFGs
 	result.guards = extract_guards(result.cfgs[:], bind_result, allocator)
