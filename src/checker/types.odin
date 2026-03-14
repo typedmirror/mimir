@@ -55,6 +55,8 @@ Type_Info :: union {
 	TypedDict_Type,
 	Protocol_Type,
 	Tensor_Type,
+	DataFrame_Type,
+	Series_Type,
 }
 
 Primitive_Kind :: enum u8 {
@@ -138,6 +140,15 @@ Tensor_Type :: struct {
 	ndim:         int,         // number of dimensions (len(shape), cached)
 }
 
+DataFrame_Type :: struct {
+	columns: map[string]Type_ID,  // column name → element type (empty = unknown columns)
+}
+
+Series_Type :: struct {
+	element: Type_ID,  // element type (int, float, str, etc.)
+	name:    string,   // column name (empty if unnamed)
+}
+
 // ==================== Type Environment ====================
 
 Type_Env :: struct {
@@ -171,6 +182,10 @@ Type_Registry :: struct {
 	json_write_type:     Type_ID,  // mimir.json.write callable (0 if not registered)
 	json_dump_type:      Type_ID,  // mimir.json.dump callable (0 if not registered)
 	json_dumps_type:     Type_ID,  // mimir.json.dumps callable (0 if not registered)
+	data_read_csv_type:  Type_ID,  // mimir.data.read_csv callable (0 if not registered)
+	data_read_json_type: Type_ID,  // mimir.data.read_json callable (0 if not registered)
+	data_read_parquet_type: Type_ID, // mimir.data.read_parquet callable (0 if not registered)
+	data_dataframe_type: Type_ID,  // mimir.data.DataFrame constructor callable (0 if not registered)
 	allocator:      mem.Allocator,
 }
 
@@ -363,6 +378,18 @@ make_tensor_type :: proc(reg: ^Type_Registry, element_type: Type_ID, shape: []in
 	return id
 }
 
+make_dataframe_type :: proc(reg: ^Type_Registry, columns: map[string]Type_ID) -> Type_ID {
+	cols := make(map[string]Type_ID, len(columns), reg.allocator)
+	for k, v in columns {
+		cols[k] = v
+	}
+	return register_type(reg, DataFrame_Type{columns = cols})
+}
+
+make_series_type :: proc(reg: ^Type_Registry, element: Type_ID, name: string = "") -> Type_ID {
+	return register_type(reg, Series_Type{element = element, name = name})
+}
+
 // ==================== Subtype Checking ====================
 
 is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> bool {
@@ -523,6 +550,32 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			}
 		}
 		return false
+	}
+
+	// DataFrame structural subtyping: source must have all target columns with compatible types
+	#partial switch src in src_type.info {
+	case DataFrame_Type:
+		#partial switch tgt in tgt_type.info {
+		case DataFrame_Type:
+			// Unknown columns (empty map) is permissive
+			if len(tgt.columns) == 0 { return true }
+			if len(src.columns) == 0 { return true }
+			for col_name, tgt_col_type in tgt.columns {
+				src_col_type, ok := src.columns[col_name]
+				if !ok { return false }
+				if !is_assignable(reg, src_col_type, tgt_col_type) { return false }
+			}
+			return true
+		}
+	}
+
+	// Series assignability: element types must be assignable
+	#partial switch src in src_type.info {
+	case Series_Type:
+		#partial switch tgt in tgt_type.info {
+		case Series_Type:
+			return is_assignable(reg, src.element, tgt.element)
+		}
 	}
 
 	// Tensor assignability: exact match or shape-erased
@@ -723,6 +776,26 @@ type_to_string :: proc(reg: ^Type_Registry, id: Type_ID) -> string {
 		}
 		append(&buf, ']')
 		return string(buf[:])
+	case DataFrame_Type:
+		if len(info.columns) == 0 {
+			return "DataFrame"
+		}
+		buf := make([dynamic]u8, 0, 64, reg.allocator)
+		for c in "DataFrame{" { append(&buf, u8(c)) }
+		i := 0
+		for col_name, col_type in info.columns {
+			if i > 0 { for c in ", " { append(&buf, u8(c)) } }
+			if i >= 5 { for c in "..." { append(&buf, u8(c)) }; break }
+			for c in col_name { append(&buf, u8(c)) }
+			for c in ": " { append(&buf, u8(c)) }
+			ts := type_to_string(reg, col_type)
+			for c in ts { append(&buf, u8(c)) }
+			i += 1
+		}
+		append(&buf, '}')
+		return string(buf[:])
+	case Series_Type:
+		return fmt.aprintf("Series[%s]", type_to_string(reg, info.element), allocator = reg.allocator)
 	}
 	return "<unknown>"
 }

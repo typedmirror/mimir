@@ -487,6 +487,27 @@ ALL_EXPLANATIONS := [?]Explanation{
 		note = "Change the field type to a JSON-compatible type (e.g., list instead of set).",
 	},
 
+	// ── Data ──
+
+	{
+		code = "DATA001", name = "Column not found", category = "Data", severity = "Error",
+		description = "A DataFrame is accessed with a column name that doesn't exist. Column names\nare tracked from the schema TypedDict or constructor dict literal.",
+		example = "    from mimir.data import read_csv\n    class Sales(TypedDict):\n        revenue: float\n        region: str\n\n    df = read_csv(\"sales.csv\", Sales)\n    df[\"revnue\"]  # DATA001: column 'revnue' not found",
+		note = "Check the column name for typos. Available columns are listed in the error.",
+	},
+	{
+		code = "DATA002", name = "Invalid DataFrame schema type", category = "Data", severity = "Error",
+		description = "The schema argument to read_csv(), read_json(), or read_parquet() is not a\nTypedDict. The schema must be a TypedDict so columns can be validated.",
+		example = "    from mimir.data import read_csv\n    df = read_csv(\"data.csv\", int)  # DATA002: expected TypedDict schema",
+		note = "Use a TypedDict as the schema argument.",
+	},
+	{
+		code = "DATA003", name = "Numeric operation on non-numeric column", category = "Data", severity = "Warning",
+		description = "A numeric aggregation method (mean, sum, std) is called on a Series whose\nelement type is not numeric (e.g., str).",
+		example = "    df[\"name\"].mean()  # DATA003: mean() requires numeric column",
+		note = "Use a numeric column, or convert the column type first.",
+	},
+
 	// ── GPU ──
 
 	{

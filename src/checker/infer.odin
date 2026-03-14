@@ -115,7 +115,8 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			rt := get_type(ctx.reg, receiver)
 			should_flag := false
 			#partial switch _ in rt.info {
-			case Instance_Type, Class_Type, Module_Type, Protocol_Type, TypedDict_Type:
+			case Instance_Type, Class_Type, Module_Type, Protocol_Type, TypedDict_Type,
+		     DataFrame_Type, Series_Type:
 				should_flag = true
 			}
 			// Skip dunder attrs — implicit object methods not tracked yet
@@ -136,7 +137,7 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		infer_expr(e.slice, ctx) // type-check the index
 		// TypedDict key access validation
 		ct := get_type(ctx.reg, container)
-		#partial switch td in ct.info {
+		#partial switch &td in ct.info {
 		case TypedDict_Type:
 			#partial switch key_expr in e.slice {
 			case ^parser.Constant_Expr:
@@ -153,6 +154,14 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 				}
 			}
 			return TYPE_UNKNOWN
+		case DataFrame_Type:
+			return resolve_dataframe_subscript(ctx, &td, e)
+		case Series_Type:
+			// Series indexing: s[0] → element, s[0:5] → same Series
+			if _, is_slice := e.slice.(^parser.Slice_Expr); is_slice {
+				return container
+			}
+			return td.element
 		}
 		// Slicing returns the same container type; indexing returns element type
 		if _, is_slice := e.slice.(^parser.Slice_Expr); is_slice {
@@ -571,6 +580,41 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			}
 			return info.return_type
 		}
+		// mimir.data typed read — override return type with schema argument
+		if ctx.reg.data_read_csv_type != 0 &&
+		   (func_type == ctx.reg.data_read_csv_type ||
+		    func_type == ctx.reg.data_read_json_type ||
+		    func_type == ctx.reg.data_read_parquet_type) {
+			if len(e.args) >= 2 {
+				schema_type := resolve_annotation(e.args[1], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+				if schema_type != TYPE_UNKNOWN && schema_type != TYPE_ANY {
+					st := get_type(ctx.reg, schema_type)
+					if st != nil {
+						#partial switch td_info in st.info {
+						case TypedDict_Type:
+							return make_dataframe_type(ctx.reg, td_info.fields)
+						}
+					}
+					emit_diagnostic(ctx, e.loc, "DATA002", .Error,
+						"Invalid DataFrame schema type",
+						fmt.aprintf("Expected TypedDict schema, got '%s'",
+							type_to_string(ctx.reg, schema_type),
+							allocator = ctx.reg.allocator),
+						"Use a TypedDict as the schema argument")
+				}
+			}
+			// No schema → unknown columns DataFrame
+			return make_dataframe_type(ctx.reg, {})
+		}
+		// mimir.data.DataFrame constructor — infer columns from dict literal
+		if ctx.reg.data_dataframe_type != 0 && func_type == ctx.reg.data_dataframe_type {
+			if len(e.args) >= 1 {
+				if dict_lit, ok := e.args[0].(^parser.Dict_Expr); ok {
+					return infer_dataframe_from_dict(ctx, dict_lit)
+				}
+			}
+			return make_dataframe_type(ctx.reg, {})
+		}
 		// Shape-aware tensor return: if this is a mimir.array function, compute shaped result
 		if ctx.shape_reg != nil {
 			if shaped := infer_shaped_return(e, info.return_type, ctx); shaped != TYPE_UNKNOWN {
@@ -887,7 +931,7 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 
 	// Instance attribute lookup
 	t := get_type(reg, receiver)
-	#partial switch info in t.info {
+	#partial switch &info in t.info {
 	case Instance_Type:
 		cls := get_type(reg, info.class_type)
 		#partial switch cls_info in cls.info {
@@ -915,6 +959,10 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 		if attr_type, ok := info.fields[attr]; ok {
 			return attr_type
 		}
+	case DataFrame_Type:
+		return resolve_dataframe_attr(reg, &info, attr)
+	case Series_Type:
+		return resolve_series_attr(reg, &info, attr)
 	}
 
 	return TYPE_UNKNOWN
@@ -932,6 +980,8 @@ get_subscript_type :: proc(container: Type_ID, reg: ^Type_Registry) -> Type_ID {
 			return make_union_type(reg, info.elements)
 		}
 		return TYPE_UNKNOWN
+	case Series_Type:
+		return info.element
 	}
 	if container == TYPE_STR { return TYPE_STR }
 	if container == TYPE_BYTES { return TYPE_INT }

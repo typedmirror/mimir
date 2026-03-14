@@ -36,6 +36,9 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.json
 	register_mimir_json(&vreg, reg)
 
+	// Register mimir.data
+	register_mimir_data(&vreg, reg)
+
 	return vreg
 }
 
@@ -441,6 +444,81 @@ register_mimir_json :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.json"] = Virtual_Module{
 		name    = "mimir.json",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.data ====================
+
+register_mimir_data :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 16, reg.allocator)
+
+	// Unknown-column DataFrame as default return type
+	empty_df := make_dataframe_type(reg, {})
+
+	// read_csv(path: str, schema: type = Any) -> DataFrame
+	read_csv_type := make_callable_type(reg,
+		{
+			Param_Type{name = "path",   type_id = TYPE_STR},
+			Param_Type{name = "schema", type_id = TYPE_ANY, has_default = true},
+		},
+		empty_df,
+	)
+	exports["read_csv"] = read_csv_type
+	reg.data_read_csv_type = read_csv_type
+
+	// read_json(path: str, schema: type = Any) -> DataFrame
+	read_json_type := make_callable_type(reg,
+		{
+			Param_Type{name = "path",   type_id = TYPE_STR},
+			Param_Type{name = "schema", type_id = TYPE_ANY, has_default = true},
+		},
+		empty_df,
+	)
+	exports["read_json"] = read_json_type
+	reg.data_read_json_type = read_json_type
+
+	// read_parquet(path: str, schema: type = Any) -> DataFrame
+	read_parquet_type := make_callable_type(reg,
+		{
+			Param_Type{name = "path",   type_id = TYPE_STR},
+			Param_Type{name = "schema", type_id = TYPE_ANY, has_default = true},
+		},
+		empty_df,
+	)
+	exports["read_parquet"] = read_parquet_type
+	reg.data_read_parquet_type = read_parquet_type
+
+	// DataFrame(data: Any) -> DataFrame
+	dataframe_type := make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY, has_default = true}},
+		empty_df,
+	)
+	exports["DataFrame"] = dataframe_type
+	reg.data_dataframe_type = dataframe_type
+
+	// Series(data: Any, name: str = "") -> Series
+	exports["Series"] = make_callable_type(reg,
+		{
+			Param_Type{name = "data", type_id = TYPE_ANY},
+			Param_Type{name = "name", type_id = TYPE_STR, has_default = true},
+		},
+		make_series_type(reg, TYPE_UNKNOWN),
+	)
+
+	// merge(left, right, on, how) -> DataFrame
+	exports["merge"] = make_callable_type(reg,
+		{
+			Param_Type{name = "left",  type_id = empty_df},
+			Param_Type{name = "right", type_id = empty_df},
+			Param_Type{name = "on",    type_id = TYPE_STR, has_default = true},
+			Param_Type{name = "how",   type_id = TYPE_STR, has_default = true},
+		},
+		empty_df,
+	)
+
+	vreg.modules["mimir.data"] = Virtual_Module{
+		name    = "mimir.data",
 		exports = exports,
 	}
 }

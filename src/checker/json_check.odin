@@ -236,6 +236,10 @@ is_json_serializable :: proc(reg: ^Type_Registry, type_id: Type_ID, visited: ^ma
 		return false
 	case Tensor_Type:
 		return false
+	case DataFrame_Type:
+		return false
+	case Series_Type:
+		return false
 	}
 	return false
 }
