@@ -38,9 +38,9 @@ register_builtin_functions :: proc(reg: ^Type_Registry, b: ^Builtin_Names) {
 	len_params[0] = Param_Type{name = "obj", type_id = TYPE_ANY}
 	b.names["len"] = make_callable_type(reg, len_params, TYPE_INT)
 
-	// print(*args) -> None
+	// print(*args) -> None (variadic, 0+ args valid)
 	print_params := make([]Param_Type, 1, reg.allocator)
-	print_params[0] = Param_Type{name = "args", type_id = TYPE_ANY}
+	print_params[0] = Param_Type{name = "args", type_id = TYPE_ANY, has_default = true}
 	b.names["print"] = make_callable_type(reg, print_params, TYPE_NONE)
 
 	// range(stop) -> range (approximate as list[int] for iteration)

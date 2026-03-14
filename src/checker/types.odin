@@ -399,12 +399,12 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		return false
 	}
 
-	// List invariance: list[S] <: list[T] only if S == T
+	// List invariance: list[S] <: list[T] only if S and T are structurally equal
 	#partial switch src in src_type.info {
 	case List_Type:
 		#partial switch tgt in tgt_type.info {
 		case List_Type:
-			return src.element == tgt.element
+			return is_assignable(reg, src.element, tgt.element) && is_assignable(reg, tgt.element, src.element)
 		}
 	}
 
@@ -413,7 +413,8 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	case Dict_Type:
 		#partial switch tgt in tgt_type.info {
 		case Dict_Type:
-			return src.key == tgt.key && src.value == tgt.value
+			return (is_assignable(reg, src.key, tgt.key) && is_assignable(reg, tgt.key, src.key)) &&
+			       (is_assignable(reg, src.value, tgt.value) && is_assignable(reg, tgt.value, src.value))
 		}
 	}
 
@@ -422,7 +423,7 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	case Set_Type:
 		#partial switch tgt in tgt_type.info {
 		case Set_Type:
-			return src.element == tgt.element
+			return is_assignable(reg, src.element, tgt.element) && is_assignable(reg, tgt.element, src.element)
 		}
 	}
 

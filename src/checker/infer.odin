@@ -1281,22 +1281,23 @@ infer_generic_call :: proc(e: ^parser.Call_Expr, info: ^Callable_Type, ctx: ^Inf
 	subs := make(map[Type_ID]Type_ID, 4, ctx.reg.allocator)
 
 	n_args := len(e.args)
+	n_total := n_args + len(e.keywords)
 	n_params := len(info.params)
 
-	// Check arg count
+	// Check arg count (positional + keyword)
 	required := 0
 	for p in info.params {
 		if !p.has_default { required += 1 }
 	}
-	if n_args < required {
+	if n_total < required {
 		emit_diagnostic(ctx, e.loc, "T004", .Error,
 			"Too few arguments",
-			fmt_arg_count_error(required, n_args, ctx.reg),
+			fmt_arg_count_error(required, n_total, ctx.reg),
 			"Add missing arguments")
-	} else if n_args > n_params {
+	} else if n_total > n_params {
 		emit_diagnostic(ctx, e.loc, "T004", .Error,
 			"Too many arguments",
-			fmt_arg_count_error(n_params, n_args, ctx.reg),
+			fmt_arg_count_error(n_params, n_total, ctx.reg),
 			"Remove extra arguments")
 	}
 
@@ -1304,7 +1305,12 @@ infer_generic_call :: proc(e: ^parser.Call_Expr, info: ^Callable_Type, ctx: ^Inf
 	for i := 0; i < min(n_args, n_params); i += 1 {
 		arg_type := infer_expr(e.args[i], ctx, info.params[i].type_id)
 		if contains_typevar(ctx.reg, info.params[i].type_id) {
-			match_type(ctx.reg, info.params[i].type_id, arg_type, &subs)
+			if !match_type(ctx.reg, info.params[i].type_id, arg_type, &subs) {
+				emit_diagnostic(ctx, e.loc, "T002", .Error,
+					"Incompatible argument type",
+					fmt_type_mismatch(arg_type, info.params[i].type_id, ctx.reg),
+					"Use the correct type")
+			}
 		} else {
 			if info.params[i].type_id != TYPE_ANY && info.params[i].type_id != TYPE_UNKNOWN &&
 			   arg_type != TYPE_UNKNOWN && arg_type != TYPE_ANY {
@@ -1314,6 +1320,35 @@ infer_generic_call :: proc(e: ^parser.Call_Expr, info: ^Callable_Type, ctx: ^Inf
 						fmt_type_mismatch(arg_type, info.params[i].type_id, ctx.reg),
 						"Use the correct type")
 				}
+			}
+		}
+	}
+
+	// Match keyword args against params for TypeVar inference
+	for kw in e.keywords {
+		for &p in info.params {
+			if p.name == kw.arg {
+				kw_type := infer_expr(kw.value, ctx, p.type_id)
+				if contains_typevar(ctx.reg, p.type_id) {
+					if !match_type(ctx.reg, p.type_id, kw_type, &subs) {
+						// TypeVar already bound to incompatible type
+						emit_diagnostic(ctx, e.loc, "T002", .Error,
+							"Incompatible keyword argument type",
+							fmt_type_mismatch(kw_type, p.type_id, ctx.reg),
+							"Use the correct type")
+					}
+				} else {
+					if p.type_id != TYPE_ANY && p.type_id != TYPE_UNKNOWN &&
+					   kw_type != TYPE_UNKNOWN && kw_type != TYPE_ANY {
+						if !is_assignable(ctx.reg, kw_type, p.type_id) {
+							emit_diagnostic(ctx, e.loc, "T002", .Error,
+								"Incompatible keyword argument type",
+								fmt_type_mismatch(kw_type, p.type_id, ctx.reg),
+								"Use the correct type")
+						}
+					}
+				}
+				break
 			}
 		}
 	}
@@ -1348,21 +1383,22 @@ infer_generic_constructor :: proc(e: ^parser.Call_Expr, info: ^Class_Type, class
 	subs := make(map[Type_ID]Type_ID, 4, ctx.reg.allocator)
 
 	n_args := len(e.args)
+	n_total := n_args + len(e.keywords)
 	n_params := len(init_info.params)
 
 	required := 0
 	for p in init_info.params {
 		if !p.has_default { required += 1 }
 	}
-	if n_args < required {
+	if n_total < required {
 		emit_diagnostic(ctx, e.loc, "T004", .Error,
 			"Too few arguments",
-			fmt_arg_count_error(required, n_args, ctx.reg),
+			fmt_arg_count_error(required, n_total, ctx.reg),
 			"Add missing arguments")
-	} else if n_args > n_params {
+	} else if n_total > n_params {
 		emit_diagnostic(ctx, e.loc, "T004", .Error,
 			"Too many arguments",
-			fmt_arg_count_error(n_params, n_args, ctx.reg),
+			fmt_arg_count_error(n_params, n_total, ctx.reg),
 			"Remove extra arguments")
 	}
 
@@ -1370,6 +1406,18 @@ infer_generic_constructor :: proc(e: ^parser.Call_Expr, info: ^Class_Type, class
 		arg_type := infer_expr(e.args[i], ctx, init_info.params[i].type_id)
 		if contains_typevar(ctx.reg, init_info.params[i].type_id) {
 			match_type(ctx.reg, init_info.params[i].type_id, arg_type, &subs)
+		}
+	}
+	// Match keyword args against __init__ params for TypeVar inference
+	for kw in e.keywords {
+		for &p in init_info.params {
+			if p.name == kw.arg {
+				kw_type := infer_expr(kw.value, ctx, p.type_id)
+				if contains_typevar(ctx.reg, p.type_id) {
+					match_type(ctx.reg, p.type_id, kw_type, &subs)
+				}
+				break
+			}
 		}
 	}
 	for i := n_params; i < n_args; i += 1 {

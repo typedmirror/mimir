@@ -92,21 +92,40 @@ collect_context :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt) {
 	}
 }
 
+// Collect global declarations recursively (into if/for/while/with/try blocks)
+collect_globals :: proc(stmts: []parser.Stmt, globals: ^[dynamic]string) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Global_Stmt:
+			for name in s.names {
+				append(globals, name)
+			}
+		case ^parser.If_Stmt:
+			collect_globals(s.body, globals)
+			collect_globals(s.orelse, globals)
+		case ^parser.For_Stmt:
+			collect_globals(s.body, globals)
+		case ^parser.While_Stmt:
+			collect_globals(s.body, globals)
+		case ^parser.With_Stmt:
+			collect_globals(s.body, globals)
+		case ^parser.Try_Stmt:
+			collect_globals(s.body, globals)
+			for h in s.handlers { collect_globals(h.body, globals) }
+			collect_globals(s.orelse, globals)
+			collect_globals(s.finalbody, globals)
+		}
+	}
+}
+
 // Pass 2: walk statements applying all rules.
 // in_async tracks whether we are inside an async function body.
 check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: bool) {
-	// Collect global variable names declared in this scope
+	// Collect global variable names declared in this scope (including nested blocks)
 	globals: [dynamic]string
 	defer delete(globals)
 	if ctx.has_threading {
-		for stmt in stmts {
-			#partial switch s in stmt {
-			case ^parser.Global_Stmt:
-				for name in s.names {
-					append(&globals, name)
-				}
-			}
-		}
+		collect_globals(stmts, &globals)
 	}
 
 	for stmt in stmts {

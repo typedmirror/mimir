@@ -28,15 +28,21 @@ find_python_files :: proc(root: string, allocator := context.allocator) -> ([]st
 		return result, nil
 	}
 
-	// Directory walk
+	// Directory walk — verify root is readable before walking
 	files: [dynamic]string
 	files.allocator = allocator
+	test_entries, dir_err := os.read_all_directory_by_path(root, context.temp_allocator)
+	if dir_err != nil do return nil, dir_err
+	os.file_info_slice_delete(test_entries, context.temp_allocator)
 	_walk_dir(root, &files, allocator)
 	return files[:], nil
 }
 
+MAX_WALK_DEPTH :: 64
+
 @(private = "file")
-_walk_dir :: proc(dir: string, files: ^[dynamic]string, allocator := context.allocator) {
+_walk_dir :: proc(dir: string, files: ^[dynamic]string, allocator := context.allocator, depth: int = 0) {
+	if depth >= MAX_WALK_DEPTH { return } // guard against symlink cycles
 	entries, err := os.read_all_directory_by_path(dir, context.temp_allocator)
 	if err != nil do return
 	defer os.file_info_slice_delete(entries, context.temp_allocator)
@@ -44,7 +50,7 @@ _walk_dir :: proc(dir: string, files: ^[dynamic]string, allocator := context.all
 	for entry in entries {
 		if entry.type == .Directory {
 			if _is_ignored(entry.name) do continue
-			_walk_dir(entry.fullpath, files, allocator)
+			_walk_dir(entry.fullpath, files, allocator, depth + 1)
 		} else if strings.has_suffix(entry.name, ".py") {
 			append(files, strings.clone(entry.fullpath, allocator))
 		}

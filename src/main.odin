@@ -98,8 +98,10 @@ main :: proc() {
 	}
 }
 
+MIMIR_VERSION :: #config(MIMIR_VERSION, "0.0.1-dev")
+
 cmd_version :: proc() {
-	fmt.println("mimir 0.0.1-dev")
+	fmt.printfln("mimir %s", MIMIR_VERSION)
 }
 
 cmd_check :: proc(args: []string) {
@@ -107,6 +109,13 @@ cmd_check :: proc(args: []string) {
 		fmt.eprintln("mimir check: no input path specified")
 		fmt.eprintln("Usage: mimir check <path>")
 		os.exit(1)
+	}
+
+	// Warn on unrecognized flags
+	for i := 1; i < len(args); i += 1 {
+		if strings.has_prefix(args[i], "-") {
+			fmt.eprintfln("mimir check: unknown flag '%s'", args[i])
+		}
 	}
 
 	target := args[0]

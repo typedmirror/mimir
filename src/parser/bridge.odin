@@ -38,11 +38,12 @@ bridge_start :: proc() -> (Bridge, Parse_Error) {
 		return {}, Bridge_Error{"failed to create stdout pipe"}
 	}
 
-	// Start python3 subprocess
+	// Start python3 subprocess (stderr inherits parent terminal for error visibility)
 	process, proc_err := os.process_start({
 		command = {"python3", "-u", helper_path},
 		stdin   = stdin_r,
 		stdout  = stdout_w,
+		stderr  = os.stderr,
 	})
 	if proc_err != nil {
 		os.close(stdin_r)

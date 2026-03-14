@@ -305,7 +305,7 @@ SENSITIVE_PATTERNS :: [?]string{
 }
 
 is_sensitive_name :: proc(name: string) -> bool {
-	lower := strings.to_lower(name)
+	lower := strings.to_lower(name, context.temp_allocator)
 	for pattern in SENSITIVE_PATTERNS {
 		if strings.contains(lower, pattern) { return true }
 	}
