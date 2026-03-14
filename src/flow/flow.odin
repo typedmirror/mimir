@@ -35,14 +35,9 @@ analyze :: proc(module: ^parser.Module, bind_result: ^binder.Bind_Result, file_p
 	// Walk AST to find all function and class definitions
 	build_cfgs_for_defs(&result, module.body, bind_result, file_path, allocator)
 
-	// Compute DFG for each CFG (reaching definitions)
-	for &cfg in result.cfgs {
-		dfg := collect_definitions(&cfg, bind_result, allocator)
-		compute_gen_kill(&dfg, &cfg)
-		compute_reaching(&dfg, &cfg, allocator)
-		// DFG is attached to the flow result implicitly through the CFG scope mapping
-		// Phase 4 will query via defs_reaching_use
-	}
+	// NOTE: DFG (reaching definitions) computation removed — it was computed but
+	// never stored in Flow_Result, making it dead code (REVIEW H10). Re-add when
+	// a consumer (e.g. unused variable detection, constant propagation) needs it.
 
 	// Extract narrowing guards from all CFGs
 	result.guards = extract_guards(result.cfgs[:], bind_result, allocator)

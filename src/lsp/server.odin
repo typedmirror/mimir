@@ -5,6 +5,7 @@ import "core:mem"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:unicode/utf8"
 
 import "core:encoding/json"
 
@@ -160,9 +161,10 @@ send_response :: proc(server: ^Server, id: json.Value, result_json: string) {
 
 send_error :: proc(server: ^Server, id: json.Value, code: int, message: string) {
 	id_str := format_json_value(id, server.allocator)
+	escaped_msg := json_escape(message, server.allocator)
 	body := fmt.aprintf(
 		"{{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{{\"code\":%d,\"message\":\"%s\"}}}}",
-		id_str, code, message,
+		id_str, code, escaped_msg,
 		allocator = server.allocator,
 	)
 	send_raw(body)
@@ -235,13 +237,24 @@ format_json_value :: proc(val: json.Value, allocator: mem.Allocator) -> string {
 json_escape :: proc(s: string, allocator: mem.Allocator) -> string {
 	buf := make([dynamic]u8, 0, len(s) + 16, allocator)
 	for c in s {
-		switch c {
-		case '"':  append(&buf, '\\'); append(&buf, '"')
-		case '\\': append(&buf, '\\'); append(&buf, '\\')
-		case '\n': append(&buf, '\\'); append(&buf, 'n')
-		case '\r': append(&buf, '\\'); append(&buf, 'r')
-		case '\t': append(&buf, '\\'); append(&buf, 't')
-		case:      append(&buf, u8(c))
+		switch {
+		case c == '"':  append(&buf, '\\'); append(&buf, '"')
+		case c == '\\': append(&buf, '\\'); append(&buf, '\\')
+		case c == '\n': append(&buf, '\\'); append(&buf, 'n')
+		case c == '\r': append(&buf, '\\'); append(&buf, 'r')
+		case c == '\t': append(&buf, '\\'); append(&buf, 't')
+		case c < 0x20:
+			// Control characters U+0000..U+001F → \uXXXX
+			esc := fmt.tprintf("\\u%04x", int(c))
+			for b in transmute([]u8)esc {
+				append(&buf, b)
+			}
+		case:
+			// Encode rune as UTF-8 bytes (preserves multi-byte characters)
+			encoded, n := utf8.encode_rune(c)
+			for i := 0; i < n; i += 1 {
+				append(&buf, encoded[i])
+			}
 		}
 	}
 	return string(buf[:])

@@ -80,8 +80,22 @@ parse_metadata_from_source :: proc(source: string, allocator: mem.Allocator) -> 
 		content := line[2:]  // strip "# "
 
 		if strings.has_prefix(content, "dependencies") {
-			// Parse: dependencies = ["flask>=3.0", "requests"]
-			deps_err := _parse_dependencies(content, &result, allocator)
+			// Handle multi-line arrays: accumulate lines until "]" is found
+			accumulated := content
+			if strings.index(content, "[") != -1 && strings.last_index(content, "]") == -1 {
+				// Opening bracket found but no closing — accumulate continuation lines
+				parts := make([dynamic]string, 0, 8, allocator)
+				append(&parts, content)
+				for i += 1; i < end; i += 1 {
+					cont_line := strings.trim_space(lines[i])
+					if !strings.has_prefix(cont_line, "# ") { continue }
+					cont := cont_line[2:]
+					append(&parts, cont)
+					if strings.contains(cont, "]") { break }
+				}
+				accumulated = strings.concatenate(parts[:], allocator)
+			}
+			deps_err := _parse_dependencies(accumulated, &result, allocator)
 			if deps_err != nil {
 				return {}, deps_err
 			}

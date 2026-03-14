@@ -111,11 +111,6 @@ find_config :: proc(start_dir: string, allocator: mem.Allocator) -> (path: strin
 		dir = parent
 	}
 
-	// Check root
-	if os.is_file("/mimir.toml") {
-		return "/mimir.toml", true
-	}
-
 	return "", false
 }
 
