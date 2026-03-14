@@ -485,13 +485,23 @@ process_try :: proc(b: ^CFG_Builder, s: ^parser.Try_Stmt, stmt: parser.Stmt) -> 
 	try_body := new_block(b.cfg, b.allocator)
 	add_edge(b.cfg, pre_block, try_body, .Fallthrough)
 
-	// Exception edges from try body to each handler
+	// Exception edges from try body entry to each handler
 	for hb in handler_blocks {
 		add_edge(b.cfg, try_body, hb, .Exception)
 	}
 
+	body_start_count := len(b.cfg.blocks)
 	b.current = try_body
 	try_end := process_stmts(b, s.body)
+
+	// Add exception edges from ALL blocks created during body processing
+	// (try body may contain if/for/while that create new blocks)
+	for i := body_start_count; i < len(b.cfg.blocks); i += 1 {
+		body_block_id := Block_ID(i + 1) // 1-indexed
+		for hb in handler_blocks {
+			add_edge(b.cfg, body_block_id, hb, .Exception)
+		}
+	}
 
 	pop(&b.try_stack)
 
@@ -578,8 +588,17 @@ process_try_star :: proc(b: ^CFG_Builder, s: ^parser.Try_Star, stmt: parser.Stmt
 		add_edge(b.cfg, try_body, hb, .Exception)
 	}
 
+	body_start_count := len(b.cfg.blocks)
 	b.current = try_body
 	try_end := process_stmts(b, s.body)
+
+	// Add exception edges from ALL blocks created during body processing
+	for i := body_start_count; i < len(b.cfg.blocks); i += 1 {
+		body_block_id := Block_ID(i + 1)
+		for hb in handler_blocks {
+			add_edge(b.cfg, body_block_id, hb, .Exception)
+		}
+	}
 
 	pop(&b.try_stack)
 

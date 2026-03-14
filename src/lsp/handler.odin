@@ -113,6 +113,7 @@ handle_did_close :: proc(server: ^Server, params: json.Value) {
 	uri := get_json_string(td, "uri")
 
 	delete_key(&server.documents, uri)
+	delete_key(&server.analysis_cache, uri)
 
 	// Clear diagnostics for this file
 	diags_json := fmt.aprintf(
@@ -138,8 +139,8 @@ handle_hover :: proc(server: ^Server, id: json.Value, params: json.Value) {
 		return
 	}
 
-	// Re-analyze to get fresh results
-	result := analyze_document(server, uri, doc.content)
+	// Use cached analysis if available (avoids full re-analysis on every hover)
+	result := get_cached_analysis(server, uri, doc.content, doc.version)
 	if !result.ok {
 		send_response(server, id, "null")
 		return
@@ -208,7 +209,7 @@ handle_definition :: proc(server: ^Server, id: json.Value, params: json.Value) {
 		return
 	}
 
-	result := analyze_document(server, uri, doc.content)
+	result := get_cached_analysis(server, uri, doc.content, doc.version)
 	if !result.ok {
 		send_response(server, id, "null")
 		return
@@ -269,7 +270,7 @@ handle_references :: proc(server: ^Server, id: json.Value, params: json.Value) {
 		return
 	}
 
-	result := analyze_document(server, uri, doc.content)
+	result := get_cached_analysis(server, uri, doc.content, doc.version)
 	if !result.ok {
 		send_response(server, id, "[]")
 		return
@@ -324,10 +325,29 @@ handle_references :: proc(server: ^Server, id: json.Value, params: json.Value) {
 	send_response(server, id, result_json)
 }
 
+// ==================== Analysis Cache ====================
+
+// get_cached_analysis returns a cached analysis result if the version matches,
+// or re-analyzes and caches the result.
+get_cached_analysis :: proc(server: ^Server, uri: string, content: string, version: int) -> Analysis_Result {
+	if cached, ok := server.analysis_cache[uri]; ok {
+		if cached.version == version {
+			return cached.result
+		}
+	}
+	// Cache miss — run full analysis and cache
+	result := analyze_document(server, uri, content)
+	server.analysis_cache[uri] = Cached_Analysis{version = version, result = result}
+	return result
+}
+
 // ==================== Diagnostics Publishing ====================
 
 publish_diagnostics :: proc(server: ^Server, uri: string, content: string) {
-	result := analyze_document(server, uri, content)
+	doc, has_doc := server.documents[uri]
+	version := doc.version if has_doc else 0
+
+	result := get_cached_analysis(server, uri, content, version)
 
 	diags_json := diagnostics_to_json(result.all_diags[:], uri, server.allocator)
 	escaped_uri := json_escape(uri, server.allocator)

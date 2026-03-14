@@ -1,5 +1,6 @@
 package parser
 
+import "core:encoding/base64"
 import "core:encoding/json"
 import "core:mem"
 import "core:strings"
@@ -895,7 +896,12 @@ conv_constant_value :: proc(v: json.Value, alloc: mem.Allocator) -> Constant_Val
 		if b64_val, has := val["_bytes"]; has {
 			b64_str, is_str := b64_val.(json.String)
 			if is_str {
-				// Simple base64 decode — skip for now, store raw
+				// Decode base64 from CPython's AST serializer
+				decoded, decode_err := base64.decode(b64_str, allocator = alloc)
+				if decode_err == nil {
+					return Const_Bytes{data = decoded}
+				}
+				// Fallback: store raw on decode failure
 				buf := make([]u8, len(b64_str), alloc)
 				copy(buf, b64_str)
 				return Const_Bytes{data = buf}

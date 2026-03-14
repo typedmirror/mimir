@@ -32,17 +32,22 @@ read_config :: proc(path: string, allocator: mem.Allocator) -> (Project_Config, 
 	}
 
 	// Read [project] section
-	if name, ok := toml_get(&doc, "project", "name"); ok {
+	if name, ok := toml_get_string(&doc, "project", "name"); ok {
 		config.name = name
 	}
-	if rp, ok := toml_get(&doc, "project", "requires-python"); ok {
+	if rp, ok := toml_get_string(&doc, "project", "requires-python"); ok {
 		config.requires_python = rp
 	}
 
 	// Read [dependencies] section — keys are package names, values are constraints
 	if deps_table, has_deps := doc.tables["dependencies"]; has_deps {
 		for dep_name in deps_table.order {
-			constraint := deps_table.entries[dep_name]
+			constraint := ""
+			if val, val_ok := deps_table.entries[dep_name]; val_ok {
+				if s, is_str := val.(string); is_str {
+					constraint = s
+				}
+			}
 			raw: string
 			if constraint == "" {
 				raw = dep_name
@@ -66,7 +71,7 @@ write_config :: proc(config: ^Project_Config, path: string, allocator: mem.Alloc
 		tables      = make(map[string]Toml_Table, 4, allocator),
 		table_order = make([dynamic]string, 0, 4, allocator),
 		root = Toml_Table{
-			entries = make(map[string]string, 4, allocator),
+			entries = make(map[string]Toml_Value, 4, allocator),
 			order   = make([dynamic]string, 0, 4, allocator),
 		},
 	}

@@ -5,28 +5,15 @@ import "core:strings"
 import parser "mimir:parser"
 import core "mimir:core"
 
-// SEC006 — eval/exec usage
+// SEC006 — eval/exec usage (resolves through variable aliases)
 check_eval_exec :: proc(ctx: ^Security_Context) {
 	walk_stmts(ctx, ctx.module.body, proc(ctx: ^Security_Context, expr: parser.Expr) {
 		call, ok := expr.(^parser.Call_Expr)
 		if !ok { return }
 
-		func_name := ""
-		#partial switch f in call.func {
-		case ^parser.Name_Expr:
-			if f.id == "eval" || f.id == "exec" {
-				func_name = f.id
-			}
-		case ^parser.Attribute_Expr:
-			// builtins.eval / builtins.exec
-			if name, n_ok := f.value.(^parser.Name_Expr); n_ok {
-				if name.id == "builtins" && (f.attr == "eval" || f.attr == "exec") {
-					func_name = f.attr
-				}
-			}
-		}
+		mod, func_name := resolve_call(ctx, call)
 
-		if func_name != "" {
+		if (func_name == "eval" || func_name == "exec") && (mod == "" || mod == "builtins") {
 			append(&ctx.diagnostics, core.Diagnostic{
 				severity = .Security,
 				location = core.Location{

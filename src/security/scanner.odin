@@ -15,15 +15,16 @@ Security_Config :: struct {
 }
 
 Security_Context :: struct {
-	source:      string,
-	lines:       []string,
-	module:      ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	file_path:   string,
-	config:      ^Security_Config,
-	diagnostics: [dynamic]core.Diagnostic,
-	import_map:  map[string]string,  // local_name → module_name
-	allocator:   mem.Allocator,
+	source:       string,
+	lines:        []string,
+	module:       ^parser.Module,
+	bind_result:  ^binder.Bind_Result,
+	file_path:    string,
+	config:       ^Security_Config,
+	diagnostics:  [dynamic]core.Diagnostic,
+	import_map:   map[string]string,           // local_name → module_name
+	name_aliases: map[string]taint.Alias_Info,  // local_name → resolved target
+	allocator:    mem.Allocator,
 }
 
 default_config :: proc() -> Security_Config {
@@ -40,28 +41,30 @@ scan_file :: proc(
 	flow_result: ^flow.Flow_Result = nil,
 ) -> []core.Diagnostic {
 	ctx := Security_Context{
-		source      = source,
-		lines       = strings.split(source, "\n", allocator),
-		module      = module,
-		bind_result = bind_result,
-		file_path   = file_path,
-		config      = config,
-		diagnostics = make([dynamic]core.Diagnostic, 0, 16, allocator),
-		import_map  = make(map[string]string, 16, allocator),
-		allocator   = allocator,
+		source       = source,
+		lines        = strings.split(source, "\n", allocator),
+		module       = module,
+		bind_result  = bind_result,
+		file_path    = file_path,
+		config       = config,
+		diagnostics  = make([dynamic]core.Diagnostic, 0, 16, allocator),
+		import_map   = make(map[string]string, 16, allocator),
+		name_aliases = make(map[string]taint.Alias_Info, 8, allocator),
+		allocator    = allocator,
 	}
 
 	build_import_map(&ctx)
+	build_alias_map(&ctx)
 	run_all_rules(&ctx)
 
 	// Taint analysis: two-pass when flow results are available
 	// Pass 1: build function taint summaries (cross-function propagation)
 	// Pass 2: analyze with summaries available at call sites
 	if flow_result != nil {
-		summaries := taint.build_summaries(flow_result.cfgs[:], bind_result, ctx.import_map, allocator)
+		summaries := taint.build_summaries(flow_result.cfgs[:], bind_result, ctx.import_map, allocator, ctx.name_aliases)
 
 		for &cfg in flow_result.cfgs {
-			violations := taint.analyze_taint(&cfg, bind_result, ctx.import_map, allocator, summaries)
+			violations := taint.analyze_taint(&cfg, bind_result, ctx.import_map, allocator, summaries, ctx.name_aliases)
 			for v in violations {
 				if is_rule_enabled(v.rule_code, config) {
 					append(&ctx.diagnostics, core.Diagnostic{
@@ -228,14 +231,18 @@ walk_expr :: proc(ctx: ^Security_Context, expr: parser.Expr, visit: proc(ctx: ^S
 }
 
 // Resolve a Call_Expr's callee to (module, function_name).
+// Checks import_map and name_aliases for variable aliasing resolution.
 // Returns ("", "") if not resolvable.
 resolve_call :: proc(ctx: ^Security_Context, call: ^parser.Call_Expr) -> (module: string, func_name: string) {
 	#partial switch f in call.func {
 	case ^parser.Name_Expr:
-		// Direct call: eval(), md5()
-		// Check if it's an imported name
+		// Check import map first
 		if mod, ok := ctx.import_map[f.id]; ok {
 			return mod, f.id
+		}
+		// Check alias map: e = eval → resolve "e" to ("", "eval")
+		if alias, ok := ctx.name_aliases[f.id]; ok {
+			return alias.module, alias.name
 		}
 		// Builtin (no module)
 		return "", f.id
@@ -245,11 +252,79 @@ resolve_call :: proc(ctx: ^Security_Context, call: ^parser.Call_Expr) -> (module
 			if mod, ok2 := ctx.import_map[name.id]; ok2 {
 				return mod, f.attr
 			}
-			// Could be a method call on an object — not module-qualified
+			// Check if object is an aliased module: sp = subprocess → sp.run()
+			if alias, ok2 := ctx.name_aliases[name.id]; ok2 {
+				if alias.module != "" {
+					return alias.module, f.attr
+				}
+			}
 			return "", f.attr
 		}
 	}
 	return "", ""
+}
+
+// Build alias map from simple assignments: x = known_name or x = mod.attr.
+// Resolves variable aliasing so that e = eval; e(code) is detected.
+build_alias_map :: proc(ctx: ^Security_Context) {
+	walk_alias_stmts(ctx, ctx.module.body)
+}
+
+walk_alias_stmts :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			if len(s.targets) == 1 {
+				if target, ok := s.targets[0].(^parser.Name_Expr); ok {
+					resolve_alias_rhs(ctx, target.id, s.value)
+				}
+			}
+		case ^parser.Func_Def:
+			walk_alias_stmts(ctx, s.body)
+		case ^parser.Async_Func_Def:
+			walk_alias_stmts(ctx, s.body)
+		case ^parser.Class_Def:
+			walk_alias_stmts(ctx, s.body)
+		case ^parser.If_Stmt:
+			walk_alias_stmts(ctx, s.body)
+			walk_alias_stmts(ctx, s.orelse)
+		case ^parser.For_Stmt:
+			walk_alias_stmts(ctx, s.body)
+		case ^parser.While_Stmt:
+			walk_alias_stmts(ctx, s.body)
+		case ^parser.Try_Stmt:
+			walk_alias_stmts(ctx, s.body)
+			for h in s.handlers { walk_alias_stmts(ctx, h.body) }
+		case ^parser.With_Stmt:
+			walk_alias_stmts(ctx, s.body)
+		}
+	}
+}
+
+resolve_alias_rhs :: proc(ctx: ^Security_Context, target_name: string, value: parser.Expr) {
+	if value == nil { return }
+	#partial switch v in value {
+	case ^parser.Name_Expr:
+		// x = eval, x = subprocess, x = aliased_name
+		// Follow chain if already aliased
+		if alias, ok := ctx.name_aliases[v.id]; ok {
+			ctx.name_aliases[target_name] = alias
+		} else if mod, ok := ctx.import_map[v.id]; ok {
+			// x = md5 (from hashlib import md5) → {module=hashlib, name=md5}
+			// x = subprocess (import subprocess) → {module=subprocess, name=subprocess}
+			ctx.name_aliases[target_name] = taint.Alias_Info{module = mod, name = v.id}
+		} else {
+			// Builtin like eval, exec, open — not in import_map
+			ctx.name_aliases[target_name] = taint.Alias_Info{module = "", name = v.id}
+		}
+	case ^parser.Attribute_Expr:
+		// x = subprocess.run → {module=subprocess, name=run}
+		if name, ok := v.value.(^parser.Name_Expr); ok {
+			if mod, ok2 := ctx.import_map[name.id]; ok2 {
+				ctx.name_aliases[target_name] = taint.Alias_Info{module = mod, name = v.attr}
+			}
+		}
+	}
 }
 
 // Check if a variable name contains any security-relevant keyword

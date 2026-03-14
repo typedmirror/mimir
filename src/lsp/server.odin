@@ -19,23 +19,30 @@ Document :: struct {
 	version: int,
 }
 
+Cached_Analysis :: struct {
+	version: int,
+	result:  Analysis_Result,
+}
+
 Server :: struct {
-	bridge:      ^parser.Bridge,
-	documents:   map[string]Document,
-	initialized: bool,
-	shutdown:     bool,
-	allocator:   mem.Allocator,
-	read_buf:    [dynamic]u8,
+	bridge:         ^parser.Bridge,
+	documents:      map[string]Document,
+	analysis_cache: map[string]Cached_Analysis,
+	initialized:    bool,
+	shutdown:       bool,
+	allocator:      mem.Allocator,
+	read_buf:       [dynamic]u8,
 }
 
 // ==================== Public API ====================
 
 init_server :: proc(bridge: ^parser.Bridge, allocator: mem.Allocator) -> Server {
 	return Server{
-		bridge    = bridge,
-		documents = make(map[string]Document, 16, allocator),
-		allocator = allocator,
-		read_buf  = make([dynamic]u8, 0, 4096, allocator),
+		bridge         = bridge,
+		documents      = make(map[string]Document, 16, allocator),
+		analysis_cache = make(map[string]Cached_Analysis, 8, allocator),
+		allocator      = allocator,
+		read_buf       = make([dynamic]u8, 0, 4096, allocator),
 	}
 }
 

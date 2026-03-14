@@ -50,18 +50,23 @@ read_build_config :: proc(config_path: string, allocator: mem.Allocator) -> (Bui
 		project_dir  = parent_dir(config_path),
 	}
 
-	if v, ok := toml_get(&doc, "project", "name"); ok { cfg.name = v }
-	if v, ok := toml_get(&doc, "project", "version"); ok { cfg.version = v }
-	if v, ok := toml_get(&doc, "project", "description"); ok { cfg.description = v }
-	if v, ok := toml_get(&doc, "project", "author"); ok { cfg.author = v }
-	if v, ok := toml_get(&doc, "project", "author-email"); ok { cfg.author_email = v }
-	if v, ok := toml_get(&doc, "project", "license"); ok { cfg.license_text = v }
-	if v, ok := toml_get(&doc, "project", "readme"); ok { cfg.readme_path = v }
-	if v, ok := toml_get(&doc, "project", "requires-python"); ok { cfg.requires_python = v }
+	if v, ok := toml_get_string(&doc, "project", "name"); ok { cfg.name = v }
+	if v, ok := toml_get_string(&doc, "project", "version"); ok { cfg.version = v }
+	if v, ok := toml_get_string(&doc, "project", "description"); ok { cfg.description = v }
+	if v, ok := toml_get_string(&doc, "project", "author"); ok { cfg.author = v }
+	if v, ok := toml_get_string(&doc, "project", "author-email"); ok { cfg.author_email = v }
+	if v, ok := toml_get_string(&doc, "project", "license"); ok { cfg.license_text = v }
+	if v, ok := toml_get_string(&doc, "project", "readme"); ok { cfg.readme_path = v }
+	if v, ok := toml_get_string(&doc, "project", "requires-python"); ok { cfg.requires_python = v }
 
 	if deps_table, has_deps := doc.tables["dependencies"]; has_deps {
 		for dep_name in deps_table.order {
-			constraint := deps_table.entries[dep_name]
+			constraint := ""
+			if val, val_ok := deps_table.entries[dep_name]; val_ok {
+				if s, is_str := val.(string); is_str {
+					constraint = s
+				}
+			}
 			raw: string
 			if constraint == "" {
 				raw = dep_name
@@ -78,7 +83,12 @@ read_build_config :: proc(config_path: string, allocator: mem.Allocator) -> (Bui
 
 	if scripts_table, has_scripts := doc.tables["scripts"]; has_scripts {
 		for script_name in scripts_table.order {
-			ref := scripts_table.entries[script_name]
+			ref := ""
+			if val, val_ok := scripts_table.entries[script_name]; val_ok {
+				if s, is_str := val.(string); is_str {
+					ref = s
+				}
+			}
 			append(&cfg.scripts, Entry_Point{
 				name = script_name,
 				ref  = ref,

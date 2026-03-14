@@ -41,15 +41,23 @@ check_source :: proc(ctx: ^Taint_Context, expr: parser.Expr) -> (is_source: bool
 check_call_source :: proc(ctx: ^Taint_Context, call: ^parser.Call_Expr) -> (bool, string) {
 	#partial switch f in call.func {
 	case ^parser.Name_Expr:
-		// input() — builtin, always a source
-		if f.id == "input" { return true, "input()" }
-
-		// from json import loads → import_map["loads"] = "json"
-		if mod, ok := ctx.import_map[f.id]; ok {
-			if mod == "json" && f.id == "loads" { return true, "json.loads()" }
-			if mod == "yaml" && f.id == "load" { return true, "yaml.load()" }
-			if mod == "yaml" && f.id == "safe_load" { return false, "" } // safe_load is OK
+		// Resolve aliases: i = input → resolve "i" to ("", "input")
+		name := f.id
+		mod := ""
+		if alias, ok := ctx.name_aliases[name]; ok {
+			name = alias.name
+			mod = alias.module
+		} else if m, ok := ctx.import_map[f.id]; ok {
+			mod = m
 		}
+
+		// input() — builtin, always a source
+		if (mod == "" || mod == "builtins") && name == "input" { return true, "input()" }
+
+		// Module-qualified sources via from-import or alias
+		if mod == "json" && name == "loads" { return true, "json.loads()" }
+		if mod == "yaml" && name == "load" { return true, "yaml.load()" }
+		if mod == "yaml" && name == "safe_load" { return false, "" }
 
 	case ^parser.Attribute_Expr:
 		if name, ok := f.value.(^parser.Name_Expr); ok {

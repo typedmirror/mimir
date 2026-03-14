@@ -37,7 +37,12 @@ read_lockfile :: proc(path: string, allocator: mem.Allocator) -> (Lockfile, Plat
 	// Read [packages] section
 	if pkg_table, has_pkgs := doc.tables["packages"]; has_pkgs {
 		for name in pkg_table.order {
-			version := pkg_table.entries[name]
+			version := ""
+			if val, val_ok := pkg_table.entries[name]; val_ok {
+				if s, is_str := val.(string); is_str {
+					version = s
+				}
+			}
 			append(&lf.packages, Locked_Package{
 				name    = name,
 				version = version,
@@ -59,7 +64,7 @@ write_lockfile :: proc(lf: ^Lockfile, path: string, allocator: mem.Allocator) ->
 		tables      = make(map[string]Toml_Table, 2, allocator),
 		table_order = make([dynamic]string, 0, 2, allocator),
 		root = Toml_Table{
-			entries = make(map[string]string, 2, allocator),
+			entries = make(map[string]Toml_Value, 2, allocator),
 			order   = make([dynamic]string, 0, 2, allocator),
 		},
 	}

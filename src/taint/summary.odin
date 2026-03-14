@@ -24,6 +24,7 @@ build_summaries :: proc(
 	bind_result: ^binder.Bind_Result,
 	import_map: map[string]string,
 	allocator: mem.Allocator,
+	name_aliases: map[string]Alias_Info,
 ) -> map[string]Taint_Summary {
 	summaries := make(map[string]Taint_Summary, 16, allocator)
 
@@ -33,7 +34,7 @@ build_summaries :: proc(
 		if scope == nil { continue }
 		if scope.kind != .Function { continue }
 
-		summary := build_summary_for_cfg(&cfg, bind_result, import_map, allocator)
+		summary := build_summary_for_cfg(&cfg, bind_result, import_map, allocator, name_aliases)
 		if len(summary.scope_name) > 0 {
 			summaries[summary.scope_name] = summary
 		}
@@ -49,6 +50,7 @@ build_summary_for_cfg :: proc(
 	bind_result: ^binder.Bind_Result,
 	import_map: map[string]string,
 	allocator: mem.Allocator,
+	name_aliases: map[string]Alias_Info,
 ) -> Taint_Summary {
 	summary := Taint_Summary{
 		scope_name = cfg.scope_name,
@@ -65,12 +67,13 @@ build_summary_for_cfg :: proc(
 
 	// Create taint context for BFS
 	ctx := Taint_Context{
-		cfg         = cfg,
-		bind_result = bind_result,
-		import_map  = import_map,
-		envs        = make([]Taint_Env, num_blocks, allocator),
-		violations  = make([dynamic]Taint_Violation, 0, 8, allocator),
-		allocator   = allocator,
+		cfg          = cfg,
+		bind_result  = bind_result,
+		import_map   = import_map,
+		name_aliases = name_aliases,
+		envs         = make([]Taint_Env, num_blocks, allocator),
+		violations   = make([dynamic]Taint_Violation, 0, 8, allocator),
+		allocator    = allocator,
 	}
 
 	for i in 0 ..< num_blocks {
@@ -95,11 +98,18 @@ build_summary_for_cfg :: proc(
 		}
 	}
 
-	// Run BFS (same logic as analyze_taint)
+	// Worklist fixpoint iteration (same as analyze_taint)
 	queue := make([dynamic]flow.Block_ID, 0, num_blocks, allocator)
-	visited := make([]bool, num_blocks, allocator)
+	in_queue := make([]bool, num_blocks, allocator)
+	old_envs := make([]Taint_Env, num_blocks, allocator)
+	for i in 0 ..< num_blocks {
+		old_envs[i] = Taint_Env{
+			info = make(map[binder.Symbol_ID]Taint_Info, 16, allocator),
+		}
+	}
 
 	append(&queue, cfg.entry)
+	in_queue[entry_idx] = true
 
 	for len(queue) > 0 {
 		block_id := queue[0]
@@ -107,8 +117,7 @@ build_summary_for_cfg :: proc(
 
 		idx := int(block_id) - 1
 		if idx < 0 || idx >= num_blocks { continue }
-		if visited[idx] { continue }
-		visited[idx] = true
+		in_queue[idx] = false
 
 		block := flow.get_block(cfg, block_id)
 		if block == nil || !block.is_reachable { continue }
@@ -116,7 +125,7 @@ build_summary_for_cfg :: proc(
 		env := &ctx.envs[idx]
 		for pred_id in block.preds {
 			pred_idx := int(pred_id) - 1
-			if pred_idx >= 0 && pred_idx < num_blocks && visited[pred_idx] {
+			if pred_idx >= 0 && pred_idx < num_blocks {
 				merge_taint_envs(env, &ctx.envs[pred_idx], allocator)
 			}
 		}
@@ -141,10 +150,15 @@ build_summary_for_cfg :: proc(
 			}
 		}
 
-		for succ_id in block.succs {
-			succ_idx := int(succ_id) - 1
-			if succ_idx >= 0 && succ_idx < num_blocks && !visited[succ_idx] {
-				append(&queue, succ_id)
+		// Re-enqueue successors only if env changed
+		if !taint_env_equal(env, &old_envs[idx]) {
+			copy_taint_env(&old_envs[idx], env, allocator)
+			for succ_id in block.succs {
+				succ_idx := int(succ_id) - 1
+				if succ_idx >= 0 && succ_idx < num_blocks && !in_queue[succ_idx] {
+					append(&queue, succ_id)
+					in_queue[succ_idx] = true
+				}
 			}
 		}
 	}

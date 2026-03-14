@@ -14,25 +14,30 @@ Sink_Info :: struct {
 check_sink :: proc(ctx: ^Taint_Context, call: ^parser.Call_Expr) -> (is_sink: bool, info: Sink_Info) {
 	#partial switch f in call.func {
 	case ^parser.Name_Expr:
-		// eval(x) — SEC010
-		if f.id == "eval" { return true, {arg_index = 0, desc = "eval()", code = "SEC010"} }
-		// exec(x) — SEC011
-		if f.id == "exec" { return true, {arg_index = 0, desc = "exec()", code = "SEC011"} }
-		// open(x) — SEC014
-		if f.id == "open" { return true, {arg_index = 0, desc = "open()", code = "SEC014"} }
-
-		// from os import system → import_map["system"] = "os"
-		if mod, ok := ctx.import_map[f.id]; ok {
-			if mod == "os" && f.id == "system" {
-				return true, {arg_index = 0, desc = "os.system()", code = "SEC013"}
-			}
+		// Resolve aliases: e = eval → resolve "e" to ("", "eval")
+		name := f.id
+		mod := ""
+		if alias, ok := ctx.name_aliases[name]; ok {
+			name = alias.name
+			mod = alias.module
+		} else if m, ok := ctx.import_map[f.id]; ok {
+			mod = m
 		}
-		// from subprocess import run → import_map["run"] = "subprocess"
-		if mod, ok := ctx.import_map[f.id]; ok {
-			if mod == "subprocess" && (f.id == "run" || f.id == "call" || f.id == "Popen") {
-				if has_shell_true(call) {
-					return true, {arg_index = 0, desc = "subprocess with shell=True", code = "SEC013"}
-				}
+
+		// Builtin sinks
+		if mod == "" || mod == "builtins" {
+			if name == "eval" { return true, {arg_index = 0, desc = "eval()", code = "SEC010"} }
+			if name == "exec" { return true, {arg_index = 0, desc = "exec()", code = "SEC011"} }
+			if name == "open" { return true, {arg_index = 0, desc = "open()", code = "SEC014"} }
+		}
+
+		// Module-qualified sinks via from-import or alias
+		if mod == "os" && name == "system" {
+			return true, {arg_index = 0, desc = "os.system()", code = "SEC013"}
+		}
+		if mod == "subprocess" && (name == "run" || name == "call" || name == "Popen") {
+			if has_shell_true(call) {
+				return true, {arg_index = 0, desc = "subprocess with shell=True", code = "SEC013"}
 			}
 		}
 
