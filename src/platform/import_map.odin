@@ -156,7 +156,7 @@ json_escape :: proc(s: string) -> string {
 	}
 	if !needs_escape { return s }
 
-	buf := make([dynamic]u8, 0, len(s) + 8)
+	buf := make([dynamic]u8, 0, len(s) + 8, context.temp_allocator)
 	for c in s {
 		switch c {
 		case '"':  append(&buf, '\\'); append(&buf, '"')

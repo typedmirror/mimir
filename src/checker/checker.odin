@@ -456,11 +456,19 @@ check_scope :: proc(
 		}
 	}
 
-	// Store final symbol types
-	for i in 0..<n_blocks {
-		if visited[i] {
-			for sym_id, type_id in envs[i].types {
-				result.symbol_types[sym_id] = type_id
+	// Store final symbol types — prefer exit block (has merged types from all paths)
+	exit_idx := int(cfg.exit) - 1
+	if exit_idx >= 0 && exit_idx < n_blocks && visited[exit_idx] {
+		for sym_id, type_id in envs[exit_idx].types {
+			result.symbol_types[sym_id] = type_id
+		}
+	} else {
+		// Fallback: store from all visited blocks (exit block unreachable)
+		for i in 0..<n_blocks {
+			if visited[i] {
+				for sym_id, type_id in envs[i].types {
+					result.symbol_types[sym_id] = type_id
+				}
 			}
 		}
 	}

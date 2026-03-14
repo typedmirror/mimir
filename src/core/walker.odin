@@ -29,6 +29,7 @@ walk_stmt :: proc(v: ^AST_Visitor, stmt: parser.Stmt) {
 		walk_expr(v, s.value)
 		for t in s.targets { walk_expr(v, t) }
 	case ^parser.Ann_Assign:
+		walk_expr(v, s.annotation)
 		if s.value != nil { walk_expr(v, s.value) }
 	case ^parser.Aug_Assign:
 		walk_expr(v, s.target)
@@ -40,19 +41,25 @@ walk_stmt :: proc(v: ^AST_Visitor, stmt: parser.Stmt) {
 		if s.msg != nil { walk_expr(v, s.msg) }
 	case ^parser.Raise_Stmt:
 		if s.exc != nil { walk_expr(v, s.exc) }
+		if s.cause != nil { walk_expr(v, s.cause) }
 	case ^parser.Delete_Stmt:
 		for t in s.targets { walk_expr(v, t) }
 
 	// Compound statements — recurse into bodies
 	case ^parser.Func_Def:
 		for d in s.decorator_list { walk_expr(v, d) }
+		walk_func_args(v, &s.args)
+		if s.returns != nil { walk_expr(v, s.returns) }
 		walk_all_stmts(v, s.body)
 	case ^parser.Async_Func_Def:
 		for d in s.decorator_list { walk_expr(v, d) }
+		walk_func_args(v, &s.args)
+		if s.returns != nil { walk_expr(v, s.returns) }
 		walk_all_stmts(v, s.body)
 	case ^parser.Class_Def:
 		for d in s.decorator_list { walk_expr(v, d) }
 		for b in s.bases { walk_expr(v, b) }
+		for kw in s.keywords { walk_expr(v, kw.value) }
 		walk_all_stmts(v, s.body)
 	case ^parser.If_Stmt:
 		walk_expr(v, s.test)
@@ -163,6 +170,7 @@ walk_expr :: proc(v: ^AST_Visitor, expr: parser.Expr) {
 	case ^parser.Starred_Expr:
 		walk_expr(v, e.value)
 	case ^parser.Named_Expr:
+		walk_expr(v, e.target)
 		walk_expr(v, e.value)
 	case ^parser.Await_Expr:
 		walk_expr(v, e.value)
@@ -206,5 +214,31 @@ walk_expr :: proc(v: ^AST_Visitor, expr: parser.Expr) {
 	// Leaf nodes — no children to recurse
 	case ^parser.Name_Expr:
 	case ^parser.Constant_Expr:
+	}
+}
+
+// Walk function argument annotations and defaults.
+walk_func_args :: proc(v: ^AST_Visitor, args: ^parser.Arguments) {
+	if args == nil { return }
+	for &a in args.posonlyargs {
+		if a.annotation != nil { walk_expr(v, a.annotation) }
+	}
+	for &a in args.args {
+		if a.annotation != nil { walk_expr(v, a.annotation) }
+	}
+	for &a in args.kwonlyargs {
+		if a.annotation != nil { walk_expr(v, a.annotation) }
+	}
+	if args.vararg != nil && args.vararg.annotation != nil {
+		walk_expr(v, args.vararg.annotation)
+	}
+	if args.kwarg != nil && args.kwarg.annotation != nil {
+		walk_expr(v, args.kwarg.annotation)
+	}
+	for d in args.defaults {
+		if d != nil { walk_expr(v, d) }
+	}
+	for d in args.kw_defaults {
+		if d != nil { walk_expr(v, d) }
 	}
 }
