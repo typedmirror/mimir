@@ -211,10 +211,12 @@ analyze_condition :: proc(
 				analyze_condition(val, bind_result, scope_id, branch_block, true_block, false_block, loc, guards, allocator)
 			}
 		} else if e.op == .Or {
-			// De Morgan's: `a or b` false branch means both a AND b are false.
-			// Swap true/false so guards apply to the false branch (both false).
+			// `a or b` false branch: both a AND b are false → subtract each type.
+			// Use normal blocks (not swapped) so false_block gets negative guards
+			// (subtraction). True branch is imprecise (narrows to last type instead
+			// of union) but correct subtraction in false branch is more important.
 			for val in e.values {
-				analyze_condition(val, bind_result, scope_id, branch_block, false_block, true_block, loc, guards, allocator)
+				analyze_condition(val, bind_result, scope_id, branch_block, true_block, false_block, loc, guards, allocator)
 			}
 		}
 	}
