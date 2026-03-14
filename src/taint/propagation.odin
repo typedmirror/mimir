@@ -119,6 +119,37 @@ expr_taint :: proc(ctx: ^Taint_Context, env: ^Taint_Env, expr: parser.Expr) -> T
 			result = max_taint_info(result, expr_taint(ctx, env, elt))
 		}
 		return result
+
+	case ^parser.Named_Expr:
+		val_taint := expr_taint(ctx, env, e.value)
+		assign_taint(ctx, env, e.target, val_taint)
+		return val_taint
+
+	case ^parser.List_Comp:
+		for gen in e.generators {
+			expr_taint(ctx, env, gen.iter)
+		}
+		return expr_taint(ctx, env, e.elt)
+
+	case ^parser.Set_Comp:
+		for gen in e.generators {
+			expr_taint(ctx, env, gen.iter)
+		}
+		return expr_taint(ctx, env, e.elt)
+
+	case ^parser.Generator_Expr:
+		for gen in e.generators {
+			expr_taint(ctx, env, gen.iter)
+		}
+		return expr_taint(ctx, env, e.elt)
+
+	case ^parser.Dict_Comp:
+		for gen in e.generators {
+			expr_taint(ctx, env, gen.iter)
+		}
+		key_taint := expr_taint(ctx, env, e.key)
+		val_taint := expr_taint(ctx, env, e.value)
+		return max_taint_info(key_taint, val_taint)
 	}
 
 	return {label = .Unknown}
@@ -180,6 +211,8 @@ assign_taint :: proc(ctx: ^Taint_Context, env: ^Taint_Env, target: parser.Expr, 
 		for elt in t.elts {
 			assign_taint(ctx, env, elt, info)
 		}
+	case ^parser.Named_Expr:
+		assign_taint(ctx, env, t.target, info)
 	}
 }
 
@@ -237,6 +270,33 @@ check_expr_sinks :: proc(ctx: ^Taint_Context, env: ^Taint_Env, expr: parser.Expr
 	case ^parser.Tuple_Expr:
 		for elt in e.elts {
 			check_expr_sinks(ctx, env, elt)
+		}
+	case ^parser.Named_Expr:
+		check_expr_sinks(ctx, env, e.value)
+	case ^parser.List_Comp:
+		check_expr_sinks(ctx, env, e.elt)
+		for gen in e.generators {
+			check_expr_sinks(ctx, env, gen.iter)
+			for cond in gen.ifs { check_expr_sinks(ctx, env, cond) }
+		}
+	case ^parser.Set_Comp:
+		check_expr_sinks(ctx, env, e.elt)
+		for gen in e.generators {
+			check_expr_sinks(ctx, env, gen.iter)
+			for cond in gen.ifs { check_expr_sinks(ctx, env, cond) }
+		}
+	case ^parser.Dict_Comp:
+		check_expr_sinks(ctx, env, e.key)
+		check_expr_sinks(ctx, env, e.value)
+		for gen in e.generators {
+			check_expr_sinks(ctx, env, gen.iter)
+			for cond in gen.ifs { check_expr_sinks(ctx, env, cond) }
+		}
+	case ^parser.Generator_Expr:
+		check_expr_sinks(ctx, env, e.elt)
+		for gen in e.generators {
+			check_expr_sinks(ctx, env, gen.iter)
+			for cond in gen.ifs { check_expr_sinks(ctx, env, cond) }
 		}
 	}
 }

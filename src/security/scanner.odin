@@ -227,6 +227,33 @@ walk_expr :: proc(ctx: ^Security_Context, expr: parser.Expr, visit: proc(ctx: ^S
 		walk_expr(ctx, e.slice, visit)
 	case ^parser.Starred_Expr:
 		walk_expr(ctx, e.value, visit)
+	case ^parser.Named_Expr:
+		walk_expr(ctx, e.value, visit)
+	case ^parser.List_Comp:
+		walk_expr(ctx, e.elt, visit)
+		for gen in e.generators {
+			walk_expr(ctx, gen.iter, visit)
+			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
+		}
+	case ^parser.Set_Comp:
+		walk_expr(ctx, e.elt, visit)
+		for gen in e.generators {
+			walk_expr(ctx, gen.iter, visit)
+			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
+		}
+	case ^parser.Dict_Comp:
+		walk_expr(ctx, e.key, visit)
+		walk_expr(ctx, e.value, visit)
+		for gen in e.generators {
+			walk_expr(ctx, gen.iter, visit)
+			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
+		}
+	case ^parser.Generator_Expr:
+		walk_expr(ctx, e.elt, visit)
+		for gen in e.generators {
+			walk_expr(ctx, gen.iter, visit)
+			for cond in gen.ifs { walk_expr(ctx, cond, visit) }
+		}
 	}
 }
 

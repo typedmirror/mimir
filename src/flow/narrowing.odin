@@ -44,14 +44,14 @@ extract_guards :: proc(cfgs: []CFG, bind_result: ^binder.Bind_Result, allocator:
 				true_block := find_succ_by_edge_kind(&block, .True_Branch)
 				false_block := find_succ_by_edge_kind(&block, .False_Branch)
 				if true_block != INVALID_BLOCK && false_block != INVALID_BLOCK {
-					analyze_condition(s.test, bind_result, block.id, true_block, false_block, s.loc, &guards, allocator)
+					analyze_condition(s.test, bind_result, cfg.scope_id, block.id, true_block, false_block, s.loc, &guards, allocator)
 				}
 
 			case ^parser.While_Stmt:
 				true_block := find_succ_by_edge_kind(&block, .True_Branch)
 				false_block := find_succ_by_edge_kind(&block, .False_Branch)
 				if true_block != INVALID_BLOCK && false_block != INVALID_BLOCK {
-					analyze_condition(s.test, bind_result, block.id, true_block, false_block, s.loc, &guards, allocator)
+					analyze_condition(s.test, bind_result, cfg.scope_id, block.id, true_block, false_block, s.loc, &guards, allocator)
 				}
 			}
 		}
@@ -74,6 +74,7 @@ find_succ_by_edge_kind :: proc(block: ^Block, kind: Edge_Kind) -> Block_ID {
 analyze_condition :: proc(
 	expr: parser.Expr,
 	bind_result: ^binder.Bind_Result,
+	scope_id: binder.Scope_ID,
 	branch_block: Block_ID,
 	true_block: Block_ID,
 	false_block: Block_ID,
@@ -88,7 +89,7 @@ analyze_condition :: proc(
 		// isinstance(x, T)
 		if is_isinstance_call(e, bind_result) {
 			if len(e.args) >= 2 {
-				sym_id := expr_to_symbol(e.args[0], bind_result)
+				sym_id := expr_to_symbol(e.args[0], bind_result, scope_id)
 				if sym_id != binder.INVALID_SYMBOL {
 					append(guards, Guard{
 						kind         = .Is_Instance,
@@ -107,7 +108,7 @@ analyze_condition :: proc(
 		if len(e.ops) == 1 && len(e.comparators) == 1 {
 			// x is None / x is not None
 			if is_none_compare(e) {
-				sym_id := expr_to_symbol(e.left, bind_result)
+				sym_id := expr_to_symbol(e.left, bind_result, scope_id)
 				if sym_id != binder.INVALID_SYMBOL {
 					// For "is not", use Is_None with swapped blocks (consistent with unary inversion)
 					tb := e.ops[0] == .Is ? true_block : false_block
@@ -124,7 +125,7 @@ analyze_condition :: proc(
 			}
 			// None is x / None is not x (reversed)
 			if is_none_compare_reversed(e) {
-				sym_id := expr_to_symbol(e.comparators[0], bind_result)
+				sym_id := expr_to_symbol(e.comparators[0], bind_result, scope_id)
 				if sym_id != binder.INVALID_SYMBOL {
 					tb := e.ops[0] == .Is ? true_block : false_block
 					fb := e.ops[0] == .Is ? false_block : true_block
@@ -142,7 +143,7 @@ analyze_condition :: proc(
 			if is_type_compare(e, bind_result) {
 				call := e.left.(^parser.Call_Expr)
 				if call != nil && len(call.args) >= 1 {
-					sym_id := expr_to_symbol(call.args[0], bind_result)
+					sym_id := expr_to_symbol(call.args[0], bind_result, scope_id)
 					if sym_id != binder.INVALID_SYMBOL {
 						// For "is not", use Type_Is with swapped blocks
 						tb := e.ops[0] == .Is ? true_block : false_block
@@ -163,7 +164,7 @@ analyze_condition :: proc(
 
 	case ^parser.Name_Expr:
 		// if x: (truthiness)
-		sym_id := expr_to_symbol(expr, bind_result)
+		sym_id := expr_to_symbol(expr, bind_result, scope_id)
 		if sym_id != binder.INVALID_SYMBOL {
 			append(guards, Guard{
 				kind         = .Is_Truthy,
@@ -177,7 +178,7 @@ analyze_condition :: proc(
 
 	case ^parser.Named_Expr:
 		// if (x := value): (walrus + truthiness)
-		sym_id := expr_to_symbol(e.target, bind_result)
+		sym_id := expr_to_symbol(e.target, bind_result, scope_id)
 		if sym_id != binder.INVALID_SYMBOL {
 			append(guards, Guard{
 				kind         = .Is_Truthy,
@@ -194,7 +195,7 @@ analyze_condition :: proc(
 		if e.op == .Not {
 			// Recursively analyze and invert
 			temp_guards := make([dynamic]Guard, 0, 4, allocator)
-			analyze_condition(e.operand, bind_result, branch_block, true_block, false_block, loc, &temp_guards, allocator)
+			analyze_condition(e.operand, bind_result, scope_id, branch_block, true_block, false_block, loc, &temp_guards, allocator)
 			for &g in temp_guards {
 				g.kind = invert_guard_kind(g.kind)
 				// Swap true/false blocks for inverted guards
@@ -207,7 +208,7 @@ analyze_condition :: proc(
 		// `x and isinstance(x, T)` — all sub-conditions produce guards for same branches
 		if e.op == .And {
 			for val in e.values {
-				analyze_condition(val, bind_result, branch_block, true_block, false_block, loc, guards, allocator)
+				analyze_condition(val, bind_result, scope_id, branch_block, true_block, false_block, loc, guards, allocator)
 			}
 		}
 	}
@@ -267,7 +268,7 @@ is_type_compare :: proc(cmp: ^parser.Compare_Expr, bind_result: ^binder.Bind_Res
 	return false
 }
 
-expr_to_symbol :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result) -> binder.Symbol_ID {
+expr_to_symbol :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result, scope_id: binder.Scope_ID = binder.Scope_ID(0)) -> binder.Symbol_ID {
 	if expr == nil { return binder.INVALID_SYMBOL }
 	#partial switch e in expr {
 	case ^parser.Name_Expr:
@@ -275,15 +276,30 @@ expr_to_symbol :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result) -> b
 		if ok {
 			return sym_id
 		}
-		// For Store context names, search by name
-		for &sym in bind_result.symbols {
-			if sym.name == e.id {
-				return sym.id
+		// Fallback: scope-aware name search — prefer symbols in current/ancestor scopes
+		if scope_id != binder.Scope_ID(0) {
+			check_scope := scope_id
+			for check_scope != binder.Scope_ID(0) {
+				for &sym in bind_result.symbols {
+					if sym.name == e.id && sym.scope_id == check_scope {
+						return sym.id
+					}
+				}
+				scope := binder.result_get_scope(bind_result, check_scope)
+				if scope == nil { break }
+				check_scope = scope.parent_id
+			}
+		} else {
+			// No scope context — original behavior (first match)
+			for &sym in bind_result.symbols {
+				if sym.name == e.id {
+					return sym.id
+				}
 			}
 		}
 	case ^parser.Named_Expr:
 		// Walrus operator (x := value) — extract target symbol
-		return expr_to_symbol(e.target, bind_result)
+		return expr_to_symbol(e.target, bind_result, scope_id)
 	}
 	return binder.INVALID_SYMBOL
 }
@@ -304,20 +320,3 @@ invert_guard_kind :: proc(kind: Guard_Kind) -> Guard_Kind {
 	return kind
 }
 
-// ==================== Query Interface ====================
-
-guards_for_block :: proc(guards: []Guard, block_id: Block_ID) -> []Guard {
-	// Returns guards where true_block or false_block matches
-	// Caller should filter further
-	count := 0
-	for &g in guards {
-		if g.true_block == block_id || g.false_block == block_id {
-			count += 1
-		}
-	}
-	if count == 0 { return {} }
-
-	// Since we can't allocate without an allocator, return full slice
-	// Phase 4 will use a filtered view
-	return guards
-}
