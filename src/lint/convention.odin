@@ -7,81 +7,83 @@ import binder "mimir:binder"
 import core "mimir:core"
 
 // C001 — Naming convention
-check_naming_convention :: proc(ctx: ^Lint_Context) {
-	walk_stmts_for_naming(ctx, ctx.module.body, true)
+
+Naming_Context :: struct {
+	lint_ctx: ^Lint_Context,
+	depth:    int,  // 0 = module level, >0 = inside func/class
 }
 
-walk_stmts_for_naming :: proc(ctx: ^Lint_Context, stmts: []parser.Stmt, is_module_level: bool) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Func_Def:
-			// Exception: dunder methods
-			if !is_dunder(s.name) && !is_snake_case(s.name) {
-				append(&ctx.diagnostics, core.Diagnostic{
-					severity = .Suggestion,
-					location = core.Location{
-						file   = ctx.file_path,
-						line   = int(s.loc.line),
-						column = int(s.loc.col),
-					},
-					what = fmt.tprintf("function '%s' should use snake_case", s.name),
-					why  = "PEP 8 recommends snake_case for function names",
-					fix  = "rename to snake_case",
-					code = "C001",
-				})
+check_naming_convention :: proc(ctx: ^Lint_Context) {
+	nc := Naming_Context{lint_ctx = ctx, depth = 0}
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			nc := cast(^Naming_Context)raw_ctx
+			lint_ctx := nc.lint_ctx
+			#partial switch s in stmt {
+			case ^parser.Func_Def:
+				if !is_dunder(s.name) && !is_snake_case(s.name) {
+					append(&lint_ctx.diagnostics, core.Diagnostic{
+						severity = .Suggestion,
+						location = core.Location{
+							file   = lint_ctx.file_path,
+							line   = int(s.loc.line),
+							column = int(s.loc.col),
+						},
+						what = fmt.tprintf("function '%s' should use snake_case", s.name),
+						why  = "PEP 8 recommends snake_case for function names",
+						fix  = "rename to snake_case",
+						code = "C001",
+					})
+				}
+				nc.depth += 1
+			case ^parser.Async_Func_Def:
+				if !is_dunder(s.name) && !is_snake_case(s.name) {
+					append(&lint_ctx.diagnostics, core.Diagnostic{
+						severity = .Suggestion,
+						location = core.Location{
+							file   = lint_ctx.file_path,
+							line   = int(s.loc.line),
+							column = int(s.loc.col),
+						},
+						what = fmt.tprintf("function '%s' should use snake_case", s.name),
+						why  = "PEP 8 recommends snake_case for function names",
+						fix  = "rename to snake_case",
+						code = "C001",
+					})
+				}
+				nc.depth += 1
+			case ^parser.Class_Def:
+				if !is_pascal_case(s.name) {
+					append(&lint_ctx.diagnostics, core.Diagnostic{
+						severity = .Suggestion,
+						location = core.Location{
+							file   = lint_ctx.file_path,
+							line   = int(s.loc.line),
+							column = int(s.loc.col),
+						},
+						what = fmt.tprintf("class '%s' should use PascalCase", s.name),
+						why  = "PEP 8 recommends PascalCase (CapWords) for class names",
+						fix  = "rename to PascalCase",
+						code = "C001",
+					})
+				}
+				nc.depth += 1
 			}
-			walk_stmts_for_naming(ctx, s.body, false)
-
-		case ^parser.Async_Func_Def:
-			if !is_dunder(s.name) && !is_snake_case(s.name) {
-				append(&ctx.diagnostics, core.Diagnostic{
-					severity = .Suggestion,
-					location = core.Location{
-						file   = ctx.file_path,
-						line   = int(s.loc.line),
-						column = int(s.loc.col),
-					},
-					what = fmt.tprintf("function '%s' should use snake_case", s.name),
-					why  = "PEP 8 recommends snake_case for function names",
-					fix  = "rename to snake_case",
-					code = "C001",
-				})
+		},
+		leave_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			nc := cast(^Naming_Context)raw_ctx
+			#partial switch _ in stmt {
+			case ^parser.Func_Def:
+				nc.depth -= 1
+			case ^parser.Async_Func_Def:
+				nc.depth -= 1
+			case ^parser.Class_Def:
+				nc.depth -= 1
 			}
-			walk_stmts_for_naming(ctx, s.body, false)
-
-		case ^parser.Class_Def:
-			if !is_pascal_case(s.name) {
-				append(&ctx.diagnostics, core.Diagnostic{
-					severity = .Suggestion,
-					location = core.Location{
-						file   = ctx.file_path,
-						line   = int(s.loc.line),
-						column = int(s.loc.col),
-					},
-					what = fmt.tprintf("class '%s' should use PascalCase", s.name),
-					why  = "PEP 8 recommends PascalCase (CapWords) for class names",
-					fix  = "rename to PascalCase",
-					code = "C001",
-				})
-			}
-			walk_stmts_for_naming(ctx, s.body, false)
-
-		case ^parser.If_Stmt:
-			walk_stmts_for_naming(ctx, s.body, is_module_level)
-			walk_stmts_for_naming(ctx, s.orelse, is_module_level)
-		case ^parser.For_Stmt:
-			walk_stmts_for_naming(ctx, s.body, is_module_level)
-		case ^parser.While_Stmt:
-			walk_stmts_for_naming(ctx, s.body, is_module_level)
-		case ^parser.With_Stmt:
-			walk_stmts_for_naming(ctx, s.body, is_module_level)
-		case ^parser.Try_Stmt:
-			walk_stmts_for_naming(ctx, s.body, is_module_level)
-			for h in s.handlers { walk_stmts_for_naming(ctx, h.body, is_module_level) }
-			walk_stmts_for_naming(ctx, s.orelse, is_module_level)
-			walk_stmts_for_naming(ctx, s.finalbody, is_module_level)
-		}
+		},
+		ctx = rawptr(&nc),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 is_snake_case :: proc(name: string) -> bool {

@@ -7,43 +7,14 @@ import core "mimir:core"
 
 // SAF006 — Regex catastrophic backtracking: nested quantifiers
 check_regex_catastrophic :: proc(ctx: ^Safety_Context) {
-	walk_stmts_regex(ctx, ctx.module.body)
-}
-
-walk_stmts_regex :: proc(ctx: ^Safety_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Expr_Stmt:
-			check_expr_regex(ctx, s.value)
-		case ^parser.Assign:
-			check_expr_regex(ctx, s.value)
-		case ^parser.Return_Stmt:
-			if s.value != nil { check_expr_regex(ctx, s.value) }
-		case ^parser.Func_Def:
-			walk_stmts_regex(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			walk_stmts_regex(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_regex(ctx, s.body)
-		case ^parser.If_Stmt:
-			check_expr_regex(ctx, s.test)
-			walk_stmts_regex(ctx, s.body)
-			walk_stmts_regex(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_regex(ctx, s.body)
-			walk_stmts_regex(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_regex(ctx, s.body)
-			walk_stmts_regex(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_regex(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_stmts_regex(ctx, s.body)
-			for h in s.handlers { walk_stmts_regex(ctx, h.body) }
-			walk_stmts_regex(ctx, s.orelse)
-			walk_stmts_regex(ctx, s.finalbody)
-		}
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			ctx := cast(^Safety_Context)raw_ctx
+			check_expr_regex(ctx, expr)
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 check_expr_regex :: proc(ctx: ^Safety_Context, expr: parser.Expr) {
@@ -170,43 +141,32 @@ has_catastrophic_backtracking :: proc(pattern: string) -> bool {
 
 // SAF007 — Sensitive data in log calls
 check_sensitive_log_data :: proc(ctx: ^Safety_Context) {
-	walk_stmts_log(ctx, ctx.module.body, true)
+	walk_stmts_log_shared(ctx, true)
 }
 
 // SAF008 — Expensive log formatting
 check_expensive_log_format :: proc(ctx: ^Safety_Context) {
-	walk_stmts_log(ctx, ctx.module.body, false)
+	walk_stmts_log_shared(ctx, false)
 }
 
-walk_stmts_log :: proc(ctx: ^Safety_Context, stmts: []parser.Stmt, sensitive_mode: bool) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Expr_Stmt:
-			check_log_call(ctx, s.value, sensitive_mode)
-		case ^parser.Func_Def:
-			walk_stmts_log(ctx, s.body, sensitive_mode)
-		case ^parser.Async_Func_Def:
-			walk_stmts_log(ctx, s.body, sensitive_mode)
-		case ^parser.Class_Def:
-			walk_stmts_log(ctx, s.body, sensitive_mode)
-		case ^parser.If_Stmt:
-			walk_stmts_log(ctx, s.body, sensitive_mode)
-			walk_stmts_log(ctx, s.orelse, sensitive_mode)
-		case ^parser.For_Stmt:
-			walk_stmts_log(ctx, s.body, sensitive_mode)
-			walk_stmts_log(ctx, s.orelse, sensitive_mode)
-		case ^parser.While_Stmt:
-			walk_stmts_log(ctx, s.body, sensitive_mode)
-			walk_stmts_log(ctx, s.orelse, sensitive_mode)
-		case ^parser.With_Stmt:
-			walk_stmts_log(ctx, s.body, sensitive_mode)
-		case ^parser.Try_Stmt:
-			walk_stmts_log(ctx, s.body, sensitive_mode)
-			for h in s.handlers { walk_stmts_log(ctx, h.body, sensitive_mode) }
-			walk_stmts_log(ctx, s.orelse, sensitive_mode)
-			walk_stmts_log(ctx, s.finalbody, sensitive_mode)
-		}
+Log_Walk_Context :: struct {
+	safety_ctx:     ^Safety_Context,
+	sensitive_mode: bool,
+}
+
+walk_stmts_log_shared :: proc(ctx: ^Safety_Context, sensitive_mode: bool) {
+	lwc := Log_Walk_Context{safety_ctx = ctx, sensitive_mode = sensitive_mode}
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			lwc := cast(^Log_Walk_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Expr_Stmt:
+				check_log_call(lwc.safety_ctx, s.value, lwc.sensitive_mode)
+			}
+		},
+		ctx = rawptr(&lwc),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 check_log_call :: proc(ctx: ^Safety_Context, expr: parser.Expr, sensitive_mode: bool) {

@@ -100,40 +100,21 @@ check_unused_variable :: proc(ctx: ^Lint_Context) {
 
 // L003 — Mutable default argument
 check_mutable_default :: proc(ctx: ^Lint_Context) {
-	walk_stmts_for_mutable_default(ctx, ctx.module.body)
-}
-
-walk_stmts_for_mutable_default :: proc(ctx: ^Lint_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Func_Def:
-			check_defaults_mutable(ctx, s.args.defaults)
-			check_defaults_mutable(ctx, s.args.kw_defaults)
-			walk_stmts_for_mutable_default(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			check_defaults_mutable(ctx, s.args.defaults)
-			check_defaults_mutable(ctx, s.args.kw_defaults)
-			walk_stmts_for_mutable_default(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_for_mutable_default(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_stmts_for_mutable_default(ctx, s.body)
-			walk_stmts_for_mutable_default(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_for_mutable_default(ctx, s.body)
-			walk_stmts_for_mutable_default(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_for_mutable_default(ctx, s.body)
-			walk_stmts_for_mutable_default(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_for_mutable_default(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_stmts_for_mutable_default(ctx, s.body)
-			for h in s.handlers { walk_stmts_for_mutable_default(ctx, h.body) }
-			walk_stmts_for_mutable_default(ctx, s.orelse)
-			walk_stmts_for_mutable_default(ctx, s.finalbody)
-		}
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			lint_ctx := cast(^Lint_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Func_Def:
+				check_defaults_mutable(lint_ctx, s.args.defaults)
+				check_defaults_mutable(lint_ctx, s.args.kw_defaults)
+			case ^parser.Async_Func_Def:
+				check_defaults_mutable(lint_ctx, s.args.defaults)
+				check_defaults_mutable(lint_ctx, s.args.kw_defaults)
+			}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 check_defaults_mutable :: proc(ctx: ^Lint_Context, defaults: []parser.Expr) {
@@ -209,100 +190,59 @@ check_fstring_no_placeholders :: proc(ctx: ^Lint_Context) {
 
 // L005 — Bare except
 check_bare_except :: proc(ctx: ^Lint_Context) {
-	walk_stmts_for_bare_except(ctx, ctx.module.body)
-}
-
-walk_stmts_for_bare_except :: proc(ctx: ^Lint_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Try_Stmt:
-			for h in s.handlers {
-				if h.type == nil {
-					append(&ctx.diagnostics, core.Diagnostic{
-						severity = .Warning,
-						location = core.Location{
-							file   = ctx.file_path,
-							line   = int(h.loc.line),
-							column = int(h.loc.col),
-						},
-						what = "bare except clause",
-						why  = "bare 'except:' catches SystemExit, KeyboardInterrupt, and GeneratorExit",
-						fix  = "use 'except Exception:' to avoid catching system-exiting exceptions",
-						code = "L005",
-					})
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			lint_ctx := cast(^Lint_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Try_Stmt:
+				for h in s.handlers {
+					if h.type == nil {
+						append(&lint_ctx.diagnostics, core.Diagnostic{
+							severity = .Warning,
+							location = core.Location{
+								file   = lint_ctx.file_path,
+								line   = int(h.loc.line),
+								column = int(h.loc.col),
+							},
+							what = "bare except clause",
+							why  = "bare 'except:' catches SystemExit, KeyboardInterrupt, and GeneratorExit",
+							fix  = "use 'except Exception:' to avoid catching system-exiting exceptions",
+							code = "L005",
+						})
+					}
 				}
 			}
-			walk_stmts_for_bare_except(ctx, s.body)
-			for h in s.handlers { walk_stmts_for_bare_except(ctx, h.body) }
-			walk_stmts_for_bare_except(ctx, s.orelse)
-			walk_stmts_for_bare_except(ctx, s.finalbody)
-		case ^parser.Func_Def:
-			walk_stmts_for_bare_except(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			walk_stmts_for_bare_except(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_for_bare_except(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_stmts_for_bare_except(ctx, s.body)
-			walk_stmts_for_bare_except(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_for_bare_except(ctx, s.body)
-			walk_stmts_for_bare_except(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_for_bare_except(ctx, s.body)
-			walk_stmts_for_bare_except(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_for_bare_except(ctx, s.body)
-		}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 // L006 — Assert with tuple
 check_assert_tuple :: proc(ctx: ^Lint_Context) {
-	walk_stmts_for_assert_tuple(ctx, ctx.module.body)
-}
-
-walk_stmts_for_assert_tuple :: proc(ctx: ^Lint_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Assert_Stmt:
-			if _, ok := s.test.(^parser.Tuple_Expr); ok {
-				append(&ctx.diagnostics, core.Diagnostic{
-					severity = .Warning,
-					location = core.Location{
-						file   = ctx.file_path,
-						line   = int(s.loc.line),
-						column = int(s.loc.col),
-					},
-					what = "assert called with a tuple",
-					why  = "assert(cond, msg) creates a tuple which is always truthy; the assertion never fails",
-					fix  = "use 'assert condition, message' without parentheses around both arguments",
-					code = "L006",
-				})
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			lint_ctx := cast(^Lint_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Assert_Stmt:
+				if _, ok := s.test.(^parser.Tuple_Expr); ok {
+					append(&lint_ctx.diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = lint_ctx.file_path,
+							line   = int(s.loc.line),
+							column = int(s.loc.col),
+						},
+						what = "assert called with a tuple",
+						why  = "assert(cond, msg) creates a tuple which is always truthy; the assertion never fails",
+						fix  = "use 'assert condition, message' without parentheses around both arguments",
+						code = "L006",
+					})
+				}
 			}
-		case ^parser.Func_Def:
-			walk_stmts_for_assert_tuple(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			walk_stmts_for_assert_tuple(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_for_assert_tuple(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_stmts_for_assert_tuple(ctx, s.body)
-			walk_stmts_for_assert_tuple(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_for_assert_tuple(ctx, s.body)
-			walk_stmts_for_assert_tuple(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_for_assert_tuple(ctx, s.body)
-			walk_stmts_for_assert_tuple(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_for_assert_tuple(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_stmts_for_assert_tuple(ctx, s.body)
-			for h in s.handlers { walk_stmts_for_assert_tuple(ctx, h.body) }
-			walk_stmts_for_assert_tuple(ctx, s.orelse)
-			walk_stmts_for_assert_tuple(ctx, s.finalbody)
-		}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 

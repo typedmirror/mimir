@@ -6,44 +6,14 @@ import core "mimir:core"
 
 // PERF003 — open().read() reads entire file into memory
 check_open_read :: proc(ctx: ^Perf_Context) {
-	walk_stmts_for_open_read(ctx, ctx.module.body)
-}
-
-walk_stmts_for_open_read :: proc(ctx: ^Perf_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Expr_Stmt:
-			check_expr_open_read(ctx, s.value)
-		case ^parser.Assign:
-			check_expr_open_read(ctx, s.value)
-		case ^parser.Ann_Assign:
-			if s.value != nil { check_expr_open_read(ctx, s.value) }
-		case ^parser.Return_Stmt:
-			if s.value != nil { check_expr_open_read(ctx, s.value) }
-		case ^parser.Func_Def:
-			walk_stmts_for_open_read(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			walk_stmts_for_open_read(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_for_open_read(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_stmts_for_open_read(ctx, s.body)
-			walk_stmts_for_open_read(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_for_open_read(ctx, s.body)
-			walk_stmts_for_open_read(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_for_open_read(ctx, s.body)
-			walk_stmts_for_open_read(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_for_open_read(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_stmts_for_open_read(ctx, s.body)
-			for h in s.handlers { walk_stmts_for_open_read(ctx, h.body) }
-			walk_stmts_for_open_read(ctx, s.orelse)
-			walk_stmts_for_open_read(ctx, s.finalbody)
-		}
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			ctx := cast(^Perf_Context)raw_ctx
+			check_expr_open_read(ctx, expr)
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 check_expr_open_read :: proc(ctx: ^Perf_Context, expr: parser.Expr) {
@@ -84,41 +54,22 @@ check_expr_open_read :: proc(ctx: ^Perf_Context, expr: parser.Expr) {
 
 // PERF004 — Unhashable @lru_cache parameter
 check_unhashable_lru_cache :: proc(ctx: ^Perf_Context) {
-	walk_stmts_for_lru_cache(ctx, ctx.module.body)
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			ctx := cast(^Perf_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Func_Def:
+				check_func_lru_cache(ctx, s.decorator_list, &s.args, s.loc)
+			case ^parser.Async_Func_Def:
+				check_func_lru_cache(ctx, s.decorator_list, &s.args, s.loc)
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 UNHASHABLE_TYPES := [?]string{"list", "dict", "set", "bytearray"}
-
-walk_stmts_for_lru_cache :: proc(ctx: ^Perf_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Func_Def:
-			check_func_lru_cache(ctx, s.decorator_list, &s.args, s.loc)
-			walk_stmts_for_lru_cache(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			check_func_lru_cache(ctx, s.decorator_list, &s.args, s.loc)
-			walk_stmts_for_lru_cache(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_for_lru_cache(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_stmts_for_lru_cache(ctx, s.body)
-			walk_stmts_for_lru_cache(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_for_lru_cache(ctx, s.body)
-			walk_stmts_for_lru_cache(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_for_lru_cache(ctx, s.body)
-			walk_stmts_for_lru_cache(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_for_lru_cache(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_stmts_for_lru_cache(ctx, s.body)
-			for h in s.handlers { walk_stmts_for_lru_cache(ctx, h.body) }
-			walk_stmts_for_lru_cache(ctx, s.orelse)
-			walk_stmts_for_lru_cache(ctx, s.finalbody)
-		}
-	}
-}
 
 check_func_lru_cache :: proc(ctx: ^Perf_Context, decorators: []parser.Expr, args: ^parser.Arguments, func_loc: parser.Src_Loc) {
 	if !has_cache_decorator(ctx, decorators) { return }

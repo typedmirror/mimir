@@ -7,95 +7,68 @@ import core "mimir:core"
 
 // SEC004 — Hardcoded secret
 check_hardcoded_secret :: proc(ctx: ^Security_Context) {
-	// Walk all statements looking for assignments with secret names + string values,
-	// and for string constants matching known API key prefixes.
-	walk_stmts_for_secrets(ctx, ctx.module.body)
-}
-
-walk_stmts_for_secrets :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Assign:
-			// Check: secret_name = "string_value"
-			if c, ok := s.value.(^parser.Constant_Expr); ok {
-				if str, s_ok := c.value.(string); s_ok {
-					if len(str) > 5 {
-						for target in s.targets {
-							if name, n_ok := target.(^parser.Name_Expr); n_ok {
-								if is_secret_variable_name(name.id) {
-									append(&ctx.diagnostics, core.Diagnostic{
-										severity = .Security,
-										location = core.Location{
-											file   = ctx.file_path,
-											line   = int(s.loc.line),
-											column = int(s.loc.col),
-										},
-										what = fmt.tprintf("hardcoded secret in variable '%s'", name.id),
-										why  = "hardcoded secrets can be extracted from source code or version control",
-										fix  = "use environment variables or a secrets manager",
-										code = "SEC004",
-									})
-								}
-							}
-						}
-					}
-				}
-			}
-
-			// Also check string values for known prefixes regardless of variable name
-			check_string_prefixes(ctx, s.value, s.loc)
-
-		case ^parser.Ann_Assign:
-			if s.value != nil {
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			ctx := cast(^Security_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Assign:
 				if c, ok := s.value.(^parser.Constant_Expr); ok {
 					if str, s_ok := c.value.(string); s_ok {
 						if len(str) > 5 {
-							if name, n_ok := s.target.(^parser.Name_Expr); n_ok {
-								if is_secret_variable_name(name.id) {
-									append(&ctx.diagnostics, core.Diagnostic{
-										severity = .Security,
-										location = core.Location{
-											file   = ctx.file_path,
-											line   = int(s.loc.line),
-											column = int(s.loc.col),
-										},
-										what = fmt.tprintf("hardcoded secret in variable '%s'", name.id),
-										why  = "hardcoded secrets can be extracted from source code or version control",
-										fix  = "use environment variables or a secrets manager",
-										code = "SEC004",
-									})
+							for target in s.targets {
+								if name, n_ok := target.(^parser.Name_Expr); n_ok {
+									if is_secret_variable_name(name.id) {
+										append(&ctx.diagnostics, core.Diagnostic{
+											severity = .Security,
+											location = core.Location{
+												file   = ctx.file_path,
+												line   = int(s.loc.line),
+												column = int(s.loc.col),
+											},
+											what = fmt.tprintf("hardcoded secret in variable '%s'", name.id),
+											why  = "hardcoded secrets can be extracted from source code or version control",
+											fix  = "use environment variables or a secrets manager",
+											code = "SEC004",
+										})
+									}
 								}
 							}
 						}
 					}
 				}
 				check_string_prefixes(ctx, s.value, s.loc)
-			}
 
-		case ^parser.Func_Def:
-			walk_stmts_for_secrets(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			walk_stmts_for_secrets(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_for_secrets(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_stmts_for_secrets(ctx, s.body)
-			walk_stmts_for_secrets(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_for_secrets(ctx, s.body)
-			walk_stmts_for_secrets(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_for_secrets(ctx, s.body)
-			walk_stmts_for_secrets(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_for_secrets(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_stmts_for_secrets(ctx, s.body)
-			for h in s.handlers { walk_stmts_for_secrets(ctx, h.body) }
-			walk_stmts_for_secrets(ctx, s.orelse)
-			walk_stmts_for_secrets(ctx, s.finalbody)
-		}
+			case ^parser.Ann_Assign:
+				if s.value != nil {
+					if c, ok := s.value.(^parser.Constant_Expr); ok {
+						if str, s_ok := c.value.(string); s_ok {
+							if len(str) > 5 {
+								if name, n_ok := s.target.(^parser.Name_Expr); n_ok {
+									if is_secret_variable_name(name.id) {
+										append(&ctx.diagnostics, core.Diagnostic{
+											severity = .Security,
+											location = core.Location{
+												file   = ctx.file_path,
+												line   = int(s.loc.line),
+												column = int(s.loc.col),
+											},
+											what = fmt.tprintf("hardcoded secret in variable '%s'", name.id),
+											why  = "hardcoded secrets can be extracted from source code or version control",
+											fix  = "use environment variables or a secrets manager",
+											code = "SEC004",
+										})
+									}
+								}
+							}
+						}
+					}
+					check_string_prefixes(ctx, s.value, s.loc)
+				}
+			}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 // Check string constants for known API key prefixes

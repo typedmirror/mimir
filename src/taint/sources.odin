@@ -14,7 +14,7 @@ check_source :: proc(ctx: ^Taint_Context, expr: parser.Expr) -> (is_source: bool
 	case ^parser.Attribute_Expr:
 		// request.args, request.form, request.json, request.data, request.values
 		if name, ok := e.value.(^parser.Name_Expr); ok {
-			if name.id == "request" {
+			if name.id == "request" || name.id == "req" {
 				switch e.attr {
 				case "args", "form", "json", "data", "values", "headers", "cookies":
 					return true, "request data"
@@ -69,8 +69,8 @@ check_call_source :: proc(ctx: ^Taint_Context, call: ^parser.Call_Expr) -> (bool
 				// os.environ.get(...)
 				if mod == "os" && f.attr == "getenv" { return true, "os.getenv()" }
 			}
-			// request.args.get(...), etc.
-			if name.id == "request" { return true, "request data" }
+			// request.args.get(...), req.json(), etc.
+			if name.id == "request" || name.id == "req" { return true, "request data" }
 		}
 		// os.environ.get(...) — nested attribute
 		if inner, ok := f.value.(^parser.Attribute_Expr); ok {

@@ -11,6 +11,8 @@ import parser "mimir:parser"
 
 AST_Visitor :: struct {
 	visit_expr: proc(expr: parser.Expr, ctx: rawptr),
+	visit_stmt: proc(stmt: parser.Stmt, ctx: rawptr),  // called BEFORE body recursion
+	leave_stmt: proc(stmt: parser.Stmt, ctx: rawptr),  // called AFTER body recursion
 	ctx:        rawptr,
 }
 
@@ -22,6 +24,7 @@ walk_all_stmts :: proc(v: ^AST_Visitor, stmts: []parser.Stmt) {
 }
 
 walk_stmt :: proc(v: ^AST_Visitor, stmt: parser.Stmt) {
+	if v.visit_stmt != nil { v.visit_stmt(stmt, v.ctx) }
 	#partial switch s in stmt {
 	case ^parser.Expr_Stmt:
 		walk_expr(v, s.value)
@@ -121,12 +124,13 @@ walk_stmt :: proc(v: ^AST_Visitor, stmt: parser.Stmt) {
 	case ^parser.Import_Stmt:
 	case ^parser.Import_From:
 	}
+	if v.leave_stmt != nil { v.leave_stmt(stmt, v.ctx) }
 }
 
 // Walk an expression tree recursively, calling visit_expr on every node.
 walk_expr :: proc(v: ^AST_Visitor, expr: parser.Expr) {
 	if expr == nil { return }
-	v.visit_expr(expr, v.ctx)
+	if v.visit_expr != nil { v.visit_expr(expr, v.ctx) }
 
 	#partial switch e in expr {
 	case ^parser.Call_Expr:

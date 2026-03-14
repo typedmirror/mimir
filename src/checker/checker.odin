@@ -148,6 +148,11 @@ check :: proc(
 		analyze_shapes(flow_result, &result, bind_result, &shape_reg, file_path, allocator)
 	}
 
+	// Route analysis pass — validate mimir.http route decorators
+	if len(virtual_imports) > 0 {
+		analyze_routes(module, bind_result, &result.registry, &virtual_imports, file_path, &result.diagnostics, allocator)
+	}
+
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
@@ -196,7 +201,7 @@ check_with_imports :: proc(
 	// Shape analysis support for multi-module mode
 	shape_reg := init_shape_registry(allocator)
 	vreg := init_virtual_registry(registry)
-	resolve_virtual_imports(&vreg, bind_result, registry, &shape_reg)
+	virtual_imports := resolve_virtual_imports(&vreg, bind_result, registry, &shape_reg)
 	shape_reg_ptr: ^Shape_Registry = nil
 	if len(shape_reg.semantics) > 0 {
 		shape_reg_ptr = &shape_reg
@@ -274,6 +279,11 @@ check_with_imports :: proc(
 	// Shape analysis pass
 	if len(shape_reg.semantics) > 0 {
 		analyze_shapes(flow_result, &result, bind_result, &shape_reg, file_path, allocator)
+	}
+
+	// Route analysis pass — validate mimir.http route decorators
+	if len(virtual_imports) > 0 {
+		analyze_routes(module, bind_result, registry, &virtual_imports, file_path, &result.diagnostics, allocator)
 	}
 
 	// D001: unused variable detection (DFG-backed)

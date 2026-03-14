@@ -90,44 +90,35 @@ scan_file :: proc(
 // Build import_map from AST import statements.
 // Maps local names to their source module.
 build_import_map :: proc(ctx: ^Security_Context) {
-	walk_imports_stmts(ctx, ctx.module.body)
-}
-
-walk_imports_stmts :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Import_Stmt:
-			for alias in s.names {
-				local := alias.asname if len(alias.asname) > 0 else alias.name
-				// For dotted imports without alias (e.g. "import os.path"), use first component
-				if len(alias.asname) == 0 {
-					for i := 0; i < len(local); i += 1 {
-						if local[i] == '.' {
-							local = local[:i]
-							break
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			ctx := cast(^Security_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Import_Stmt:
+				for alias in s.names {
+					local := alias.asname if len(alias.asname) > 0 else alias.name
+					if len(alias.asname) == 0 {
+						for i := 0; i < len(local); i += 1 {
+							if local[i] == '.' {
+								local = local[:i]
+								break
+							}
 						}
 					}
+					ctx.import_map[local] = alias.name
 				}
-				ctx.import_map[local] = alias.name
+			case ^parser.Import_From:
+				if s.level > 0 { return }
+				for alias in s.names {
+					if alias.name == "*" { continue }
+					local := alias.asname if len(alias.asname) > 0 else alias.name
+					ctx.import_map[local] = s.module
+				}
 			}
-		case ^parser.Import_From:
-			if s.level > 0 { continue } // skip relative imports
-			for alias in s.names {
-				if alias.name == "*" { continue }
-				local := alias.asname if len(alias.asname) > 0 else alias.name
-				ctx.import_map[local] = s.module
-			}
-		case ^parser.Func_Def:
-			walk_imports_stmts(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			walk_imports_stmts(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_imports_stmts(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_imports_stmts(ctx, s.body)
-			walk_imports_stmts(ctx, s.orelse)
-		}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 // Shared AST walker bridge for security rules.
@@ -195,41 +186,23 @@ resolve_call :: proc(ctx: ^Security_Context, call: ^parser.Call_Expr) -> (module
 // Build alias map from simple assignments: x = known_name or x = mod.attr.
 // Resolves variable aliasing so that e = eval; e(code) is detected.
 build_alias_map :: proc(ctx: ^Security_Context) {
-	walk_alias_stmts(ctx, ctx.module.body)
-}
-
-walk_alias_stmts :: proc(ctx: ^Security_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Assign:
-			if len(s.targets) == 1 {
-				if target, ok := s.targets[0].(^parser.Name_Expr); ok {
-					if !resolve_alias_rhs(ctx, target.id, s.value) {
-						// RHS is not an alias — invalidate any stale alias for this name
-						delete_key(&ctx.name_aliases, target.id)
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			ctx := cast(^Security_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Assign:
+				if len(s.targets) == 1 {
+					if target, ok := s.targets[0].(^parser.Name_Expr); ok {
+						if !resolve_alias_rhs(ctx, target.id, s.value) {
+							delete_key(&ctx.name_aliases, target.id)
+						}
 					}
 				}
 			}
-		case ^parser.Func_Def:
-			walk_alias_stmts(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			walk_alias_stmts(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_alias_stmts(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_alias_stmts(ctx, s.body)
-			walk_alias_stmts(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_alias_stmts(ctx, s.body)
-		case ^parser.While_Stmt:
-			walk_alias_stmts(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_alias_stmts(ctx, s.body)
-			for h in s.handlers { walk_alias_stmts(ctx, h.body) }
-		case ^parser.With_Stmt:
-			walk_alias_stmts(ctx, s.body)
-		}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 resolve_alias_rhs :: proc(ctx: ^Security_Context, target_name: string, value: parser.Expr) -> bool {

@@ -62,109 +62,79 @@ check_weak_hash :: proc(ctx: ^Security_Context) {
 
 // SEC002 — Insecure randomness for security-sensitive values
 check_insecure_random :: proc(ctx: ^Security_Context) {
-	// Walk assignments to find: token = random.choice(...)
-	for stmt in ctx.module.body {
-		walk_assign_random(ctx, stmt)
-	}
-}
-
-walk_assign_random :: proc(ctx: ^Security_Context, stmt: parser.Stmt) {
-	#partial switch s in stmt {
-	case ^parser.Assign:
-		// Check if value is a random.* call
-		if call, ok := s.value.(^parser.Call_Expr); ok {
-			mod, func_name := resolve_call(ctx, call)
-			if mod == "random" {
-				check_insecure_random_call(ctx, call, mod, func_name)
-
-				// Check if target has a security-relevant name
-				for target in s.targets {
-					if name, n_ok := target.(^parser.Name_Expr); n_ok {
-						if is_security_name(name.id) {
-							append(&ctx.diagnostics, core.Diagnostic{
-								severity = .Security,
-								location = core.Location{
-									file   = ctx.file_path,
-									line   = int(call.loc.line),
-									column = int(call.loc.col),
-								},
-								what = fmt.tprintf("insecure random used for security-sensitive value '%s'", name.id),
-								why  = "the 'random' module uses a predictable PRNG not suitable for security",
-								fix  = "use secrets.token_hex(), secrets.token_urlsafe(), or secrets.token_bytes()",
-								code = "SEC002",
-							})
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			ctx := cast(^Security_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Assign:
+				if call, ok := s.value.(^parser.Call_Expr); ok {
+					mod, func_name := resolve_call(ctx, call)
+					if mod == "random" {
+						check_insecure_random_call(ctx, call, mod, func_name)
+						for target in s.targets {
+							if name, n_ok := target.(^parser.Name_Expr); n_ok {
+								if is_security_name(name.id) {
+									append(&ctx.diagnostics, core.Diagnostic{
+										severity = .Security,
+										location = core.Location{
+											file   = ctx.file_path,
+											line   = int(call.loc.line),
+											column = int(call.loc.col),
+										},
+										what = fmt.tprintf("insecure random used for security-sensitive value '%s'", name.id),
+										why  = "the 'random' module uses a predictable PRNG not suitable for security",
+										fix  = "use secrets.token_hex(), secrets.token_urlsafe(), or secrets.token_bytes()",
+										code = "SEC002",
+									})
+								}
+							}
+						}
+					}
+					for arg in call.args {
+						if arg_call, a_ok := arg.(^parser.Call_Expr); a_ok {
+							amod, afn := resolve_call(ctx, arg_call)
+							if amod == "random" {
+								check_insecure_random_call(ctx, arg_call, amod, afn)
+							}
+						}
+					}
+				}
+			case ^parser.Aug_Assign:
+				if call, ok := s.value.(^parser.Call_Expr); ok {
+					mod, func_name := resolve_call(ctx, call)
+					if mod == "random" {
+						check_insecure_random_call(ctx, call, mod, func_name)
+					}
+				}
+			case ^parser.Return_Stmt:
+				if s.value != nil {
+					if call, ok := s.value.(^parser.Call_Expr); ok {
+						mod, func_name := resolve_call(ctx, call)
+						if mod == "random" {
+							check_insecure_random_call(ctx, call, mod, func_name)
+						}
+					}
+				}
+			case ^parser.Expr_Stmt:
+				if call, ok := s.value.(^parser.Call_Expr); ok {
+					mod, func_name := resolve_call(ctx, call)
+					if mod == "random" {
+						check_insecure_random_call(ctx, call, mod, func_name)
+					}
+					for arg in call.args {
+						if arg_call, a_ok := arg.(^parser.Call_Expr); a_ok {
+							amod, afn := resolve_call(ctx, arg_call)
+							if amod == "random" {
+								check_insecure_random_call(ctx, arg_call, amod, afn)
+							}
 						}
 					}
 				}
 			}
-			// Check random.* calls in function arguments: x = foo(random.choice(...))
-			for arg in call.args {
-				if arg_call, a_ok := arg.(^parser.Call_Expr); a_ok {
-					amod, afn := resolve_call(ctx, arg_call)
-					if amod == "random" {
-						check_insecure_random_call(ctx, arg_call, amod, afn)
-					}
-				}
-			}
-		}
-	case ^parser.Aug_Assign:
-		// x += random.randint(...)
-		if call, ok := s.value.(^parser.Call_Expr); ok {
-			mod, func_name := resolve_call(ctx, call)
-			if mod == "random" {
-				check_insecure_random_call(ctx, call, mod, func_name)
-			}
-		}
-	case ^parser.Return_Stmt:
-		// return random.choice(...)
-		if s.value != nil {
-			if call, ok := s.value.(^parser.Call_Expr); ok {
-				mod, func_name := resolve_call(ctx, call)
-				if mod == "random" {
-					check_insecure_random_call(ctx, call, mod, func_name)
-				}
-			}
-		}
-	case ^parser.Expr_Stmt:
-		// Standalone call: random.choice(items)
-		if call, ok := s.value.(^parser.Call_Expr); ok {
-			mod, func_name := resolve_call(ctx, call)
-			if mod == "random" {
-				check_insecure_random_call(ctx, call, mod, func_name)
-			}
-			// Also check random.* calls nested in function arguments
-			for arg in call.args {
-				if arg_call, a_ok := arg.(^parser.Call_Expr); a_ok {
-					amod, afn := resolve_call(ctx, arg_call)
-					if amod == "random" {
-						check_insecure_random_call(ctx, arg_call, amod, afn)
-					}
-				}
-			}
-		}
-	case ^parser.Func_Def:
-		for st in s.body { walk_assign_random(ctx, st) }
-	case ^parser.Async_Func_Def:
-		for st in s.body { walk_assign_random(ctx, st) }
-	case ^parser.Class_Def:
-		for st in s.body { walk_assign_random(ctx, st) }
-	case ^parser.If_Stmt:
-		for st in s.body { walk_assign_random(ctx, st) }
-		for st in s.orelse { walk_assign_random(ctx, st) }
-	case ^parser.For_Stmt:
-		for st in s.body { walk_assign_random(ctx, st) }
-		for st in s.orelse { walk_assign_random(ctx, st) }
-	case ^parser.While_Stmt:
-		for st in s.body { walk_assign_random(ctx, st) }
-		for st in s.orelse { walk_assign_random(ctx, st) }
-	case ^parser.With_Stmt:
-		for st in s.body { walk_assign_random(ctx, st) }
-	case ^parser.Try_Stmt:
-		for st in s.body { walk_assign_random(ctx, st) }
-		for h in s.handlers { for st in h.body { walk_assign_random(ctx, st) } }
-		for st in s.orelse { walk_assign_random(ctx, st) }
-		for st in s.finalbody { walk_assign_random(ctx, st) }
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 // Helper: check if a random.* call uses an insecure function (for SEC002 in non-assign contexts)

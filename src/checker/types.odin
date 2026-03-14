@@ -163,6 +163,8 @@ Type_Registry :: struct {
 	spec_cache:     map[u64]Spec_Cache_Entry,
 	tensor_cache:   map[u64]Type_ID,
 	overload_sigs:  map[binder.Symbol_ID][dynamic]Type_ID,
+	http_request_type:  Type_ID,   // Instance_Type for mimir.http.Request (0 if not registered)
+	http_response_type: Type_ID,   // Instance_Type for mimir.http.Response (0 if not registered)
 	allocator:      mem.Allocator,
 }
 

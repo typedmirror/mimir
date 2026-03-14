@@ -30,6 +30,9 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.array
 	register_mimir_array(&vreg, reg)
 
+	// Register mimir.http
+	register_mimir_http(&vreg, reg)
+
 	return vreg
 }
 
@@ -213,5 +216,147 @@ register_mimir_array :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 		name             = "mimir.array",
 		exports          = exports,
 		shape_semantics  = shape_sems,
+	}
+}
+
+// ==================== mimir.http ====================
+
+register_mimir_http :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 16, reg.allocator)
+
+	dict_str_str := make_dict_type(reg, TYPE_STR, TYPE_STR)
+	dict_str_any := make_dict_type(reg, TYPE_STR, TYPE_ANY)
+
+	// ---- Request class ----
+	req_attrs := make(map[string]Type_ID, 12, reg.allocator)
+	req_attrs["method"]       = TYPE_STR
+	req_attrs["path"]         = TYPE_STR
+	req_attrs["query_string"] = TYPE_STR
+	req_attrs["headers"]      = dict_str_str
+	req_attrs["cookies"]      = dict_str_str
+	req_attrs["args"]         = dict_str_str
+	req_attrs["form"]         = dict_str_str
+	req_attrs["data"]         = TYPE_BYTES
+	req_attrs["json"]         = make_callable_type(reg, {}, dict_str_any)
+	req_attrs["text"]         = make_callable_type(reg, {}, TYPE_STR)
+
+	request_class := register_type(reg, Class_Type{
+		name  = "Request",
+		attrs = req_attrs,
+	})
+	request_instance := make_instance_type(reg, request_class)
+	exports["Request"] = request_class
+
+	// ---- Response class ----
+	// Register placeholder first, then update attrs in-place (methods return Response)
+	resp_attrs := make(map[string]Type_ID, 10, reg.allocator)
+	resp_attrs["status_code"] = TYPE_INT
+	resp_attrs["body"]        = TYPE_BYTES
+	resp_attrs["headers"]     = dict_str_str
+
+	response_class := register_type(reg, Class_Type{
+		name  = "Response",
+		attrs = resp_attrs,
+	})
+	response_instance := make_instance_type(reg, response_class)
+	exports["Response"] = response_class
+
+	// Add methods that return Response — update the registered type in-place
+	resp_type := get_type(reg, response_class)
+	if resp_type != nil {
+		if ct, ok := &resp_type.info.(Class_Type); ok {
+			ct.attrs["json"] = make_callable_type(reg,
+				{Param_Type{name = "data", type_id = dict_str_any}},
+				response_instance,
+			)
+			ct.attrs["html"] = make_callable_type(reg,
+				{Param_Type{name = "content", type_id = TYPE_STR}},
+				response_instance,
+			)
+			ct.attrs["text"] = make_callable_type(reg,
+				{Param_Type{name = "content", type_id = TYPE_STR}},
+				response_instance,
+			)
+			ct.attrs["redirect"] = make_callable_type(reg,
+				{
+					Param_Type{name = "url", type_id = TYPE_STR},
+					Param_Type{name = "status", type_id = TYPE_INT, has_default = true},
+				},
+				response_instance,
+			)
+		}
+	}
+
+	// ---- serve() ----
+	exports["serve"] = make_callable_type(reg,
+		{
+			Param_Type{name = "port", type_id = TYPE_INT, has_default = true},
+			Param_Type{name = "host", type_id = TYPE_STR, has_default = true},
+		},
+		TYPE_NONE,
+	)
+
+	// ---- route() decorator factory ----
+	// route(method, path) -> Callable (decorator)
+	// Returns a callable that takes a function and returns a function
+	decorator_type := make_callable_type(reg,
+		{Param_Type{name = "func", type_id = TYPE_ANY}},
+		TYPE_ANY,
+	)
+	exports["route"] = make_callable_type(reg,
+		{
+			Param_Type{name = "method", type_id = TYPE_STR},
+			Param_Type{name = "path",   type_id = TYPE_STR},
+		},
+		decorator_type,
+	)
+
+	// ---- websocket decorator ----
+	exports["websocket"] = make_callable_type(reg,
+		{Param_Type{name = "func", type_id = TYPE_ANY}},
+		TYPE_ANY,
+	)
+
+	// ---- HTTP client functions ----
+	// All return Response instances
+	header_param := Param_Type{name = "headers", type_id = dict_str_str, has_default = true}
+	timeout_param := Param_Type{name = "timeout", type_id = TYPE_FLOAT, has_default = true}
+
+	exports["get"] = make_callable_type(reg,
+		{
+			Param_Type{name = "url", type_id = TYPE_STR},
+			header_param,
+			timeout_param,
+		},
+		response_instance,
+	)
+
+	body_params := []Param_Type{
+		Param_Type{name = "url",     type_id = TYPE_STR},
+		Param_Type{name = "json",    type_id = dict_str_any, has_default = true},
+		Param_Type{name = "data",    type_id = TYPE_BYTES, has_default = true},
+		header_param,
+		timeout_param,
+	}
+	exports["post"]   = make_callable_type(reg, body_params, response_instance)
+	exports["put"]    = make_callable_type(reg, body_params, response_instance)
+	exports["delete"] = make_callable_type(reg,
+		{
+			Param_Type{name = "url", type_id = TYPE_STR},
+			header_param,
+			timeout_param,
+		},
+		response_instance,
+	)
+	exports["patch"] = make_callable_type(reg, body_params, response_instance)
+
+	// Store Request/Response instance type IDs for route validation
+	// (accessed via the registry's http_request_type / http_response_type)
+	reg.http_request_type  = request_instance
+	reg.http_response_type = response_instance
+
+	vreg.modules["mimir.http"] = Virtual_Module{
+		name    = "mimir.http",
+		exports = exports,
 	}
 }

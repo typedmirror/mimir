@@ -6,38 +6,19 @@ import core "mimir:core"
 
 // SAF009 — Mutable default argument
 check_mutable_default :: proc(ctx: ^Safety_Context) {
-	walk_stmts_mutable_default(ctx, ctx.module.body)
-}
-
-walk_stmts_mutable_default :: proc(ctx: ^Safety_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Func_Def:
-			check_func_defaults(ctx, &s.args)
-			walk_stmts_mutable_default(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			check_func_defaults(ctx, &s.args)
-			walk_stmts_mutable_default(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_mutable_default(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_stmts_mutable_default(ctx, s.body)
-			walk_stmts_mutable_default(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_mutable_default(ctx, s.body)
-			walk_stmts_mutable_default(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_mutable_default(ctx, s.body)
-			walk_stmts_mutable_default(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_mutable_default(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_stmts_mutable_default(ctx, s.body)
-			for h in s.handlers { walk_stmts_mutable_default(ctx, h.body) }
-			walk_stmts_mutable_default(ctx, s.orelse)
-			walk_stmts_mutable_default(ctx, s.finalbody)
-		}
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			ctx := cast(^Safety_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Func_Def:
+				check_func_defaults(ctx, &s.args)
+			case ^parser.Async_Func_Def:
+				check_func_defaults(ctx, &s.args)
+			}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 check_func_defaults :: proc(ctx: ^Safety_Context, args: ^parser.Arguments) {

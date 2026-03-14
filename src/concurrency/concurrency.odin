@@ -56,66 +56,54 @@ analyze_concurrency :: proc(
 
 // Pass 1: collect imports and async function names
 collect_context :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Import_Stmt:
-			for alias in s.names {
-				local := alias.asname if len(alias.asname) > 0 else alias.name
-				if len(alias.asname) == 0 {
-					for i := 0; i < len(local); i += 1 {
-						if local[i] == '.' {
-							local = local[:i]
-							break
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			ctx := cast(^Concurrency_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Import_Stmt:
+				for alias in s.names {
+					local := alias.asname if len(alias.asname) > 0 else alias.name
+					if len(alias.asname) == 0 {
+						for i := 0; i < len(local); i += 1 {
+							if local[i] == '.' {
+								local = local[:i]
+								break
+							}
 						}
 					}
+					ctx.import_map[local] = alias.name
 				}
-				ctx.import_map[local] = alias.name
+			case ^parser.Import_From:
+				if s.level > 0 { return }
+				for alias in s.names {
+					if alias.name == "*" { continue }
+					local := alias.asname if len(alias.asname) > 0 else alias.name
+					ctx.import_map[local] = s.module
+				}
+			case ^parser.Async_Func_Def:
+				ctx.async_funcs[s.name] = s.loc
 			}
-		case ^parser.Import_From:
-			if s.level > 0 { continue }
-			for alias in s.names {
-				if alias.name == "*" { continue }
-				local := alias.asname if len(alias.asname) > 0 else alias.name
-				ctx.import_map[local] = s.module
-			}
-		case ^parser.Async_Func_Def:
-			ctx.async_funcs[s.name] = s.loc
-			collect_context(ctx, s.body)
-		case ^parser.Func_Def:
-			collect_context(ctx, s.body)
-		case ^parser.Class_Def:
-			collect_context(ctx, s.body)
-		case ^parser.If_Stmt:
-			collect_context(ctx, s.body)
-			collect_context(ctx, s.orelse)
-		}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, stmts)
 }
 
-// Collect global declarations recursively (into if/for/while/with/try blocks)
+// Collect global declarations recursively
 collect_globals :: proc(stmts: []parser.Stmt, globals: ^[dynamic]string) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Global_Stmt:
-			for name in s.names {
-				append(globals, name)
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			globals := cast(^[dynamic]string)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Global_Stmt:
+				for name in s.names {
+					append(globals, name)
+				}
 			}
-		case ^parser.If_Stmt:
-			collect_globals(s.body, globals)
-			collect_globals(s.orelse, globals)
-		case ^parser.For_Stmt:
-			collect_globals(s.body, globals)
-		case ^parser.While_Stmt:
-			collect_globals(s.body, globals)
-		case ^parser.With_Stmt:
-			collect_globals(s.body, globals)
-		case ^parser.Try_Stmt:
-			collect_globals(s.body, globals)
-			for h in s.handlers { collect_globals(h.body, globals) }
-			collect_globals(s.orelse, globals)
-			collect_globals(s.finalbody, globals)
-		}
+		},
+		ctx = rawptr(globals),
 	}
+	core.walk_all_stmts(&visitor, stmts)
 }
 
 // Pass 2: walk statements applying all rules.

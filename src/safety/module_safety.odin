@@ -55,40 +55,19 @@ check_import_side_effect :: proc(ctx: ^Safety_Context) {
 
 // SAF004 — Monkey-patching: attribute assignment on imported modules
 check_monkey_patch :: proc(ctx: ^Safety_Context) {
-	walk_stmts_monkey_patch(ctx, ctx.module.body)
-}
-
-walk_stmts_monkey_patch :: proc(ctx: ^Safety_Context, stmts: []parser.Stmt) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Assign:
-			for target in s.targets {
-				check_monkey_patch_target(ctx, target)
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			ctx := cast(^Safety_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Assign:
+				for target in s.targets {
+					check_monkey_patch_target(ctx, target)
+				}
 			}
-		case ^parser.Func_Def:
-			walk_stmts_monkey_patch(ctx, s.body)
-		case ^parser.Async_Func_Def:
-			walk_stmts_monkey_patch(ctx, s.body)
-		case ^parser.Class_Def:
-			walk_stmts_monkey_patch(ctx, s.body)
-		case ^parser.If_Stmt:
-			walk_stmts_monkey_patch(ctx, s.body)
-			walk_stmts_monkey_patch(ctx, s.orelse)
-		case ^parser.For_Stmt:
-			walk_stmts_monkey_patch(ctx, s.body)
-			walk_stmts_monkey_patch(ctx, s.orelse)
-		case ^parser.While_Stmt:
-			walk_stmts_monkey_patch(ctx, s.body)
-			walk_stmts_monkey_patch(ctx, s.orelse)
-		case ^parser.With_Stmt:
-			walk_stmts_monkey_patch(ctx, s.body)
-		case ^parser.Try_Stmt:
-			walk_stmts_monkey_patch(ctx, s.body)
-			for h in s.handlers { walk_stmts_monkey_patch(ctx, h.body) }
-			walk_stmts_monkey_patch(ctx, s.orelse)
-			walk_stmts_monkey_patch(ctx, s.finalbody)
-		}
+		},
+		ctx = rawptr(ctx),
 	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
 check_monkey_patch_target :: proc(ctx: ^Safety_Context, target: parser.Expr) {
@@ -176,51 +155,46 @@ is_mutable_literal :: proc(expr: parser.Expr) -> bool {
 	return false
 }
 
+Mutation_Walk_Context :: struct {
+	safety_ctx: ^Safety_Context,
+	mutables:   []Module_Mutable,
+}
+
 check_mutations_in_body :: proc(ctx: ^Safety_Context, stmts: []parser.Stmt, mutables: []Module_Mutable) {
-	for stmt in stmts {
-		#partial switch s in stmt {
-		case ^parser.Assign:
-			// Check x[key] = val  (subscript assign)
-			for target in s.targets {
-				if sub, is_sub := target.(^parser.Subscript_Expr); is_sub {
-					if name, is_name := sub.value.(^parser.Name_Expr); is_name {
-						if is_module_mutable(name.id, mutables) {
-							emit_mutation(ctx, name.id, sub.loc)
+	mwc := Mutation_Walk_Context{safety_ctx = ctx, mutables = mutables}
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			mwc := cast(^Mutation_Walk_Context)raw_ctx
+			ctx := mwc.safety_ctx
+			mutables := mwc.mutables
+			#partial switch s in stmt {
+			case ^parser.Assign:
+				for target in s.targets {
+					if sub, is_sub := target.(^parser.Subscript_Expr); is_sub {
+						if name, is_name := sub.value.(^parser.Name_Expr); is_name {
+							if is_module_mutable(name.id, mutables) {
+								emit_mutation(ctx, name.id, sub.loc)
+							}
 						}
 					}
 				}
-			}
-		case ^parser.Expr_Stmt:
-			// Check x.append(...), x.update(...), etc.
-			if call, is_call := s.value.(^parser.Call_Expr); is_call {
-				if attr, is_attr := call.func.(^parser.Attribute_Expr); is_attr {
-					if is_mutating_method(attr.attr) {
-						if name, is_name := attr.value.(^parser.Name_Expr); is_name {
-							if is_module_mutable(name.id, mutables) {
-								emit_mutation(ctx, name.id, call.loc)
+			case ^parser.Expr_Stmt:
+				if call, is_call := s.value.(^parser.Call_Expr); is_call {
+					if attr, is_attr := call.func.(^parser.Attribute_Expr); is_attr {
+						if is_mutating_method(attr.attr) {
+							if name, is_name := attr.value.(^parser.Name_Expr); is_name {
+								if is_module_mutable(name.id, mutables) {
+									emit_mutation(ctx, name.id, call.loc)
+								}
 							}
 						}
 					}
 				}
 			}
-		case ^parser.If_Stmt:
-			check_mutations_in_body(ctx, s.body, mutables)
-			check_mutations_in_body(ctx, s.orelse, mutables)
-		case ^parser.For_Stmt:
-			check_mutations_in_body(ctx, s.body, mutables)
-			check_mutations_in_body(ctx, s.orelse, mutables)
-		case ^parser.While_Stmt:
-			check_mutations_in_body(ctx, s.body, mutables)
-			check_mutations_in_body(ctx, s.orelse, mutables)
-		case ^parser.With_Stmt:
-			check_mutations_in_body(ctx, s.body, mutables)
-		case ^parser.Try_Stmt:
-			check_mutations_in_body(ctx, s.body, mutables)
-			for h in s.handlers { check_mutations_in_body(ctx, h.body, mutables) }
-			check_mutations_in_body(ctx, s.orelse, mutables)
-			check_mutations_in_body(ctx, s.finalbody, mutables)
-		}
+		},
+		ctx = rawptr(&mwc),
 	}
+	core.walk_all_stmts(&visitor, stmts)
 }
 
 is_module_mutable :: proc(name: string, mutables: []Module_Mutable) -> bool {
