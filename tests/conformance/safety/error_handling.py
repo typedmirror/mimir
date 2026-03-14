@@ -4,26 +4,26 @@
 # SAF001: exception silently swallowed
 try:
     x = int("abc")
-except ValueError:
+except ValueError:  # E
     pass  # SAF001
 
 # SAF001: nested try
 def process():
     try:
         data = open("f.txt")
-    except IOError:
+    except IOError:  # E
         pass  # SAF001
 
 # SAF002: overly broad except
 try:
     y = 1 / 0
-except Exception:  # SAF002
+except Exception:  # SAF002  # E
     y = 0
 
 # SAF002: BaseException
 try:
     z = 1
-except BaseException:  # SAF002
+except BaseException:  # SAF002  # E
     z = 0
 
 # OK: specific exception with handling

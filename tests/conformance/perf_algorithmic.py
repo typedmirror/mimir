@@ -14,13 +14,13 @@ Actual PERF rule detection is verified via 'mimir perf'.
 result = ""
 items = [1, 2, 3]
 for item in items:
-    result += str(item)
+    result += str(item)  # E
 
 # Detection: += on string-initialized variable in while loop
 msg = ""
 i = 0
 while i < 10:
-    msg += "x"
+    msg += "x"  # E
     i += 1
 
 # Safe: int += in loop (not string)
@@ -43,16 +43,16 @@ for item in items:
 data = [1, -2, 3, -4, 5]
 
 # Detection: sum([...])
-total = sum([x * x for x in data])
+total = sum([x * x for x in data])  # E
 
 # Detection: any([...])
-has_neg = any([x < 0 for x in data])
+has_neg = any([x < 0 for x in data])  # E
 
 # Detection: sorted([...])
-ordered = sorted([x for x in data])
+ordered = sorted([x for x in data])  # E
 
 # Detection: "".join([...])
-text = ",".join([str(x) for x in data])
+text = ",".join([str(x) for x in data])  # E
 
 # Safe: generator expression (already optimal)
 total2 = sum(x * x for x in data)

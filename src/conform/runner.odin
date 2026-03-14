@@ -2,6 +2,7 @@ package conform
 
 import "core:mem"
 import "core:os"
+import "core:strings"
 
 import "mimir:core"
 import "mimir:parser"
@@ -9,6 +10,10 @@ import "mimir:binder"
 import "mimir:flow"
 import "mimir:checker"
 import "mimir:concurrency"
+import "mimir:lint"
+import "mimir:security"
+import "mimir:perf"
+import "mimir:safety"
 
 Conform_File_Result :: struct {
 	file:            string,
@@ -100,6 +105,48 @@ run_conform_file :: proc(
 		conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, source_str, file, arena.allocator)
 		for d in conc_diagnostics {
 			if d.severity == .Error {
+				error_lines[d.location.line] = true
+			}
+		}
+
+		// Analysis passes — only run on matching test files to avoid noise
+		basename := file
+		for i := len(file) - 1; i >= 0; i -= 1 {
+			if file[i] == '/' { basename = file[i+1:]; break }
+		}
+
+		// Lint: lint_*.py
+		if strings.has_prefix(basename, "lint_") {
+			lint_config := lint.default_config()
+			lint_diagnostics := lint.lint_file(module, &bind_result, source_str, file, &lint_config, arena.allocator)
+			for d in lint_diagnostics {
+				error_lines[d.location.line] = true
+			}
+		}
+
+		// Security + taint: sec_*.py, taint_*.py
+		if strings.has_prefix(basename, "sec_") || strings.has_prefix(basename, "taint_") {
+			sec_config := security.default_config()
+			sec_diagnostics := security.scan_file(module, &bind_result, source_str, file, &sec_config, arena.allocator, &flow_result)
+			for d in sec_diagnostics {
+				error_lines[d.location.line] = true
+			}
+		}
+
+		// Performance: perf_*.py
+		if strings.has_prefix(basename, "perf_") {
+			perf_config := perf.default_config()
+			perf_diagnostics := perf.analyze_performance(module, &bind_result, source_str, file, &perf_config, arena.allocator)
+			for d in perf_diagnostics {
+				error_lines[d.location.line] = true
+			}
+		}
+
+		// Safety: safety_*.py or in safety/ directory
+		if strings.has_prefix(basename, "safety_") || strings.contains(file, "/safety/") {
+			safety_config := safety.default_config()
+			safety_diagnostics := safety.analyze_safety(module, &bind_result, file, &safety_config, arena.allocator)
+			for d in safety_diagnostics {
 				error_lines[d.location.line] = true
 			}
 		}

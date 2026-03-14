@@ -9,15 +9,15 @@ logger = logging.getLogger()
 def test_logging():
     # SAF007: sensitive data in logs
     password = "secret123"
-    logger.info(f"Login with password: {password}")  # SAF007
+    logger.info(f"Login with password: {password}")  # SAF007  # E
 
     # SAF007: token in log
     api_token = "abc"
-    logger.warning(f"Using api_token: {api_token}")  # SAF007
+    logger.warning(f"Using api_token: {api_token}")  # SAF007  # E
 
     # SAF008: expensive formatting in debug
     huge_object = {"key": "value"}
-    logger.debug(f"Data: {json.dumps(huge_object)}")  # SAF008
+    logger.debug(f"Data: {json.dumps(huge_object)}")  # SAF008  # E
 
     # OK: no sensitive names
     username = "alice"

@@ -11,10 +11,10 @@ Actual PERF rule detection is verified via 'mimir perf'.
 # --- PERF003: open().read() ---
 
 # Detection: chained open().read()
-data = open("file.txt").read()
+data = open("file.txt").read()  # E
 
 # Detection: chained open().readlines()
-lines = open("file.txt").readlines()
+lines = open("file.txt").readlines()  # E
 
 # Safe: separate variable (not chained call pattern)
 f = open("file.txt")
@@ -26,17 +26,17 @@ from functools import lru_cache, cache
 
 # Detection: list param with @lru_cache
 @lru_cache
-def process(data: list):
+def process(data: list):  # E
     return sum(data)
 
 # Detection: dict param with @lru_cache(maxsize=128)
 @lru_cache(maxsize=128)
-def transform(items: dict):
+def transform(items: dict):  # E
     return len(items)
 
 # Detection: set param with @cache
 @cache
-def unique(values: set):
+def unique(values: set):  # E
     return len(values)
 
 # Safe: hashable param types

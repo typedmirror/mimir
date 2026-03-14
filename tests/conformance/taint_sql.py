@@ -5,7 +5,7 @@ cursor = None  # simulate a DB cursor
 # Tainted query via f-string
 name = input("Name: ")
 query = f"SELECT * FROM users WHERE name = '{name}'"
-cursor.execute(query)   # SEC012: input() → f-string → execute()
+cursor.execute(query)   # SEC012: input() → f-string → execute()  # E
 
 # Parameterized query — should NOT flag
 safe_name = input("Name: ")
