@@ -65,6 +65,39 @@ check :: proc(
 	// Post-check: backfill inferred return types into Callable_Types
 	backfill_inferred_returns(&result, bind_result)
 
+	// Cross-function fixpoint: if returns were inferred, re-check FUNCTION scopes
+	// that may reference updated callable types. Skip module scope — re-running it
+	// would rebuild callable types from annotations, overwriting backfilled returns.
+	if len(result.inferred_returns) > 0 {
+		for &cfg in flow_result.cfgs {
+			scope := binder.result_get_scope(bind_result, cfg.scope_id)
+			if scope == nil { continue }
+			// Only re-check function/lambda scopes, not module/class
+			if scope.kind != .Function && scope.kind != .Lambda { continue }
+
+			declared_return := TYPE_UNKNOWN
+			if ret, ok := return_type_map[cfg.scope_id]; ok {
+				declared_return = ret
+			}
+			// Skip functions with explicit return annotations — they don't benefit
+			if declared_return != TYPE_UNKNOWN { continue }
+
+			check_scope(
+				&cfg,
+				bind_result,
+				flow_result,
+				result    = &result,
+				builtins  = &builtins,
+				file_path = file_path,
+				declared_return = declared_return,
+				func_args_map = &func_args_map,
+			)
+		}
+
+		// Second backfill — pick up any newly inferred returns from the refinement
+		backfill_inferred_returns(&result, bind_result)
+	}
+
 	// Re-validate module-level assignments against updated return types
 	if len(result.inferred_returns) > 0 {
 		revalidate_module_calls(module.body, &result, bind_result, &builtins, file_path)
@@ -132,6 +165,36 @@ check_with_imports :: proc(
 
 	backfill_inferred_returns(&result, bind_result)
 
+	// Cross-function fixpoint refinement pass
+	if len(result.inferred_returns) > 0 {
+		for &cfg in flow_result.cfgs {
+			scope := binder.result_get_scope(bind_result, cfg.scope_id)
+			if scope == nil { continue }
+			if scope.kind != .Function && scope.kind != .Lambda { continue }
+
+			declared_return := TYPE_UNKNOWN
+			if ret, ok := return_type_map[cfg.scope_id]; ok {
+				declared_return = ret
+			}
+			if declared_return != TYPE_UNKNOWN { continue }
+
+			check_scope(
+				&cfg,
+				bind_result,
+				flow_result,
+				result        = &result,
+				builtins      = builtins,
+				file_path     = file_path,
+				declared_return = declared_return,
+				func_args_map = &func_args_map,
+				reg_override  = registry,
+				import_types  = &local_import_types,
+			)
+		}
+
+		backfill_inferred_returns(&result, bind_result)
+	}
+
 	if len(result.inferred_returns) > 0 {
 		revalidate_module_calls(module.body, &result, bind_result, builtins, file_path)
 	}
@@ -198,6 +261,12 @@ check_scope :: proc(
 	// Track declared annotation types across blocks (for reassignment checking)
 	declared_types := make(map[binder.Symbol_ID]Type_ID, 16, reg.allocator)
 
+	// Set global_types for non-module scopes (LEGB "G" fallback)
+	global_types_ptr: ^map[binder.Symbol_ID]Type_ID = nil
+	if scope != nil && scope.kind != .Module {
+		global_types_ptr = &result.symbol_types
+	}
+
 	// BFS walk from entry
 	visited := make([]bool, n_blocks, reg.allocator)
 	queue := make([dynamic]flow.Block_ID, 0, n_blocks, reg.allocator)
@@ -246,6 +315,7 @@ check_scope :: proc(
 			declared_types = &declared_types,
 			current_class  = current_class,
 			scope_id       = cfg.scope_id,
+			global_types   = global_types_ptr,
 		}
 
 		// Process each statement in the block
@@ -274,7 +344,7 @@ check_scope :: proc(
 	if len(unknown_params) > 0 {
 		// Collect usage constraints from the function body
 		cs := collect_scope_constraints(cfg, bind_result, reg, envs[:],
-			&result.expr_types, unknown_params[:], reg.allocator)
+			&result.expr_types, &result.symbol_types, unknown_params[:], reg.allocator)
 
 		// Initialize method table (cached on registry via lazy init)
 		mt := init_method_table(reg)
@@ -338,6 +408,7 @@ check_scope :: proc(
 					declared_types = &declared_types,
 					current_class  = current_class,
 					scope_id       = cfg.scope_id,
+					global_types   = global_types_ptr,
 				}
 
 				for stmt in block.stmts {

@@ -19,6 +19,7 @@ Infer_Context :: struct {
 	declared_types: ^map[binder.Symbol_ID]Type_ID,
 	current_class:  Type_ID,
 	scope_id:       binder.Scope_ID,
+	global_types:   ^map[binder.Symbol_ID]Type_ID, // Module-level symbol types (LEGB "G" fallback)
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -354,6 +355,17 @@ infer_name :: proc(e: ^parser.Name_Expr, ctx: ^Infer_Context) -> Type_ID {
 		// Fallback: check class_types registry (module-level classes visible in all scopes)
 		if class_type, found := ctx.reg.class_types[sym_id]; found {
 			return class_type
+		}
+		// Fallback: check module-level symbol types (LEGB "G" — global scope)
+		// Only for functions/classes — variables may have stale flow-sensitive types
+		if ctx.global_types != nil {
+			if t, found := ctx.global_types[sym_id]; found {
+				gt := get_type(ctx.reg, t)
+				#partial switch _ in gt.info {
+				case Callable_Type, Class_Type:
+					return t
+				}
+			}
 		}
 	}
 	// Check builtins
