@@ -530,6 +530,8 @@ check_scope :: proc(
 					current_class  = current_class,
 					scope_id       = cfg.scope_id,
 					global_types   = global_types_ptr,
+					shape_reg      = shape_reg,
+					const_map      = const_map,
 				}
 
 				for stmt in block.stmts {

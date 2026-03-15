@@ -724,30 +724,42 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		if !p.has_default { required += 1 }
 	}
 
-	// Check arg count (positional + keyword)
+	// Check arg count (positional + named keyword, excluding **kwargs unpacking)
 	n_args := len(e.args)
-	n_total := n_args + len(e.keywords)
+	n_named_kw := 0
+	has_star_kwargs := false
+	for kw in e.keywords {
+		if kw.arg == "" {
+			has_star_kwargs = true
+		} else {
+			n_named_kw += 1
+		}
+	}
+	n_total := n_args + n_named_kw
 	n_params := len(func_info.params)
 
-	if n_total < required {
-		emit_diagnostic(ctx, e.loc, "T004", .Error,
-			"Too few arguments",
-			fmt_arg_count_error(required, n_total, ctx.reg),
-			"Add missing arguments")
-	} else if n_total > n_params {
-		if n_params == 0 {
+	// With **kwargs, we can't statically determine the total arg count
+	if !has_star_kwargs {
+		if n_total < required {
 			emit_diagnostic(ctx, e.loc, "T004", .Error,
-				"Too many arguments",
-				fmt_arg_count_error(n_params, n_total, ctx.reg),
-				"Remove extra arguments")
-		} else {
-			// Check if last param is *args (explicit flag) or builtin with Any type (implicit)
-			last := func_info.params[n_params - 1]
-			if !last.is_variadic && last.type_id != TYPE_ANY {
+				"Too few arguments",
+				fmt_arg_count_error(required, n_total, ctx.reg),
+				"Add missing arguments")
+		} else if n_total > n_params {
+			if n_params == 0 {
 				emit_diagnostic(ctx, e.loc, "T004", .Error,
 					"Too many arguments",
 					fmt_arg_count_error(n_params, n_total, ctx.reg),
 					"Remove extra arguments")
+			} else {
+				// Check if last param is *args (explicit flag) or builtin with Any type (implicit)
+				last := func_info.params[n_params - 1]
+				if !last.is_variadic && last.type_id != TYPE_ANY {
+					emit_diagnostic(ctx, e.loc, "T004", .Error,
+						"Too many arguments",
+						fmt_arg_count_error(n_params, n_total, ctx.reg),
+						"Remove extra arguments")
+				}
 			}
 		}
 	}
@@ -1173,9 +1185,9 @@ infer_shaped_return :: proc(e: ^parser.Call_Expr, base_return: Type_ID, ctx: ^In
 		// matmul(a, b) — compute result shape from operand shapes
 		if len(e.args) < 2 { return TYPE_UNKNOWN }
 		a_type := TYPE_UNKNOWN
-		if t, ok := ctx.expr_types[rawptr_from_expr(e.args[0])]; ok { a_type = t }
+		if t, ok := ctx.expr_types[expr_to_rawptr(e.args[0])]; ok { a_type = t }
 		b_type := TYPE_UNKNOWN
-		if t, ok := ctx.expr_types[rawptr_from_expr(e.args[1])]; ok { b_type = t }
+		if t, ok := ctx.expr_types[expr_to_rawptr(e.args[1])]; ok { b_type = t }
 
 		a_tensor := get_tensor_info(ctx.reg, a_type)
 		b_tensor := get_tensor_info(ctx.reg, b_type)
@@ -1201,7 +1213,7 @@ infer_shaped_return :: proc(e: ^parser.Call_Expr, base_return: Type_ID, ctx: ^In
 		// transpose(a) — reverse shape
 		if len(e.args) == 0 { return TYPE_UNKNOWN }
 		a_type := TYPE_UNKNOWN
-		if t, ok := ctx.expr_types[rawptr_from_expr(e.args[0])]; ok { a_type = t }
+		if t, ok := ctx.expr_types[expr_to_rawptr(e.args[0])]; ok { a_type = t }
 		a_tensor := get_tensor_info(ctx.reg, a_type)
 		if a_tensor == nil || a_tensor.ndim == 0 { return TYPE_UNKNOWN }
 

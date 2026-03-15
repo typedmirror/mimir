@@ -341,7 +341,7 @@ collect_iter_constraint :: proc(iter_expr: parser.Expr, target: parser.Expr, ctx
 	// Get inferred element type from the target
 	elem_type := TYPE_UNKNOWN
 	if target != nil {
-		if et, ok := ctx.expr_types[rawptr_from_expr(target)]; ok {
+		if et, ok := ctx.expr_types[expr_to_rawptr(target)]; ok {
 			elem_type = et
 		}
 	}
@@ -368,7 +368,7 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 				// Collect arg types
 				arg_types := make([]Type_ID, len(e.args), ctx.cs.allocator)
 				for a, i in e.args {
-					if t, found := ctx.expr_types[rawptr_from_expr(a)]; found {
+					if t, found := ctx.expr_types[expr_to_rawptr(a)]; found {
 						arg_types[i] = t
 					} else {
 						arg_types[i] = TYPE_UNKNOWN
@@ -377,7 +377,7 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 
 				// Get return type from expr_types
 				ret_type := TYPE_UNKNOWN
-				if t, found := ctx.expr_types[rawptr_from_expr(expr)]; found {
+				if t, found := ctx.expr_types[expr_to_rawptr(expr)]; found {
 					ret_type = t
 				}
 
@@ -401,14 +401,14 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 			if ref_ok && sym_id in ctx.unknown_syms {
 				arg_types := make([]Type_ID, len(e.args), ctx.cs.allocator)
 				for a, i in e.args {
-					if t, found := ctx.expr_types[rawptr_from_expr(a)]; found {
+					if t, found := ctx.expr_types[expr_to_rawptr(a)]; found {
 						arg_types[i] = t
 					} else {
 						arg_types[i] = TYPE_UNKNOWN
 					}
 				}
 				ret_type := TYPE_UNKNOWN
-				if t, found := ctx.expr_types[rawptr_from_expr(expr)]; found {
+				if t, found := ctx.expr_types[expr_to_rawptr(expr)]; found {
 					ret_type = t
 				}
 
@@ -427,7 +427,7 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 		sym_id := resolve_to_symbol(e.value, ctx.bind_result)
 		if sym_id != binder.INVALID_SYMBOL && sym_id in ctx.unknown_syms {
 			attr_type := TYPE_UNKNOWN
-			if t, found := ctx.expr_types[rawptr_from_expr(expr)]; found {
+			if t, found := ctx.expr_types[expr_to_rawptr(expr)]; found {
 				attr_type = t
 			}
 
@@ -445,11 +445,11 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 		sym_id := resolve_to_symbol(e.value, ctx.bind_result)
 		if sym_id != binder.INVALID_SYMBOL && sym_id in ctx.unknown_syms {
 			key_type := TYPE_UNKNOWN
-			if t, found := ctx.expr_types[rawptr_from_expr(e.slice)]; found {
+			if t, found := ctx.expr_types[expr_to_rawptr(e.slice)]; found {
 				key_type = t
 			}
 			value_type := TYPE_UNKNOWN
-			if t, found := ctx.expr_types[rawptr_from_expr(expr)]; found {
+			if t, found := ctx.expr_types[expr_to_rawptr(expr)]; found {
 				value_type = t
 			}
 
@@ -514,11 +514,11 @@ collect_binop_constraint :: proc(e: ^parser.Bin_Op_Expr, ctx: ^Collect_Context) 
 	left_sym := resolve_to_symbol(e.left, ctx.bind_result)
 	if left_sym != binder.INVALID_SYMBOL && left_sym in ctx.unknown_syms {
 		other_type := TYPE_UNKNOWN
-		if t, found := ctx.expr_types[rawptr_from_expr(e.right)]; found {
+		if t, found := ctx.expr_types[expr_to_rawptr(e.right)]; found {
 			other_type = t
 		}
 		result_type := TYPE_UNKNOWN
-		if t, found := ctx.expr_types[rawptr_from_expr(parser.Expr(e))]; found {
+		if t, found := ctx.expr_types[expr_to_rawptr(parser.Expr(e))]; found {
 			result_type = t
 		}
 		op_kind := binop_to_op_kind(e.op)
@@ -536,11 +536,11 @@ collect_binop_constraint :: proc(e: ^parser.Bin_Op_Expr, ctx: ^Collect_Context) 
 	right_sym := resolve_to_symbol(e.right, ctx.bind_result)
 	if right_sym != binder.INVALID_SYMBOL && right_sym in ctx.unknown_syms {
 		other_type := TYPE_UNKNOWN
-		if t, found := ctx.expr_types[rawptr_from_expr(e.left)]; found {
+		if t, found := ctx.expr_types[expr_to_rawptr(e.left)]; found {
 			other_type = t
 		}
 		result_type := TYPE_UNKNOWN
-		if t, found := ctx.expr_types[rawptr_from_expr(parser.Expr(e))]; found {
+		if t, found := ctx.expr_types[expr_to_rawptr(parser.Expr(e))]; found {
 			result_type = t
 		}
 		op_kind := binop_to_op_kind(e.op)
@@ -582,7 +582,7 @@ collect_compare_constraint :: proc(e: ^parser.Compare_Expr, ctx: ^Collect_Contex
 		// Use first comparator's type as the other_type
 		if len(e.comparators) > 0 && len(e.ops) > 0 {
 			other_type := TYPE_UNKNOWN
-			if t, found := ctx.expr_types[rawptr_from_expr(e.comparators[0])]; found {
+			if t, found := ctx.expr_types[expr_to_rawptr(e.comparators[0])]; found {
 				other_type = t
 			}
 			op_kind := cmpop_to_op_kind(e.ops[0])
@@ -604,7 +604,7 @@ collect_compare_constraint :: proc(e: ^parser.Compare_Expr, ctx: ^Collect_Contex
 			// The "other" is the previous expression in the chain
 			prev_expr: parser.Expr = e.left if i == 0 else e.comparators[i - 1]
 			other_type := TYPE_UNKNOWN
-			if t, found := ctx.expr_types[rawptr_from_expr(prev_expr)]; found {
+			if t, found := ctx.expr_types[expr_to_rawptr(prev_expr)]; found {
 				other_type = t
 			}
 			op_kind := cmpop_to_op_kind(e.ops[i])
@@ -748,38 +748,6 @@ resolve_to_symbol :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result) -
 	return binder.INVALID_SYMBOL
 }
 
-rawptr_from_expr :: proc(expr: parser.Expr) -> rawptr {
-	#partial switch e in expr {
-	case ^parser.Name_Expr:         return rawptr(e)
-	case ^parser.Call_Expr:         return rawptr(e)
-	case ^parser.Attribute_Expr:    return rawptr(e)
-	case ^parser.Subscript_Expr:    return rawptr(e)
-	case ^parser.Bin_Op_Expr:       return rawptr(e)
-	case ^parser.Unary_Op_Expr:     return rawptr(e)
-	case ^parser.Bool_Op_Expr:      return rawptr(e)
-	case ^parser.Compare_Expr:      return rawptr(e)
-	case ^parser.If_Expr:           return rawptr(e)
-	case ^parser.Lambda_Expr:       return rawptr(e)
-	case ^parser.Constant_Expr:     return rawptr(e)
-	case ^parser.List_Expr:         return rawptr(e)
-	case ^parser.Dict_Expr:         return rawptr(e)
-	case ^parser.Set_Expr:          return rawptr(e)
-	case ^parser.Tuple_Expr:        return rawptr(e)
-	case ^parser.Joined_Str:        return rawptr(e)
-	case ^parser.Formatted_Value:   return rawptr(e)
-	case ^parser.Starred_Expr:      return rawptr(e)
-	case ^parser.Named_Expr:        return rawptr(e)
-	case ^parser.Await_Expr:        return rawptr(e)
-	case ^parser.Yield_Expr:        return rawptr(e)
-	case ^parser.Yield_From_Expr:   return rawptr(e)
-	case ^parser.Slice_Expr:        return rawptr(e)
-	case ^parser.List_Comp:         return rawptr(e)
-	case ^parser.Set_Comp:          return rawptr(e)
-	case ^parser.Dict_Comp:         return rawptr(e)
-	case ^parser.Generator_Expr:    return rawptr(e)
-	}
-	return nil
-}
 
 get_expr_loc :: proc(expr: parser.Expr) -> parser.Src_Loc {
 	#partial switch e in expr {

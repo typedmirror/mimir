@@ -69,10 +69,12 @@ walk_stmt :: proc(v: ^AST_Visitor, stmt: parser.Stmt) {
 		walk_all_stmts(v, s.body)
 		walk_all_stmts(v, s.orelse)
 	case ^parser.For_Stmt:
+		walk_expr(v, s.target)
 		walk_expr(v, s.iter)
 		walk_all_stmts(v, s.body)
 		walk_all_stmts(v, s.orelse)
 	case ^parser.Async_For:
+		walk_expr(v, s.target)
 		walk_expr(v, s.iter)
 		walk_all_stmts(v, s.body)
 		walk_all_stmts(v, s.orelse)
@@ -95,6 +97,7 @@ walk_stmt :: proc(v: ^AST_Visitor, stmt: parser.Stmt) {
 	case ^parser.Try_Stmt:
 		walk_all_stmts(v, s.body)
 		for h in s.handlers {
+			if h.type != nil { walk_expr(v, h.type) }
 			walk_all_stmts(v, h.body)
 		}
 		walk_all_stmts(v, s.orelse)
@@ -102,6 +105,7 @@ walk_stmt :: proc(v: ^AST_Visitor, stmt: parser.Stmt) {
 	case ^parser.Try_Star:
 		walk_all_stmts(v, s.body)
 		for h in s.handlers {
+			if h.type != nil { walk_expr(v, h.type) }
 			walk_all_stmts(v, h.body)
 		}
 		walk_all_stmts(v, s.orelse)
@@ -109,6 +113,7 @@ walk_stmt :: proc(v: ^AST_Visitor, stmt: parser.Stmt) {
 	case ^parser.Match_Stmt:
 		walk_expr(v, s.subject)
 		for c in s.cases {
+			walk_pattern(v, c.pattern)
 			if c.guard != nil { walk_expr(v, c.guard) }
 			walk_all_stmts(v, c.body)
 		}
@@ -244,5 +249,27 @@ walk_func_args :: proc(v: ^AST_Visitor, args: ^parser.Arguments) {
 	}
 	for d in args.kw_defaults {
 		if d != nil { walk_expr(v, d) }
+	}
+}
+
+// Walk match pattern expressions recursively.
+walk_pattern :: proc(v: ^AST_Visitor, pattern: parser.Pattern) {
+	#partial switch p in pattern {
+	case ^parser.Match_Value:
+		walk_expr(v, p.value)
+	case ^parser.Match_Sequence:
+		for sub in p.patterns { walk_pattern(v, sub) }
+	case ^parser.Match_Mapping:
+		for k in p.keys { walk_expr(v, k) }
+		for sub in p.patterns { walk_pattern(v, sub) }
+	case ^parser.Match_Class:
+		walk_expr(v, p.cls)
+		for sub in p.patterns { walk_pattern(v, sub) }
+		for sub in p.kwd_patterns { walk_pattern(v, sub) }
+	case ^parser.Match_As:
+		walk_pattern(v, p.pattern)
+	case ^parser.Match_Or:
+		for sub in p.patterns { walk_pattern(v, sub) }
+	// Match_Singleton, Match_Star — no expressions to walk
 	}
 }

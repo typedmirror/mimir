@@ -45,6 +45,7 @@ propagate_constants :: proc(
 		if block_idx < 0 || block_idx >= len(cfg.blocks) { continue }
 
 		block := &cfg.blocks[block_idx]
+		if !block.is_reachable { continue }
 		if def.stmt_idx >= len(block.stmts) { continue }
 
 		stmt := block.stmts[def.stmt_idx]

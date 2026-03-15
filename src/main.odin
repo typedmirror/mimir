@@ -41,6 +41,8 @@ main :: proc() {
 	switch command {
 	case "check":
 		cmd_check(args[2:])
+	case "format":
+		cmd_format(args[2:])
 	case "conform":
 		conform.cmd_conform(args[2:])
 	case "run":
@@ -108,6 +110,109 @@ MIMIR_VERSION :: #config(MIMIR_VERSION, "0.0.1-dev")
 
 cmd_version :: proc() {
 	fmt.printfln("mimir %s", MIMIR_VERSION)
+}
+
+cmd_format :: proc(args: []string) {
+	config := platform.default_format_config()
+	target := "."
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--check" {
+			config.check_only = true
+			i += 1
+		} else if arg == "--diff" {
+			config.show_diff = true
+			i += 1
+		} else if arg == "--line-length" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir format: --line-length requires an integer argument")
+				os.exit(1)
+			}
+			// Simple integer parse
+			val := 0
+			for c in args[i + 1] {
+				if c >= '0' && c <= '9' {
+					val = val * 10 + int(c - '0')
+				}
+			}
+			if val > 0 { config.line_length = val }
+			i += 2
+		} else if arg == "--quote-style" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir format: --quote-style requires 'single' or 'double'")
+				os.exit(1)
+			}
+			switch args[i + 1] {
+			case "single": config.quote_style = .Single
+			case "double": config.quote_style = .Double
+			case:
+				fmt.eprintfln("mimir format: unknown quote style '%s' (use 'single' or 'double')", args[i + 1])
+				os.exit(1)
+			}
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir format: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir format [--check] [--diff] [--line-length N] [--quote-style single|double] [path]")
+			os.exit(1)
+		} else {
+			target = arg
+			i += 1
+		}
+	}
+
+	p: Pipeline; ok := pipeline_start("format", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
+
+	changed_count := 0
+	for file in p.files {
+		// Read source
+		source_data, read_err := os.read_entire_file(file, p.arena.allocator)
+		if read_err != nil {
+			fmt.eprintfln("mimir format: cannot read '%s': %v", file, read_err)
+			continue
+		}
+		source := string(source_data)
+
+		module := pipeline_parse_file(&p, "format", file)
+		if module == nil { continue }
+
+		formatted, was_changed := platform.format_file(source, module, &config, p.arena.allocator)
+
+		if was_changed {
+			changed_count += 1
+			if config.check_only {
+				fmt.printfln("would reformat %s", file)
+			} else if config.show_diff {
+				platform.print_diff(file, source, formatted)
+			} else {
+				// Write formatted file
+				write_err := os.write_entire_file(file, transmute([]byte)formatted)
+				if write_err != nil {
+					fmt.eprintfln("mimir format: cannot write '%s': %v", file, write_err)
+					continue
+				}
+				fmt.printfln("  reformatted %s", file)
+			}
+		}
+	}
+
+	if config.check_only {
+		if changed_count > 0 {
+			fmt.printfln("mimir format: %d file(s) would be reformatted", changed_count)
+			os.exit(1)
+		} else {
+			fmt.printfln("mimir format: %d file(s) already formatted", len(p.files))
+		}
+	} else {
+		if changed_count > 0 {
+			fmt.printfln("mimir format: reformatted %d file(s)", changed_count)
+		} else {
+			fmt.printfln("mimir format: %d file(s) already formatted", len(p.files))
+		}
+	}
 }
 
 cmd_check :: proc(args: []string) {
@@ -1581,6 +1686,7 @@ print_usage :: proc() {
 	fmt.println()
 	fmt.println("Commands:")
 	fmt.println("  check <path>      Analyze Python source files")
+	fmt.println("  format [path]     Format Python source files (default: \".\")")
 	fmt.println("  audit [path]      Scan Python files for security vulnerabilities (default: \".\")")
 	fmt.println("  lint [path]       Lint Python files for common issues (default: \".\")")
 	fmt.println("  safety [path]     Detect Python safety issues (default: \".\")")

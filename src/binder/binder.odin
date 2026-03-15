@@ -480,11 +480,11 @@ scan_expr_for_scopes :: proc(b: ^Binder, expr: parser.Expr) {
 		scope := get_scope(b, current_scope(b))
 		if scope != nil && scope.kind == .Comprehension {
 			// Walk up through ALL nested comprehension scopes
-			saved: [8]Scope_ID // max nesting depth for comprehensions
+			saved: [16]Scope_ID // max nesting depth for comprehensions
 			pop_count := 0
 			for {
 				s := get_scope(b, current_scope(b))
-				if s == nil || s.kind != .Comprehension || pop_count >= 8 { break }
+				if s == nil || s.kind != .Comprehension || pop_count >= 16 { break }
 				saved[pop_count] = current_scope(b)
 				pop_scope(b)
 				pop_count += 1

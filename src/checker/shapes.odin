@@ -588,7 +588,7 @@ check_shape_binop :: proc(
 // ==================== Helpers ====================
 
 shape_get_expr_type :: proc(result: ^Check_Result, expr: parser.Expr) -> Type_ID {
-	ptr := rawptr_from_expr(expr)
+	ptr := expr_to_rawptr(expr)
 	if ptr == nil { return TYPE_UNKNOWN }
 	if t, ok := result.expr_types[ptr]; ok {
 		return t
