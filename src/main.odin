@@ -47,6 +47,8 @@ main :: proc() {
 		conform.cmd_conform(args[2:])
 	case "run":
 		cmd_run(args[2:])
+	case "serve":
+		cmd_serve(args[2:])
 	case "add":
 		cmd_add(args[2:])
 	case "lock":
@@ -497,6 +499,131 @@ cmd_run :: proc(args: []string) {
 	}
 
 	exit_code := platform.run(config, arena.allocator)
+	core.arena_destroy(&arena)
+	os.exit(exit_code)
+}
+
+cmd_serve :: proc(args: []string) {
+	config := platform.Serve_Config{
+		port = 0,    // 0 = not set (use script default)
+		host = "",   // "" = not set (use script default)
+	}
+
+	check_only := false
+
+	// Parse flags
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--port" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir serve: --port requires a number")
+				os.exit(1)
+			}
+			port_val := 0
+			for c in args[i + 1] {
+				if c < '0' || c > '9' {
+					fmt.eprintfln("mimir serve: invalid port '%s'", args[i + 1])
+					os.exit(1)
+				}
+				port_val = port_val * 10 + int(c - '0')
+			}
+			config.port = port_val
+			i += 2
+		} else if arg == "--host" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir serve: --host requires an address")
+				os.exit(1)
+			}
+			config.host = args[i + 1]
+			i += 2
+		} else if arg == "--python" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir serve: --python requires a version argument")
+				os.exit(1)
+			}
+			config.python_version = args[i + 1]
+			i += 2
+		} else if arg == "--check" {
+			check_only = true
+			i += 1
+		} else if arg == "--no-deps" {
+			config.skip_deps = true
+			i += 1
+		} else if arg == "--static" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir serve: --static requires a directory path")
+				os.exit(1)
+			}
+			config.static_dir = args[i + 1]
+			i += 2
+		} else if arg == "--tls-cert" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir serve: --tls-cert requires a file path")
+				os.exit(1)
+			}
+			config.tls_cert = args[i + 1]
+			i += 2
+		} else if arg == "--tls-key" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("mimir serve: --tls-key requires a file path")
+				os.exit(1)
+			}
+			config.tls_key = args[i + 1]
+			i += 2
+		} else if strings.has_prefix(arg, "-") {
+			fmt.eprintfln("mimir serve: unknown flag '%s'", arg)
+			fmt.eprintln("Usage: mimir serve [--port N] [--host H] [--static dir] [--tls-cert F --tls-key F] [--check] <script>")
+			os.exit(1)
+		} else {
+			config.script = arg
+			i += 1
+			break
+		}
+	}
+
+	if config.script == "" {
+		fmt.eprintln("mimir serve: no script specified")
+		fmt.eprintln("Usage: mimir serve [--port N] [--host H] [--static dir] [--tls-cert F --tls-key F] [--check] <script>")
+		os.exit(1)
+	}
+
+	// Always type-check before serving
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		switch e in bridge_err {
+		case parser.Bridge_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		case parser.Syntax_Error:
+			fmt.eprintfln("mimir: %s", e.msg)
+		}
+		os.exit(1)
+	}
+
+	fmt.printfln("  mimir: type checking %s...", config.script)
+	check_errors := cmd_check_single(config.script, &bridge, &arena)
+	parser.bridge_stop(&bridge)
+
+	if check_errors > 0 {
+		fmt.eprintfln("  mimir: %d error(s) found", check_errors)
+		os.exit(1)
+	}
+	fmt.println("  mimir: ok (0 errors)")
+
+	if check_only {
+		core.arena_destroy(&arena)
+		return
+	}
+
+	// Serve
+	exit_code := platform.serve(config, arena.allocator)
 	core.arena_destroy(&arena)
 	os.exit(exit_code)
 }
@@ -1695,6 +1822,7 @@ print_usage :: proc() {
 	fmt.println("  repl              Start type-aware interactive Python REPL")
 	fmt.println("  lsp               Start LSP server for editor integration")
 	fmt.println("  run <script>      Run a Python script with automatic dependency resolution")
+	fmt.println("  serve <script>    Serve an HTTP app (mimir.http) with type checking")
 	fmt.println("  build [path]      Build wheel + sdist package (output to dist/)")
 	fmt.println("  publish [path]    Publish package to PyPI (builds if needed)")
 	fmt.println("  python <cmd>      Manage Python versions (install, list, remove)")

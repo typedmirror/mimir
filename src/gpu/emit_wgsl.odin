@@ -15,7 +15,7 @@ emit_wgsl :: proc(
 	allocator: mem.Allocator,
 ) -> string {
 	b := strings.builder_make(0, 2048, allocator)
-	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx.reg, .WGSL)
+	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx, .WGSL)
 
 	// Storage buffer declarations
 	for inp in graph.inputs {
@@ -114,6 +114,10 @@ wgsl_emit_node :: proc(
 		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
 		zero, one := wgsl_cmp_literals(etype)
 		fmt.sbprintf(b, "    let v%d = select(%s, %s, %s == %s);\n", id, zero, one, a, c)
+	case .NotEqual:
+		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
+		zero, one := wgsl_cmp_literals(etype)
+		fmt.sbprintf(b, "    let v%d = select(%s, %s, %s != %s);\n", id, zero, one, a, c)
 	case .Less:
 		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
 		zero, one := wgsl_cmp_literals(etype)
@@ -133,7 +137,8 @@ wgsl_emit_node :: proc(
 
 	case .ReLU:
 		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = max(%s, 0.0);\n", id, a)
+		zero := "0" if (etype == "i32" || etype == "i64") else "0.0"
+		fmt.sbprintf(b, "    let v%d = max(%s, %s);\n", id, a, zero)
 	case .Sigmoid:
 		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
 		fmt.sbprintf(b, "    let v%d = 1.0 / (1.0 + exp(-%s));\n", id, a)
@@ -142,18 +147,18 @@ wgsl_emit_node :: proc(
 		fmt.sbprintf(b, "    let v%d = tanh(%s);\n", id, a)
 
 	case .Softmax:
+		// Filtered at extraction — should not appear in graph
 		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    // softmax: simplified single-element\n")
-		fmt.sbprintf(b, "    let v%d = exp(%s);\n", id, a)
+		fmt.sbprintf(b, "    let v%d = %s; // softmax: unsupported\n", id, a)
 
 	case .MatMul:
 		if len(node.inputs) >= 2 {
 			a_node := get_node(graph, node.inputs[0])
 			b_node := get_node(graph, node.inputs[1])
-			a_name := "param_a"
-			b_name := "param_b"
-			if a_node != nil && len(a_node.name) > 0 { a_name = fmt.tprintf("param_%s", a_node.name) }
-			if b_node != nil && len(b_node.name) > 0 { b_name = fmt.tprintf("param_%s", b_node.name) }
+			a_name := fmt.tprintf("v%d", int(node.inputs[0]))
+			b_name := fmt.tprintf("v%d", int(node.inputs[1]))
+			if a_node != nil && a_node.kind == .Param && len(a_node.name) > 0 { a_name = fmt.tprintf("param_%s", a_node.name) }
+			if b_node != nil && b_node.kind == .Param && len(b_node.name) > 0 { b_name = fmt.tprintf("param_%s", b_node.name) }
 			fmt.sbprintf(b, "    var v%d: %s = 0.0;\n", id, etype)
 			fmt.sbprintf(b, "    for (var k: u32 = 0u; k < dims.K; k++) {{\n")
 			fmt.sbprintf(b, "        v%d += %s[row * dims.K + k] * %s[k * dims.N + col];\n", id, a_name, b_name)
@@ -203,14 +208,14 @@ wgsl_binary_inputs :: proc(graph: ^Compute_Graph, node: ^GPU_Node, bindings: ^Bi
 
 // Return type-appropriate zero/one literals for comparison select().
 wgsl_cmp_literals :: proc(etype: string) -> (string, string) {
-	if etype == "i32" {
+	if etype == "i32" || etype == "i64" {
 		return "0", "1"
 	}
 	return "0.0", "1.0"
 }
 
 wgsl_const_value :: proc(name: string, etype: string) -> string {
-	if etype == "i32" {
+	if etype == "i32" || etype == "i64" {
 		return fmt.tprintf("i32(%s)", name)
 	}
 	// Ensure float constants have decimal

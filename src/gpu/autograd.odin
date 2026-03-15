@@ -28,7 +28,7 @@ generate_backward :: proc(
 		nodes     = make([dynamic]GPU_Node, 0, len(forward.nodes) * 2, allocator),
 		inputs    = make([dynamic]GPU_Node_ID, 0, len(forward.outputs), allocator),
 		outputs   = make([dynamic]GPU_Node_ID, 0, len(forward.inputs), allocator),
-		func_name = fmt.tprintf("%s_backward", forward.func_name),
+		func_name = fmt.aprintf("%s_backward", forward.func_name, allocator = allocator),
 		allocator = allocator,
 	}
 
@@ -47,7 +47,7 @@ generate_backward :: proc(
 			kind         = .Param,
 			output_type  = fwd_node.output_type if fwd_node != nil else checker.TYPE_FLOAT,
 			output_shape = fwd_node.output_shape if fwd_node != nil else nil,
-			name         = fmt.tprintf("grad_%d", int(fwd_out)),
+			name         = fmt.aprintf("grad_%d", int(fwd_out), allocator = allocator),
 		})
 		append(&backward.inputs, grad_param)
 		ctx.grad_map[fwd_out] = grad_param
@@ -227,7 +227,7 @@ differentiate_node :: proc(ctx: ^Grad_Context, node: ^GPU_Node, output_grad: GPU
 			if fwd_inp != nil && bcast_node != nil {
 				bcast_node.output_shape = fwd_inp.output_shape
 			}
-			n_const := make_constant_value(ctx, fmt.tprintf("%d", n_elem), node)
+			n_const := make_constant_value(ctx, fmt.aprintf("%d", n_elem, allocator = ctx.backward.allocator), node)
 			grad_a := make_binary(ctx, .Div, grad_bcast, n_const, node)
 			accumulate_grad(ctx, node.inputs[0], grad_a)
 		}
@@ -335,8 +335,9 @@ make_forward_ref :: proc(ctx: ^Grad_Context, fwd_id: GPU_Node_ID) -> GPU_Node_ID
 		kind         = .Param,
 		output_type  = fwd_node.output_type if fwd_node != nil else checker.TYPE_FLOAT,
 		output_shape = fwd_node.output_shape if fwd_node != nil else nil,
-		name         = fmt.tprintf("fwd_%d", int(fwd_id)),
+		name         = fmt.aprintf("fwd_%d", int(fwd_id), allocator = ctx.backward.allocator),
 	})
+	append(&ctx.backward.inputs, ref)
 	return ref
 }
 

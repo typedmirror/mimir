@@ -15,16 +15,13 @@ init_builtins :: proc(reg: ^Type_Registry) -> Builtin_Names {
 	b: Builtin_Names
 	b.names = make(map[string]Type_ID, 32, reg.allocator)
 
-	b.names["int"]     = TYPE_INT
-	b.names["float"]   = TYPE_FLOAT
-	b.names["str"]     = TYPE_STR
+	// int/float/str/bool registered as Callable constructors in register_builtin_functions
 	b.names["bytes"]   = TYPE_BYTES
-	b.names["bool"]    = TYPE_BOOL
 	b.names["None"]    = TYPE_NONE
 	b.names["complex"] = TYPE_COMPLEX
 	b.names["object"]  = TYPE_OBJECT
 
-	// Register built-in function signatures
+	// Register built-in function signatures (int/str/float/bool set here as callables)
 	register_builtin_functions(reg, &b)
 
 	return b

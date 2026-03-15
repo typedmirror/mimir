@@ -15,7 +15,7 @@ emit_ptx :: proc(
 	allocator: mem.Allocator,
 ) -> string {
 	b := strings.builder_make(0, 2048, allocator)
-	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx.reg, .PTX)
+	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx, .PTX)
 	is_float := etype == ".f32"
 
 	// Header
@@ -55,17 +55,17 @@ emit_ptx :: proc(
 
 	// Count how many virtual registers we need
 	vreg_count := len(graph.nodes) + len(graph.inputs) + 4
-	if is_float {
-		fmt.sbprintf(&b, "    .reg .f32 %%v<%d>;\n", vreg_count)
-	} else {
-		fmt.sbprintf(&b, "    .reg .s32 %%v<%d>;\n", vreg_count)
-	}
+	reg_type := etype  // ".f32", ".s32", ".f16", ".f64", ".s64"
+	fmt.sbprintf(&b, "    .reg %s %%v<%d>;\n", reg_type, vreg_count)
 	fmt.sbprintf(&b, "    .reg .u64 %%p<%d>;\n", len(graph.inputs) + len(graph.outputs) + 2)
 	fmt.sbprint(&b, "\n")
 
-	// Get thread ID
+	// Get thread ID — stride by element size
+	stride := 4  // f32/s32 = 4 bytes
+	if etype == ".f64" || etype == ".s64" { stride = 8 }
+	else if etype == ".f16" { stride = 2 }
 	fmt.sbprint(&b, "    mov.u32 %tid, %tid.x;\n")
-	fmt.sbprint(&b, "    mul.wide.u32 %off, %tid, 4;\n\n")
+	fmt.sbprintf(&b, "    mul.wide.u32 %%off, %%tid, %d;\n\n", stride)
 
 	// Load parameters from buffers
 	for inp, pidx in graph.inputs {
@@ -153,6 +153,11 @@ ptx_emit_node :: proc(
 		}
 
 	case .Sigmoid:
+		if !is_float {
+			// Sigmoid is meaningless for integer types — passthrough
+			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // sigmoid: integer passthrough\n", op_suffix, id, int(node.inputs[0]))
+			return
+		}
 		// 1 / (1 + exp(-x)), using ex2: exp(x) = ex2(x * log2(e)), log2(e) = 0x3FB8AA3B
 		fmt.sbprintf(b, "    neg.f32 %%v%d, %%v%d;\n", id, int(node.inputs[0]))
 		fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3FB8AA3B; // * log2(e)\n", id, id)
@@ -161,24 +166,34 @@ ptx_emit_node :: proc(
 		fmt.sbprintf(b, "    rcp.approx.f32 %%v%d, %%v%d;\n", id, id)
 
 	case .Tanh:
-		// tanh(x) = 2*sigmoid(2x) - 1, using ex2: exp(x) = ex2(x * log2(e))
-		fmt.sbprintf(b, "    add.f32 %%v%d, %%v%d, %%v%d; // 2x\n", id, int(node.inputs[0]), int(node.inputs[0]))
-		fmt.sbprintf(b, "    neg.f32 %%v%d, %%v%d;\n", id, id)
-		fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3FB8AA3B; // * log2(e)\n", id, id)
-		fmt.sbprintf(b, "    ex2.approx.f32 %%v%d, %%v%d;\n", id, id)
-		fmt.sbprintf(b, "    add.f32 %%v%d, %%v%d, 0f3F800000;\n", id, id)
-		fmt.sbprintf(b, "    rcp.approx.f32 %%v%d, %%v%d;\n", id, id)
-		fmt.sbprintf(b, "    add.f32 %%v%d, %%v%d, %%v%d;\n", id, id, id)
-		fmt.sbprintf(b, "    sub.f32 %%v%d, %%v%d, 0f3F800000; // -1.0\n", id, id)
+		if !is_float {
+			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // tanh: integer passthrough\n", op_suffix, id, int(node.inputs[0]))
+			return
+		}
+		// tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+		// Using ex2: exp(x) ≈ ex2(x * log2(e)), log2(e) = 0x3FB8AA3B
+		// Need temp registers: t1=2x, t2=exp(2x), t3=num, result=tanh
+		in0 := int(node.inputs[0])
+		t1 := id     // reuse output register for intermediate
+		t2 := id + 1000  // temp register offset (safe — vreg pool is oversized)
+		fmt.sbprintf(b, "    .reg .f32 %%tanh_t%d;\n", id)
+		fmt.sbprintf(b, "    add.f32 %%v%d, %%v%d, %%v%d; // 2x\n", t1, in0, in0)
+		fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3FB8AA3B; // 2x * log2(e)\n", t1, t1)
+		fmt.sbprintf(b, "    ex2.approx.f32 %%tanh_t%d, %%v%d; // exp(2x)\n", id, t1)
+		fmt.sbprintf(b, "    sub.f32 %%v%d, %%tanh_t%d, 0f3F800000; // exp(2x) - 1\n", t1, id)
+		fmt.sbprintf(b, "    add.f32 %%tanh_t%d, %%tanh_t%d, 0f3F800000; // exp(2x) + 1\n", id, id)
+		fmt.sbprintf(b, "    div.approx.f32 %%v%d, %%v%d, %%tanh_t%d; // tanh\n", id, t1, id)
 
 	case .Softmax:
-		// exp(x) = ex2(x * log2(e))
-		fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3FB8AA3B; // * log2(e)\n", id, int(node.inputs[0]))
-		fmt.sbprintf(b, "    ex2.approx.f32 %%v%d, %%v%d; // softmax: exp\n", id, id)
+		// Filtered at extraction — should not appear in graph
+		if len(node.inputs) > 0 {
+			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // softmax: unsupported\n", op_suffix, id, int(node.inputs[0]))
+		}
 
-	case .Equal, .Less, .Greater, .LessEq, .GreaterEq:
+	case .Equal, .NotEqual, .Less, .Greater, .LessEq, .GreaterEq:
 		cmp_op := "eq"
 		#partial switch node.kind {
+		case .NotEqual:  cmp_op = "ne"
 		case .Less:      cmp_op = "lt"
 		case .Greater:   cmp_op = "gt"
 		case .LessEq:    cmp_op = "le"
@@ -196,7 +211,11 @@ ptx_emit_node :: proc(
 	case .Select:
 		if len(node.inputs) >= 3 {
 			fmt.sbprintf(b, "    .reg .pred %%sel%d;\n", id)
-			fmt.sbprintf(b, "    setp.gt%s %%sel%d, %%v%d, 0f00000000;\n", op_suffix, id, int(node.inputs[0]))
+			if is_float {
+				fmt.sbprintf(b, "    setp.gt.f32 %%sel%d, %%v%d, 0f00000000;\n", id, int(node.inputs[0]))
+			} else {
+				fmt.sbprintf(b, "    setp.gt.s32 %%sel%d, %%v%d, 0;\n", id, int(node.inputs[0]))
+			}
 			fmt.sbprintf(b, "    selp%s %%v%d, %%v%d, %%v%d, %%sel%d;\n", op_suffix, id, int(node.inputs[1]), int(node.inputs[2]), id)
 		}
 

@@ -120,16 +120,22 @@ check_db_call :: proc(ctx: ^DB_Check_Context, e: ^parser.Call_Expr) {
 			// Check if it's a method call (conn.query, conn.execute)
 			if f.attr == "query" || f.attr == "execute" {
 				if val_type, ok := ctx.expr_types[expr_to_rawptr(f.value)]; ok {
-					vt := get_type(ctx.reg, val_type)
-					if vt != nil {
-						#partial switch inst in vt.info {
-						case Instance_Type:
-							ct := get_type(ctx.reg, inst.class_type)
-							if ct != nil {
-								if cls, ok2 := ct.info.(Class_Type); ok2 {
-									if cls.name == "Connection" {
-										is_db_call = true
-										sql_arg_idx = 0  // conn.query(sql, ...) — sql is first arg
+					// Match by registered type ID, not class name (avoids false positives on user-defined Connection classes)
+					if ctx.reg.db_conn_query_type != 0 {
+						vt := get_type(ctx.reg, val_type)
+						if vt != nil {
+							#partial switch inst in vt.info {
+							case Instance_Type:
+								ct := get_type(ctx.reg, inst.class_type)
+								if ct != nil {
+									if cls, ok2 := ct.info.(Class_Type); ok2 {
+										// Verify this class has the exact mimir.db callable types
+										if q, has_q := cls.attrs["query"]; has_q {
+											if q == ctx.reg.db_conn_query_type {
+												is_db_call = true
+												sql_arg_idx = 0
+											}
+										}
 									}
 								}
 							}

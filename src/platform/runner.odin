@@ -189,8 +189,15 @@ run :: proc(config: Run_Config, allocator: mem.Allocator) -> int {
 		}
 	}
 
-	// 8. Spawn Python process
-	return spawn_python(python, config.script, config.script_args)
+	// 8. Generate bootstrap with virtual module shims (mimir.db, mimir.crypt, mimir.json)
+	bootstrap := generate_run_bootstrap(config.script, config.script_args, allocator)
+	bootstrap_path, boot_ok := write_run_bootstrap(bootstrap, allocator)
+	if !boot_ok {
+		return 1
+	}
+
+	// 9. Spawn Python with bootstrap (script args embedded via sys.argv in bootstrap)
+	return spawn_python(python, bootstrap_path, {})
 }
 
 // Find a Python interpreter on PATH.

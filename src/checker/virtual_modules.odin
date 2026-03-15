@@ -278,15 +278,24 @@ register_mimir_http :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 	if resp_type != nil {
 		if ct, ok := &resp_type.info.(Class_Type); ok {
 			ct.attrs["json"] = make_callable_type(reg,
-				{Param_Type{name = "data", type_id = dict_str_any}},
+				{
+					Param_Type{name = "data", type_id = dict_str_any},
+					Param_Type{name = "status", type_id = TYPE_INT, has_default = true},
+				},
 				response_instance,
 			)
 			ct.attrs["html"] = make_callable_type(reg,
-				{Param_Type{name = "content", type_id = TYPE_STR}},
+				{
+					Param_Type{name = "content", type_id = TYPE_STR},
+					Param_Type{name = "status", type_id = TYPE_INT, has_default = true},
+				},
 				response_instance,
 			)
 			ct.attrs["text"] = make_callable_type(reg,
-				{Param_Type{name = "content", type_id = TYPE_STR}},
+				{
+					Param_Type{name = "content", type_id = TYPE_STR},
+					Param_Type{name = "status", type_id = TYPE_INT, has_default = true},
+				},
 				response_instance,
 			)
 			ct.attrs["redirect"] = make_callable_type(reg,
@@ -344,9 +353,9 @@ register_mimir_http :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 	)
 
 	body_params := []Param_Type{
-		Param_Type{name = "url",     type_id = TYPE_STR},
-		Param_Type{name = "json",    type_id = dict_str_any, has_default = true},
-		Param_Type{name = "data",    type_id = TYPE_BYTES, has_default = true},
+		Param_Type{name = "url",       type_id = TYPE_STR},
+		Param_Type{name = "json_data", type_id = dict_str_any, has_default = true},
+		Param_Type{name = "data",      type_id = TYPE_BYTES, has_default = true},
 		header_param,
 		timeout_param,
 	}

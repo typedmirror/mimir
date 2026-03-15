@@ -39,12 +39,24 @@ SPIRV_OP_FSUB              :: 131
 SPIRV_OP_FMUL              :: 133
 SPIRV_OP_FDIV              :: 136
 SPIRV_OP_FNEGATE           :: 127
+SPIRV_OP_IADD              :: 128
+SPIRV_OP_ISUB              :: 130
+SPIRV_OP_IMUL              :: 132
+SPIRV_OP_SDIV              :: 135
+SPIRV_OP_SNEGATE           :: 126
 SPIRV_OP_SELECT            :: 169
+SPIRV_OP_IEQUAL            :: 170
+SPIRV_OP_INOT_EQUAL        :: 171
+SPIRV_OP_SLESS_THAN        :: 178
+SPIRV_OP_SGREATER_THAN     :: 174
+SPIRV_OP_SLESS_THAN_EQ     :: 179
+SPIRV_OP_SGREATER_THAN_EQ  :: 175
 SPIRV_OP_FORD_LESS_THAN    :: 184
 SPIRV_OP_FORD_GREATER_THAN :: 186
 SPIRV_OP_FORD_LESS_THAN_EQ :: 188
 SPIRV_OP_FORD_GREATER_THAN_EQ :: 190
 SPIRV_OP_FORD_EQUAL        :: 180
+SPIRV_OP_FORD_NOT_EQUAL    :: 182
 SPIRV_OP_LABEL             :: 248
 SPIRV_OP_RETURN            :: 253
 SPIRV_OP_FUNCTION_END      :: 56
@@ -214,9 +226,19 @@ emit_spirv :: proc(
 	uvec3_id := spirv_alloc_id(&m)
 	spirv_emit(&m.types, SPIRV_OP_TYPE_VECTOR, uvec3_id, uint_id, 3)
 
-	// Runtime array of float
+	// Signed int type (for integer kernels)
+	int_id := spirv_alloc_id(&m)
+	spirv_emit(&m.types, SPIRV_OP_TYPE_INT, int_id, 32, 1) // 32-bit signed
+
+	// Determine if kernel operates on integers
+	elem_type := wgsl_infer_element_type(graph, type_ctx)
+	is_int_kernel := elem_type == type_ctx.int32_id || elem_type == type_ctx.int64_id || elem_type == checker.TYPE_INT
+	scalar_id := float_id
+	if is_int_kernel { scalar_id = int_id }
+
+	// Runtime array of scalar type
 	rtarr_id := spirv_alloc_id(&m)
-	spirv_emit(&m.types, SPIRV_OP_TYPE_RUNTIME_ARRAY, rtarr_id, float_id)
+	spirv_emit(&m.types, SPIRV_OP_TYPE_RUNTIME_ARRAY, rtarr_id, scalar_id)
 	// ArrayStride 4
 	spirv_emit(&m.annotations, SPIRV_OP_DECORATE, rtarr_id, SPIRV_DEC_ARRAY_STRIDE, 4)
 
@@ -231,7 +253,7 @@ emit_spirv :: proc(
 	spirv_emit(&m.types, SPIRV_OP_TYPE_POINTER, ptr_buf_id, SPIRV_SC_STORAGE_BUFFER, buf_struct_id)
 
 	ptr_float_id := spirv_alloc_id(&m)
-	spirv_emit(&m.types, SPIRV_OP_TYPE_POINTER, ptr_float_id, SPIRV_SC_STORAGE_BUFFER, float_id)
+	spirv_emit(&m.types, SPIRV_OP_TYPE_POINTER, ptr_float_id, SPIRV_SC_STORAGE_BUFFER, scalar_id)
 
 	ptr_uvec3_input_id := spirv_alloc_id(&m)
 	spirv_emit(&m.types, SPIRV_OP_TYPE_POINTER, ptr_uvec3_input_id, SPIRV_SC_INPUT, uvec3_id)
@@ -308,8 +330,8 @@ emit_spirv :: proc(
 	// Emit each node
 	for &node in graph.nodes {
 		result_id := spirv_emit_graph_node(&m, graph, &node, &node_ids, &param_var_ids,
-			float_id, uint_id, bool_type_id, ptr_float_id, const_0_uint, const_0_float, const_1_float,
-			tid_id, glsl_id, allocator)
+			scalar_id, uint_id, bool_type_id, ptr_float_id, const_0_uint, const_0_float, const_1_float,
+			tid_id, glsl_id, is_int_kernel, allocator)
 		if result_id != 0 {
 			node_ids[node.id] = result_id
 		}
@@ -342,6 +364,7 @@ spirv_emit_graph_node :: proc(
 	float_id, uint_id, bool_type_id, ptr_float_id, const_0_uint, const_0_float, const_1_float: u32,
 	tid_id: u32,
 	glsl_id: u32,
+	is_int: bool,
 	allocator: mem.Allocator,
 ) -> u32 {
 
@@ -388,34 +411,34 @@ spirv_emit_graph_node :: proc(
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		result := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FADD, float_id, result, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_IADD if is_int else SPIRV_OP_FADD, float_id, result, a, b)
 		return result
 
 	case .Sub:
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		result := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FSUB, float_id, result, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_ISUB if is_int else SPIRV_OP_FSUB, float_id, result, a, b)
 		return result
 
 	case .Mul:
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		result := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FMUL, float_id, result, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_IMUL if is_int else SPIRV_OP_FMUL, float_id, result, a, b)
 		return result
 
 	case .Div:
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		result := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FDIV, float_id, result, a, b)
+		spirv_emit(&m.functions, SPIRV_OP_SDIV if is_int else SPIRV_OP_FDIV, float_id, result, a, b)
 		return result
 
 	case .Neg:
 		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		result := spirv_alloc_id(m)
-		spirv_emit(&m.functions, SPIRV_OP_FNEGATE, float_id, result, a)
+		spirv_emit(&m.functions, SPIRV_OP_SNEGATE if is_int else SPIRV_OP_FNEGATE, float_id, result, a)
 		return result
 
 	case .Abs:
@@ -453,6 +476,15 @@ spirv_emit_graph_node :: proc(
 		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
 		bool_id := spirv_alloc_id(m)
 		spirv_emit(&m.functions, SPIRV_OP_FORD_EQUAL, bool_type_id, bool_id, a, b)
+		result := spirv_alloc_id(m)
+		spirv_emit(&m.functions, SPIRV_OP_SELECT, float_id, result, bool_id, const_1_float, const_0_float)
+		return result
+
+	case .NotEqual:
+		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
+		b := get_input(m, node.inputs[1], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
+		bool_id := spirv_alloc_id(m)
+		spirv_emit(&m.functions, SPIRV_OP_FORD_NOT_EQUAL, bool_type_id, bool_id, a, b)
 		result := spirv_alloc_id(m)
 		spirv_emit(&m.functions, SPIRV_OP_SELECT, float_id, result, bool_id, const_1_float, const_0_float)
 		return result
@@ -551,6 +583,26 @@ spirv_float_bits :: proc(s: string) -> u32 {
 			frac *= 0.1
 			i += 1
 		}
+	}
+
+	// Exponent part (scientific notation: e.g., "1.5e-3")
+	if i < len(bytes) && (bytes[i] == 'e' || bytes[i] == 'E') {
+		i += 1
+		exp_neg := false
+		if i < len(bytes) && bytes[i] == '-' {
+			exp_neg = true
+			i += 1
+		} else if i < len(bytes) && bytes[i] == '+' {
+			i += 1
+		}
+		exp: f32 = 0
+		for i < len(bytes) && bytes[i] >= '0' && bytes[i] <= '9' {
+			exp = exp * 10 + f32(bytes[i] - '0')
+			i += 1
+		}
+		power: f32 = 1.0
+		for _ in 0..<int(exp) { power *= 10.0 }
+		if exp_neg { val /= power } else { val *= power }
 	}
 
 	if negative { val = -val }

@@ -275,10 +275,12 @@ emit_binary_instruction :: proc(instr: ^WASM_Instruction, buf: ^[dynamic]u8) {
 	case .If:
 		append(buf, blocktype_byte(instr.block_type))
 
-	// Memory ops: alignment + offset
-	case .I32_Load, .I64_Load, .F32_Load, .F64_Load,
-	     .I32_Store, .I64_Store, .F32_Store, .F64_Store:
-		encode_uleb128(buf, u64(2)) // natural alignment
+	// Memory ops: alignment + offset (natural alignment per type)
+	case .I32_Load, .F32_Load, .I32_Store, .F32_Store:
+		encode_uleb128(buf, u64(2)) // 4-byte alignment
+		encode_uleb128(buf, u64(instr.mem_offset))
+	case .I64_Load, .F64_Load, .I64_Store, .F64_Store:
+		encode_uleb128(buf, u64(3)) // 8-byte alignment
 		encode_uleb128(buf, u64(instr.mem_offset))
 	case .I32_Load8_U, .I32_Store8:
 		encode_uleb128(buf, 0) // byte alignment

@@ -139,9 +139,9 @@ expr_from_name :: proc(n: ^parser.Name_Expr) -> parser.Expr {
 	return parser.Expr(n)
 }
 
-// Product of all dimensions. Returns -1 if any dim is symbolic.
+// Product of all dimensions. Returns -1 if any dim is symbolic or shape is nil.
 shape_product :: proc(shape: []int) -> int {
-	if shape == nil { return 0 }
+	if shape == nil { return -1 }
 	prod := 1
 	for d in shape {
 		if d < 0 { return -1 }
@@ -160,9 +160,11 @@ broadcast_result_shape :: proc(a, b: []int, allocator: mem.Allocator) -> ([]int,
 		bi := b[len(b) - 1 - i] if i < len(b) else 1
 		if ai == bi {
 			result[max_rank - 1 - i] = ai
-		} else if ai == 1 || ai == -1 {
+		} else if ai == -1 || bi == -1 {
+			result[max_rank - 1 - i] = -1  // propagate symbolic
+		} else if ai == 1 {
 			result[max_rank - 1 - i] = bi
-		} else if bi == 1 || bi == -1 {
+		} else if bi == 1 {
 			result[max_rank - 1 - i] = ai
 		} else {
 			return nil, false // incompatible

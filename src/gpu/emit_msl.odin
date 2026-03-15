@@ -15,7 +15,7 @@ emit_msl :: proc(
 	allocator: mem.Allocator,
 ) -> string {
 	b := strings.builder_make(0, 2048, allocator)
-	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx.reg, .MSL)
+	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx, .MSL)
 	use_matmul := has_matmul(graph)
 
 	fmt.sbprint(&b, "#include <metal_stdlib>\nusing namespace metal;\n\n")
@@ -27,13 +27,15 @@ emit_msl :: proc(
 	for inp in graph.inputs {
 		node := get_node(graph, inp)
 		if node == nil { continue }
-		binding := bindings.param_bindings[inp]
+		binding, has_binding := bindings.param_bindings[inp]
+		if !has_binding { continue }
 		fmt.sbprintf(&b, "    device const %s* param_%s [[buffer(%d)]],\n",
 			etype, node.name, binding)
 	}
 	// Output buffer
 	for out in graph.outputs {
-		binding := bindings.output_bindings[out]
+		binding, has_out_binding := bindings.output_bindings[out]
+		if !has_out_binding { continue }
 		fmt.sbprintf(&b, "    device %s* result [[buffer(%d)]],\n", etype, binding)
 	}
 
@@ -113,19 +115,28 @@ msl_emit_node :: proc(
 
 	case .Equal:
 		a, c := msl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    %s v%d = (%s == %s) ? 1.0f : 0.0f;\n", etype, id, a, c)
+		t, f := msl_cmp_literals(etype)
+		fmt.sbprintf(b, "    %s v%d = (%s == %s) ? %s : %s;\n", etype, id, a, c, t, f)
+	case .NotEqual:
+		a, c := msl_binary_inputs(graph, node, bindings, use_matmul)
+		t, f := msl_cmp_literals(etype)
+		fmt.sbprintf(b, "    %s v%d = (%s != %s) ? %s : %s;\n", etype, id, a, c, t, f)
 	case .Less:
 		a, c := msl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    %s v%d = (%s < %s) ? 1.0f : 0.0f;\n", etype, id, a, c)
+		t, f := msl_cmp_literals(etype)
+		fmt.sbprintf(b, "    %s v%d = (%s < %s) ? %s : %s;\n", etype, id, a, c, t, f)
 	case .Greater:
 		a, c := msl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    %s v%d = (%s > %s) ? 1.0f : 0.0f;\n", etype, id, a, c)
+		t, f := msl_cmp_literals(etype)
+		fmt.sbprintf(b, "    %s v%d = (%s > %s) ? %s : %s;\n", etype, id, a, c, t, f)
 	case .LessEq:
 		a, c := msl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    %s v%d = (%s <= %s) ? 1.0f : 0.0f;\n", etype, id, a, c)
+		t, f := msl_cmp_literals(etype)
+		fmt.sbprintf(b, "    %s v%d = (%s <= %s) ? %s : %s;\n", etype, id, a, c, t, f)
 	case .GreaterEq:
 		a, c := msl_binary_inputs(graph, node, bindings, use_matmul)
-		fmt.sbprintf(b, "    %s v%d = (%s >= %s) ? 1.0f : 0.0f;\n", etype, id, a, c)
+		t, f := msl_cmp_literals(etype)
+		fmt.sbprintf(b, "    %s v%d = (%s >= %s) ? %s : %s;\n", etype, id, a, c, t, f)
 
 	case .ReLU:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
@@ -145,10 +156,10 @@ msl_emit_node :: proc(
 		if len(node.inputs) >= 2 {
 			a_node := get_node(graph, node.inputs[0])
 			b_node := get_node(graph, node.inputs[1])
-			a_name := "param_a"
-			b_name := "param_b"
-			if a_node != nil && len(a_node.name) > 0 { a_name = fmt.tprintf("param_%s", a_node.name) }
-			if b_node != nil && len(b_node.name) > 0 { b_name = fmt.tprintf("param_%s", b_node.name) }
+			a_name := fmt.tprintf("v%d", int(node.inputs[0]))
+			b_name := fmt.tprintf("v%d", int(node.inputs[1]))
+			if a_node != nil && a_node.kind == .Param && len(a_node.name) > 0 { a_name = fmt.tprintf("param_%s", a_node.name) }
+			if b_node != nil && b_node.kind == .Param && len(b_node.name) > 0 { b_name = fmt.tprintf("param_%s", b_node.name) }
 			fmt.sbprintf(b, "    %s v%d = 0;\n", etype, id)
 			fmt.sbprintf(b, "    for (uint k = 0; k < K; k++) {{\n")
 			fmt.sbprintf(b, "        v%d += %s[row * K + k] * %s[k * N + col];\n", id, a_name, b_name)
@@ -194,8 +205,13 @@ msl_binary_inputs :: proc(graph: ^Compute_Graph, node: ^GPU_Node, bindings: ^Bin
 	       msl_input_ref(graph, node.inputs[1], bindings, use_matmul)
 }
 
+msl_cmp_literals :: proc(etype: string) -> (string, string) {
+	if etype == "int" || etype == "long" { return "1", "0" }
+	return "1.0f", "0.0f"
+}
+
 msl_const_value :: proc(name: string, etype: string) -> string {
-	if etype == "int" { return name }
+	if etype == "int" || etype == "long" { return name }
 	for c in name {
 		if c == '.' { return fmt.tprintf("%sf", name) }
 	}

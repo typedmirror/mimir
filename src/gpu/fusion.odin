@@ -34,7 +34,7 @@ classify_dispatch :: proc(kind: GPU_Op_Kind) -> Dispatch_Kind {
 	case .Sum, .Mean, .Max, .Min, .Softmax:
 		return .Reduction
 	case .Add, .Sub, .Mul, .Div, .Neg, .Abs,
-	     .Equal, .Less, .Greater, .LessEq, .GreaterEq,
+	     .Equal, .NotEqual, .Less, .Greater, .LessEq, .GreaterEq,
 	     .Transpose, .ReLU, .Sigmoid, .Tanh,
 	     .Select, .Reshape, .Broadcast,
 	     .Param, .Constant:

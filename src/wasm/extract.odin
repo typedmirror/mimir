@@ -21,6 +21,7 @@ WASM_Extract_Context :: struct {
 	func_map:     map[string]int,        // @wasm function name → module func index
 	// Track memory type parameters for expansion
 	param_annotations: map[string]parser.Expr, // param name → annotation
+	or_temp_counter:   int,                    // unique temp names for boolean or chains
 	allocator:    mem.Allocator,
 }
 
@@ -191,26 +192,34 @@ extract_stmt :: proc(stmt: parser.Stmt, ctx: ^WASM_Extract_Context) {
 }
 
 extract_assign :: proc(s: ^parser.Assign, ctx: ^WASM_Extract_Context) {
-	if len(s.targets) != 1 { return }
-	#partial switch t in s.targets[0] {
-	case ^parser.Name_Expr:
-		extract_expr(s.value, ctx)
-		idx, ok := ctx.locals_map[t.id]
-		if !ok {
-			wtype := infer_expr_type(s.value, ctx)
-			idx = alloc_local(ctx, t.id, wtype)
-		} else {
-			// Convert value to match existing local type
-			val_type := infer_expr_type(s.value, ctx)
-			local_type := ctx.local_types[t.id]
-			if val_type != local_type {
-				emit_conversion(ctx, val_type, local_type)
+	if len(s.targets) == 0 { return }
+
+	// Evaluate value once
+	extract_expr(s.value, ctx)
+	val_type := infer_expr_type(s.value, ctx)
+
+	// Store to each target (use Local_Tee for all but last to keep value on stack)
+	for target, ti in s.targets {
+		#partial switch t in target {
+		case ^parser.Name_Expr:
+			idx, ok := ctx.locals_map[t.id]
+			if !ok {
+				idx = alloc_local(ctx, t.id, val_type)
+			} else {
+				local_type := ctx.local_types[t.id]
+				if val_type != local_type {
+					emit_conversion(ctx, val_type, local_type)
+				}
 			}
+			if ti < len(s.targets) - 1 {
+				emit(ctx, WASM_Instruction{kind = .Local_Tee, local_idx = idx})
+			} else {
+				emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = idx})
+			}
+		case ^parser.Subscript_Expr:
+			// arr[i] = val — for multi-target, only works as last target
+			extract_subscript_store(t, s.value, ctx)
 		}
-		emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = idx})
-	case ^parser.Subscript_Expr:
-		// arr[i] = val → memory store
-		extract_subscript_store(t, s.value, ctx)
 	}
 }
 
@@ -304,21 +313,40 @@ extract_for_stmt :: proc(s: ^parser.For_Stmt, ctx: ^WASM_Extract_Context) {
 		idx = alloc_local(ctx, var_name, .I32)
 	}
 
-	// Extract range bound
+	// Extract range arguments: range(stop), range(start, stop), range(start, stop, step)
+	range_start: parser.Expr
 	range_bound: parser.Expr
+	range_step:  parser.Expr
 	#partial switch iter in s.iter {
 	case ^parser.Call_Expr:
 		#partial switch fn in iter.func {
 		case ^parser.Name_Expr:
-			if fn.id == "range" && len(iter.args) >= 1 {
-				range_bound = iter.args[0]
+			if fn.id == "range" {
+				if len(iter.args) == 1 {
+					range_bound = iter.args[0]
+				} else if len(iter.args) == 2 {
+					range_start = iter.args[0]
+					range_bound = iter.args[1]
+				} else if len(iter.args) >= 3 {
+					range_start = iter.args[0]
+					range_bound = iter.args[1]
+					range_step  = iter.args[2]
+				}
 			}
 		}
 	}
 	if range_bound == nil { return }
 
-	// i = 0
-	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})
+	// i = start (default 0)
+	if range_start != nil {
+		extract_expr(range_start, ctx)
+		bound_type := infer_expr_type(range_start, ctx)
+		if bound_type != .I32 {
+			emit(ctx, WASM_Instruction{kind = .I32_Trunc_F64_S if bound_type == .F64 else .I32_Trunc_F32_S if bound_type == .F32 else .I32_Wrap_I64})
+		}
+	} else {
+		emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})
+	}
 	emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = idx})
 
 	// block
@@ -337,8 +365,12 @@ extract_for_stmt :: proc(s: ^parser.For_Stmt, ctx: ^WASM_Extract_Context) {
 	extract_expr(range_bound, ctx)
 	// If bound is not i32, convert
 	bound_type := infer_expr_type(range_bound, ctx)
-	if bound_type != .I32 {
+	if bound_type == .F64 {
 		emit(ctx, WASM_Instruction{kind = .I32_Trunc_F64_S})
+	} else if bound_type == .F32 {
+		emit(ctx, WASM_Instruction{kind = .I32_Trunc_F32_S})
+	} else if bound_type == .I64 {
+		emit(ctx, WASM_Instruction{kind = .I32_Wrap_I64})
 	}
 	emit(ctx, WASM_Instruction{kind = .I32_Ge_S})
 	emit(ctx, WASM_Instruction{kind = .Br_If, label_idx = 1})
@@ -347,9 +379,21 @@ extract_for_stmt :: proc(s: ^parser.For_Stmt, ctx: ^WASM_Extract_Context) {
 		extract_stmt(stmt, ctx)
 	}
 
-	// i++
+	// i += step (default 1)
 	emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = idx})
-	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 1})
+	if range_step != nil {
+		extract_expr(range_step, ctx)
+		step_type := infer_expr_type(range_step, ctx)
+		if step_type == .F64 {
+			emit(ctx, WASM_Instruction{kind = .I32_Trunc_F64_S})
+		} else if step_type == .F32 {
+			emit(ctx, WASM_Instruction{kind = .I32_Trunc_F32_S})
+		} else if step_type == .I64 {
+			emit(ctx, WASM_Instruction{kind = .I32_Wrap_I64})
+		}
+	} else {
+		emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 1})
+	}
 	emit(ctx, WASM_Instruction{kind = .I32_Add})
 	emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = idx})
 	emit(ctx, WASM_Instruction{kind = .Br, label_idx = 0})
@@ -452,6 +496,44 @@ extract_binop :: proc(e: ^parser.Bin_Op_Expr, ctx: ^WASM_Extract_Context) {
 	// Determine result type
 	result_type := promote_types(ltype, rtype)
 
+	// Float floor_div: floor(a / b)
+	if e.op == .Floor_Div && (result_type == .F32 || result_type == .F64) {
+		extract_expr(e.left, ctx)
+		if ltype != result_type { emit_conversion(ctx, ltype, result_type) }
+		extract_expr(e.right, ctx)
+		if rtype != result_type { emit_conversion(ctx, rtype, result_type) }
+		emit(ctx, WASM_Instruction{kind = .F64_Div if result_type == .F64 else .F32_Div})
+		emit(ctx, WASM_Instruction{kind = .F64_Floor if result_type == .F64 else .F32_Floor})
+		return
+	}
+
+	// Float mod: a - floor(a/b) * b
+	if e.op == .Mod && (result_type == .F32 || result_type == .F64) {
+		a_temp := get_or_alloc_temp_named(ctx, "__mod_a", result_type)
+		b_temp := get_or_alloc_temp_named(ctx, "__mod_b", result_type)
+		fv_temp := get_or_alloc_temp_named(ctx, "__mod_fv", result_type)
+		is_f64 := result_type == .F64
+		// Compute a and b, save to temps
+		extract_expr(e.left, ctx)
+		if ltype != result_type { emit_conversion(ctx, ltype, result_type) }
+		emit(ctx, WASM_Instruction{kind = .Local_Tee, local_idx = a_temp})
+		extract_expr(e.right, ctx)
+		if rtype != result_type { emit_conversion(ctx, rtype, result_type) }
+		emit(ctx, WASM_Instruction{kind = .Local_Tee, local_idx = b_temp})
+		// stack: [a, b] → div → [a/b] → floor → [floor(a/b)]
+		emit(ctx, WASM_Instruction{kind = .F64_Div if is_f64 else .F32_Div})
+		emit(ctx, WASM_Instruction{kind = .F64_Floor if is_f64 else .F32_Floor})
+		// [floor(a/b)] * b → [floor(a/b)*b]
+		emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = b_temp})
+		emit(ctx, WASM_Instruction{kind = .F64_Mul if is_f64 else .F32_Mul})
+		emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = fv_temp})
+		// a - floor(a/b)*b: push a first (bottom), then fv (top), sub = bottom - top
+		emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = a_temp})
+		emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = fv_temp})
+		emit(ctx, WASM_Instruction{kind = .F64_Sub if is_f64 else .F32_Sub})
+		return
+	}
+
 	extract_expr(e.left, ctx)
 	if ltype != result_type {
 		emit_conversion(ctx, ltype, result_type)
@@ -483,8 +565,12 @@ extract_unaryop :: proc(e: ^parser.Unary_Op_Expr, ctx: ^WASM_Extract_Context) {
 		extract_expr(e.operand, ctx)
 		emit(ctx, WASM_Instruction{kind = .I32_Eqz})
 	case .Invert:
-		// Bitwise NOT: xor with -1
+		// Bitwise NOT: xor with -1 (i32 only — i64 bitwise ops not in WASM instruction set)
 		extract_expr(e.operand, ctx)
+		op_type := infer_expr_type(e.operand, ctx)
+		if op_type == .I64 {
+			emit(ctx, WASM_Instruction{kind = .I32_Wrap_I64})
+		}
 		emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = -1})
 		emit(ctx, WASM_Instruction{kind = .I32_Xor})
 	case .UAdd:
@@ -526,9 +612,13 @@ extract_boolop :: proc(e: ^parser.Bool_Op_Expr, ctx: ^WASM_Extract_Context) {
 			emit(ctx, WASM_Instruction{kind = .End})
 		} else {
 			// or: duplicate test, if truthy keep it, else eval next
-			emit(ctx, WASM_Instruction{kind = .Local_Tee, local_idx = get_or_alloc_temp(ctx, .I32)})
+			// Use unique temp per or-level to avoid clobbering in chained or
+			temp_name := fmt.tprintf("__or_tmp_%d", ctx.or_temp_counter)
+			ctx.or_temp_counter += 1
+			temp_idx := get_or_alloc_temp_named(ctx, temp_name, .I32)
+			emit(ctx, WASM_Instruction{kind = .Local_Tee, local_idx = temp_idx})
 			emit(ctx, WASM_Instruction{kind = .If, block_type = .I32})
-			emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = get_or_alloc_temp(ctx, .I32)})
+			emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = temp_idx})
 			emit(ctx, WASM_Instruction{kind = .Else})
 			extract_expr(e.values[i], ctx)
 			emit(ctx, WASM_Instruction{kind = .End})
@@ -742,8 +832,10 @@ infer_expr_type :: proc(expr: parser.Expr, ctx: ^WASM_Extract_Context) -> WASM_V
 
 	#partial switch e in expr {
 	case ^parser.Constant_Expr:
-		#partial switch _ in e.value {
-		case i64:  return .I32
+		#partial switch v in e.value {
+		case i64:
+			if v > 2147483647 || v < -2147483648 { return .I64 }
+			return .I32
 		case f64:  return .F64
 		case bool: return .I32
 		}

@@ -41,33 +41,56 @@ assign_bindings :: proc(graph: ^Compute_Graph, allocator: mem.Allocator) -> Bind
 }
 
 // Map a checker type to the element type name for a given backend.
-element_type_str :: proc(type_id: checker.Type_ID, reg: ^checker.Type_Registry, backend: Emit_Backend) -> string {
+// Uses GPU_Type_Context to distinguish precision types (f16/f32/f64, i32/i64).
+element_type_str :: proc(type_id: checker.Type_ID, type_ctx: ^GPU_Type_Context, backend: Emit_Backend) -> string {
 	// Resolve tensor element type
 	actual := type_id
-	t := checker.get_type(reg, type_id)
+	t := checker.get_type(type_ctx.reg, type_id)
 	#partial switch info in t.info {
 	case checker.Tensor_Type:
 		actual = info.element_type
 	}
 
-	is_int := actual == checker.TYPE_INT
-	a := checker.get_type(reg, actual)
+	// Check GPU precision types by ID equality (these are distinct even though Primitive_Kind is same)
+	switch backend {
+	case .WGSL:
+		if actual == type_ctx.float16_id || actual == type_ctx.bfloat16_id { return "f16" }
+		if actual == type_ctx.float32_id || actual == checker.TYPE_FLOAT    { return "f32" }
+		if actual == type_ctx.int64_id                                     { return "i64" }
+		if actual == type_ctx.int32_id || actual == checker.TYPE_INT || actual == checker.TYPE_BOOL { return "i32" }
+	case .MSL:
+		if actual == type_ctx.float16_id || actual == type_ctx.bfloat16_id { return "half" }
+		if actual == type_ctx.float32_id || actual == checker.TYPE_FLOAT    { return "float" }
+		if actual == type_ctx.int64_id                                     { return "long" }
+		if actual == type_ctx.int32_id || actual == checker.TYPE_INT || actual == checker.TYPE_BOOL { return "int" }
+	case .PTX:
+		if actual == type_ctx.float16_id || actual == type_ctx.bfloat16_id { return ".f16" }
+		if actual == type_ctx.float32_id || actual == checker.TYPE_FLOAT    { return ".f32" }
+		if actual == type_ctx.int64_id                                     { return ".s64" }
+		if actual == type_ctx.int32_id || actual == checker.TYPE_INT || actual == checker.TYPE_BOOL { return ".s32" }
+	case .SPIRV:
+		return "" // SPIR-V uses type IDs, not strings
+	}
+
+	// Fallback: inspect Primitive_Kind
+	a := checker.get_type(type_ctx.reg, actual)
 	#partial switch p in a.info {
 	case checker.Primitive_Type:
 		if p.kind == .Int {
-			is_int = true
+			switch backend {
+			case .WGSL: return "i32"
+			case .MSL:  return "int"
+			case .PTX:  return ".s32"
+			case .SPIRV: return ""
+			}
 		}
 	}
 
 	switch backend {
-	case .WGSL:
-		return "i32" if is_int else "f32"
-	case .MSL:
-		return "int" if is_int else "float"
-	case .SPIRV:
-		return "" // SPIR-V uses type IDs, not strings
-	case .PTX:
-		return ".s32" if is_int else ".f32"
+	case .WGSL: return "f32"
+	case .MSL:  return "float"
+	case .PTX:  return ".f32"
+	case .SPIRV: return ""
 	}
 	return "f32"
 }

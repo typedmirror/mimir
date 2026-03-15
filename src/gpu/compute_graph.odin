@@ -16,7 +16,7 @@ GPU_Op_Kind :: enum {
 	// Elementwise
 	Add, Sub, Mul, Div, Neg, Abs,
 	// Comparison
-	Equal, Less, Greater, LessEq, GreaterEq,
+	Equal, NotEqual, Less, Greater, LessEq, GreaterEq,
 	// Matrix
 	MatMul, Transpose,
 	// Reduction
@@ -153,7 +153,11 @@ extract_stmt :: proc(stmt: parser.Stmt, ctx: ^GPU_Graph_Context) {
 		lhs := extract_expr(s.target, ctx)
 		rhs := extract_expr(s.value, ctx)
 		if lhs == GPU_Node_ID(0) || rhs == GPU_Node_ID(0) { return }
-		kind, _ := binop_to_gpu_op(s.op)
+		kind, op_ok := binop_to_gpu_op(s.op)
+		if !op_ok {
+			fmt.eprintfln("  gpu: unsupported augmented assignment operator in @gpu function")
+			return
+		}
 		inputs := make([]GPU_Node_ID, 2, ctx.allocator)
 		inputs[0] = lhs
 		inputs[1] = rhs
@@ -207,7 +211,11 @@ extract_expr :: proc(expr: parser.Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID 
 		left := extract_expr(e.left, ctx)
 		right := extract_expr(e.right, ctx)
 		if left == GPU_Node_ID(0) || right == GPU_Node_ID(0) { return GPU_Node_ID(0) }
-		kind, _ := binop_to_gpu_op(e.op)
+		kind, op_ok := binop_to_gpu_op(e.op)
+		if !op_ok {
+			fmt.eprintfln("  gpu: unsupported operator in @gpu function (use +, -, *, /, @)")
+			return GPU_Node_ID(0)
+		}
 		inputs := make([]GPU_Node_ID, 2, ctx.allocator)
 		inputs[0] = left
 		inputs[1] = right
@@ -240,7 +248,11 @@ extract_expr :: proc(expr: parser.Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID 
 		left := extract_expr(e.left, ctx)
 		right := extract_expr(e.comparators[0], ctx)
 		if left == GPU_Node_ID(0) || right == GPU_Node_ID(0) { return GPU_Node_ID(0) }
-		kind, _ := cmpop_to_gpu_op(e.ops[0])
+		kind, cmp_ok := cmpop_to_gpu_op(e.ops[0])
+		if !cmp_ok {
+			fmt.eprintfln("  gpu: unsupported comparison operator in @gpu function (use ==, !=, <, >, <=, >=)")
+			return GPU_Node_ID(0)
+		}
 		inputs := make([]GPU_Node_ID, 2, ctx.allocator)
 		inputs[0] = left
 		inputs[1] = right
@@ -280,13 +292,8 @@ extract_expr :: proc(expr: parser.Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID 
 		base := extract_expr(e.value, ctx)
 		if base == GPU_Node_ID(0) { return GPU_Node_ID(0) }
 		if e.attr == "T" {
-			inputs := make([]GPU_Node_ID, 1, ctx.allocator)
-			inputs[0] = base
-			return add_node(ctx.graph, GPU_Node{
-				kind   = .Transpose,
-				inputs = inputs,
-				loc    = e.loc,
-			})
+			fmt.eprintfln("  gpu: .T transpose requires 2D index remapping, not supported in element-wise kernels")
+			return GPU_Node_ID(0)
 		}
 		return base
 	}
@@ -302,10 +309,10 @@ extract_constant :: proc(c: ^parser.Constant_Expr, ctx: ^GPU_Graph_Context) -> G
 	#partial switch v in c.value {
 	case i64:
 		output_type = checker.TYPE_INT
-		name = fmt.tprintf("%d", v)
+		name = fmt.aprintf("%d", v, allocator = ctx.allocator)
 	case f64:
 		output_type = checker.TYPE_FLOAT
-		name = fmt.tprintf("%f", v)
+		name = fmt.aprintf("%f", v, allocator = ctx.allocator)
 	case bool:
 		output_type = checker.TYPE_BOOL
 		name = "true" if v else "false"
@@ -325,18 +332,22 @@ extract_constant :: proc(c: ^parser.Constant_Expr, ctx: ^GPU_Graph_Context) -> G
 extract_call :: proc(call: ^parser.Call_Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID {
 	#partial switch f in call.func {
 	case ^parser.Name_Expr:
-		// Known activation/reduction functions
+		// Reject operations that need cross-thread coordination
+		switch f.id {
+		case "softmax":
+			fmt.eprintfln("  gpu: softmax requires cross-thread coordination, not supported in element-wise kernels")
+			return GPU_Node_ID(0)
+		case "sum", "mean", "max", "min":
+			fmt.eprintfln("  gpu: %s() reduction requires shared memory, not supported in element-wise kernels", f.id)
+			return GPU_Node_ID(0)
+		}
+		// Known activation functions
 		kind: GPU_Op_Kind
 		is_known := true
 		switch f.id {
 		case "relu":    kind = .ReLU
 		case "sigmoid": kind = .Sigmoid
 		case "tanh":    kind = .Tanh
-		case "softmax": kind = .Softmax
-		case "sum":     kind = .Sum
-		case "mean":    kind = .Mean
-		case "max":     kind = .Max
-		case "min":     kind = .Min
 		case "abs":     kind = .Abs
 		case: is_known = false
 		}
@@ -359,19 +370,25 @@ extract_call :: proc(call: ^parser.Call_Expr, ctx: ^GPU_Graph_Context) -> GPU_No
 		}
 
 	case ^parser.Attribute_Expr:
-		// Method calls: x.sum(), x.mean(), x.T (handled in extract_expr), etc.
+		// Reject operations that need cross-thread coordination
+		switch f.attr {
+		case "softmax":
+			fmt.eprintfln("  gpu: softmax requires cross-thread coordination, not supported in element-wise kernels")
+			return GPU_Node_ID(0)
+		case "sum", "mean", "max", "min":
+			fmt.eprintfln("  gpu: .%s() reduction requires shared memory, not supported in element-wise kernels", f.attr)
+			return GPU_Node_ID(0)
+		case "transpose":
+			fmt.eprintfln("  gpu: .transpose() requires 2D index remapping, not supported in element-wise kernels")
+			return GPU_Node_ID(0)
+		}
+		// Method calls: x.relu(), etc.
 		kind: GPU_Op_Kind
 		is_known := true
 		switch f.attr {
-		case "sum":       kind = .Sum
-		case "mean":      kind = .Mean
-		case "max":       kind = .Max
-		case "min":       kind = .Min
 		case "relu":      kind = .ReLU
 		case "sigmoid":   kind = .Sigmoid
 		case "tanh":      kind = .Tanh
-		case "softmax":   kind = .Softmax
-		case "transpose": kind = .Transpose
 		case "reshape":   kind = .Reshape
 		case: is_known = false
 		}
@@ -429,7 +446,7 @@ propagate_shapes :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
 		switch node.kind {
 		// Elementwise: broadcast shapes for binary ops, copy for unary
 		case .Add, .Sub, .Mul, .Div, .Neg, .Abs,
-		     .Equal, .Less, .Greater, .LessEq, .GreaterEq,
+		     .Equal, .NotEqual, .Less, .Greater, .LessEq, .GreaterEq,
 		     .ReLU, .Sigmoid, .Tanh:
 			first := get_node(graph, node.inputs[0])
 			if first != nil && first.output_shape != nil {
@@ -592,7 +609,7 @@ count_ops :: proc(graph: ^Compute_Graph) -> (elementwise: int, matmul: int, redu
 			matmul += 1
 		case .Sum, .Mean, .Max, .Min, .Softmax:
 			reduction += 1
-		case .Equal, .Less, .Greater, .LessEq, .GreaterEq,
+		case .Equal, .NotEqual, .Less, .Greater, .LessEq, .GreaterEq,
 		     .Transpose, .Param, .Constant, .Select, .Reshape, .Broadcast:
 			other += 1
 		}
@@ -610,20 +627,18 @@ binop_to_gpu_op :: proc(op: parser.Binary_Op) -> (GPU_Op_Kind, bool) {
 	case .Div:       return .Div, true
 	case .Mat_Mult:  return .MatMul, true
 	}
-	fmt.eprintfln("warning: unsupported GPU binary operator, defaulting to Add")
 	return .Add, false
 }
 
 cmpop_to_gpu_op :: proc(op: parser.Cmp_Op) -> (GPU_Op_Kind, bool) {
 	#partial switch op {
 	case .Eq:     return .Equal, true
-	case .Not_Eq: return .Equal, true // NOTE: no NotEqual GPU op; callers should invert
+	case .Not_Eq: return .NotEqual, true
 	case .Lt:     return .Less, true
 	case .Gt:     return .Greater, true
 	case .Lt_E:   return .LessEq, true
 	case .Gt_E:   return .GreaterEq, true
 	}
-	fmt.eprintfln("warning: unsupported GPU comparison operator, defaulting to Equal")
 	return .Equal, false
 }
 
@@ -636,6 +651,7 @@ op_kind_string :: proc(kind: GPU_Op_Kind) -> string {
 	case .Neg:       return "Neg"
 	case .Abs:       return "Abs"
 	case .Equal:     return "Equal"
+	case .NotEqual:  return "NotEqual"
 	case .Less:      return "Less"
 	case .Greater:   return "Greater"
 	case .LessEq:    return "LessEq"
