@@ -48,6 +48,9 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.actor
 	register_mimir_actor(&vreg, reg)
 
+	// Register mimir.queue
+	register_mimir_queue(&vreg, reg)
+
 	return vreg
 }
 
@@ -842,6 +845,60 @@ register_mimir_actor :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.actor"] = Virtual_Module{
 		name    = "mimir.actor",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.queue ====================
+
+register_mimir_queue :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 4, reg.allocator)
+
+	// ---- Job class ----
+	job_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	job_attrs["status"] = TYPE_STR
+	job_attrs["id"] = TYPE_STR
+	job_attrs["result"] = make_callable_type(reg,
+		{Param_Type{name = "timeout", type_id = TYPE_FLOAT, has_default = true}},
+		TYPE_ANY,
+	)
+	job_attrs["cancel"] = make_callable_type(reg, {}, TYPE_NONE)
+
+	job_class := register_type(reg, Class_Type{
+		name  = "Job",
+		attrs = job_attrs,
+	})
+	job_instance := make_instance_type(reg, job_class)
+	exports["Job"] = job_class
+
+	// ---- Queue class ----
+	queue_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	queue_attrs["submit"] = make_callable_type(reg,
+		{Param_Type{name = "func", type_id = TYPE_ANY}},
+		job_instance,
+	)
+	queue_attrs["start"] = make_callable_type(reg, {}, TYPE_NONE)
+	queue_attrs["shutdown"] = make_callable_type(reg,
+		{Param_Type{name = "timeout", type_id = TYPE_FLOAT, has_default = true}},
+		TYPE_NONE,
+	)
+	queue_attrs["pending"] = TYPE_INT
+
+	queue_class := register_type(reg, Class_Type{
+		name  = "Queue",
+		attrs = queue_attrs,
+	})
+	exports["Queue"] = queue_class
+
+	// ---- task decorator ----
+	// task(func) -> func (decorator preserves callable, adds .delay at runtime)
+	exports["task"] = make_callable_type(reg,
+		{Param_Type{name = "func", type_id = TYPE_ANY}},
+		TYPE_ANY,
+	)
+
+	vreg.modules["mimir.queue"] = Virtual_Module{
+		name    = "mimir.queue",
 		exports = exports,
 	}
 }

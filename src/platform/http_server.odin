@@ -216,6 +216,7 @@ generate_serve_shim :: proc(config: Serve_Config, allocator: mem.Allocator) -> s
 	_sb(&buf, generate_json_shim(allocator))
 	_sb(&buf, generate_data_shim(allocator))
 	_sb(&buf, generate_actor_shim(allocator))
+	_sb(&buf, generate_queue_shim(allocator))
 
 	// ---- Route registries ----
 	_sb(&buf, "_ROUTES = []\n")
