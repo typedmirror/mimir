@@ -45,6 +45,9 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.crypt
 	register_mimir_crypt(&vreg, reg)
 
+	// Register mimir.actor
+	register_mimir_actor(&vreg, reg)
+
 	return vreg
 }
 
@@ -82,7 +85,7 @@ resolve_virtual_imports :: proc(
 		if !vm_ok { continue }
 
 		if len(imp.names) == 0 {
-			// "import mimir.array" — create Module_Type
+			// "import mimir.X" — create nested Module_Type so mimir.X.func works
 			// The binder creates a symbol for the top-level "mimir"
 			local_name := imp.module_name
 			dot_idx := -1
@@ -93,13 +96,40 @@ resolve_virtual_imports :: proc(
 				}
 			}
 			bound_name := local_name[:dot_idx] if dot_idx >= 0 else local_name
+			sub_name := local_name[dot_idx+1:] if dot_idx >= 0 else ""
 
 			if sym_id, found := mod_scope.symbols[bound_name]; found {
-				module_type_id := register_type(reg, Module_Type{
+				// Create Module_Type for the sub-module (mimir.X)
+				child_module_id := register_type(reg, Module_Type{
 					name    = imp.module_name,
 					exports = vm.exports,
 				})
-				result[sym_id] = module_type_id
+
+				if dot_idx >= 0 && len(sub_name) > 0 {
+					// Build nested: mimir → {X: Module_Type(mimir.X)}
+					if existing_id, has_existing := result[sym_id]; has_existing {
+						// Already have a parent Module_Type for "mimir" — add sub-module in-place
+						existing_type := get_type(reg, existing_id)
+						if existing_type != nil {
+							#partial switch &mod in existing_type.info {
+							case Module_Type:
+								mod.exports[sub_name] = child_module_id
+							}
+						}
+					} else {
+						// First sub-module — create parent Module_Type
+						parent_exports := make(map[string]Type_ID, 4, reg.allocator)
+						parent_exports[sub_name] = child_module_id
+						parent_id := register_type(reg, Module_Type{
+							name    = bound_name,
+							exports = parent_exports,
+						})
+						result[sym_id] = parent_id
+					}
+				} else {
+					// No dot — single-level module name
+					result[sym_id] = child_module_id
+				}
 			}
 		} else {
 			// "from mimir.array import zeros, ones, ..."
@@ -725,6 +755,93 @@ register_mimir_crypt :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.crypt"] = Virtual_Module{
 		name    = "mimir.crypt",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.actor ====================
+
+register_mimir_actor :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 8, reg.allocator)
+
+	// ---- Actor base class ----
+	actor_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	actor_attrs["on_receive"] = make_callable_type(reg,
+		{Param_Type{name = "message", type_id = TYPE_ANY}},
+		TYPE_ANY,
+	)
+	actor_attrs["pre_start"] = make_callable_type(reg, {}, TYPE_NONE)
+	actor_attrs["post_stop"] = make_callable_type(reg, {}, TYPE_NONE)
+
+	actor_class := register_type(reg, Class_Type{
+		name  = "Actor",
+		attrs = actor_attrs,
+	})
+	exports["Actor"] = actor_class
+
+	// ---- ActorRef class ----
+	actor_ref_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	actor_ref_attrs["send"] = make_callable_type(reg,
+		{Param_Type{name = "message", type_id = TYPE_ANY}},
+		TYPE_NONE,
+	)
+	actor_ref_attrs["ask"] = make_callable_type(reg,
+		{
+			Param_Type{name = "message", type_id = TYPE_ANY},
+			Param_Type{name = "timeout", type_id = TYPE_FLOAT, has_default = true},
+		},
+		TYPE_ANY,
+	)
+	actor_ref_attrs["stop"] = make_callable_type(reg, {}, TYPE_NONE)
+	actor_ref_attrs["is_alive"] = make_callable_type(reg, {}, TYPE_BOOL)
+
+	actor_ref_class := register_type(reg, Class_Type{
+		name  = "ActorRef",
+		attrs = actor_ref_attrs,
+	})
+	actor_ref_instance := make_instance_type(reg, actor_ref_class)
+	exports["ActorRef"] = actor_ref_class
+
+	// ---- ActorSystem class ----
+	system_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	system_spawn_type := make_callable_type(reg,
+		{Param_Type{name = "actor_class", type_id = TYPE_ANY}},
+		actor_ref_instance,
+	)
+	system_attrs["spawn"] = system_spawn_type
+	reg.actor_system_spawn_type = system_spawn_type
+	system_attrs["supervise"] = make_callable_type(reg,
+		{
+			Param_Type{name = "ref",          type_id = TYPE_ANY},
+			Param_Type{name = "strategy",     type_id = TYPE_STR, has_default = true},
+			Param_Type{name = "max_restarts", type_id = TYPE_INT, has_default = true},
+			Param_Type{name = "within",       type_id = TYPE_FLOAT, has_default = true},
+		},
+		TYPE_NONE,
+	)
+	system_attrs["shutdown"] = make_callable_type(reg,
+		{Param_Type{name = "timeout", type_id = TYPE_FLOAT, has_default = true}},
+		TYPE_NONE,
+	)
+	system_attrs["actors"] = make_list_type(reg, actor_ref_instance)
+
+	system_class := register_type(reg, Class_Type{
+		name  = "ActorSystem",
+		attrs = system_attrs,
+	})
+	exports["ActorSystem"] = system_class
+
+	// ---- spawn() convenience function ----
+	spawn_type := make_callable_type(reg,
+		{Param_Type{name = "actor_class", type_id = TYPE_ANY}},
+		actor_ref_instance,
+	)
+	exports["spawn"] = spawn_type
+	reg.actor_spawn_type = spawn_type
+	reg.actor_ref_class = actor_ref_class
+
+	vreg.modules["mimir.actor"] = Virtual_Module{
+		name    = "mimir.actor",
 		exports = exports,
 	}
 }

@@ -646,6 +646,75 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			}
 			return info.return_type
 		}
+		// mimir.actor spawn — infer ActorRef message type from actor class's on_receive
+		if ctx.reg.actor_spawn_type != 0 &&
+		   (func_type == ctx.reg.actor_spawn_type || func_type == ctx.reg.actor_system_spawn_type) {
+			if len(e.args) >= 1 {
+				arg_type := infer_expr(e.args[0], ctx)
+				is_class := false
+				at := get_type(ctx.reg, arg_type)
+				if at != nil {
+					#partial switch class_info in at.info {
+					case Class_Type:
+						is_class = true
+						// Look for on_receive method to extract message/return types
+						if on_recv, has := class_info.attrs["on_receive"]; has {
+							rt := get_type(ctx.reg, on_recv)
+							if rt != nil {
+								#partial switch recv_info in rt.info {
+								case Callable_Type:
+									msg_type := TYPE_ANY
+									ret_type := TYPE_ANY
+									if len(recv_info.params) > 0 {
+										msg_type = recv_info.params[0].type_id
+									}
+									if recv_info.return_type != TYPE_UNKNOWN {
+										ret_type = recv_info.return_type
+									}
+									// Build specialized ActorRef with concrete send/ask types
+									if msg_type != TYPE_ANY || ret_type != TYPE_ANY {
+										cache_key := [2]Type_ID{msg_type, ret_type}
+										if cached, found := ctx.reg.actor_ref_cache[cache_key]; found {
+											return cached
+										}
+										ref_attrs := make(map[string]Type_ID, 4, ctx.reg.allocator)
+										ref_attrs["send"] = make_callable_type(ctx.reg,
+											{Param_Type{name = "message", type_id = msg_type}},
+											TYPE_NONE,
+										)
+										ref_attrs["ask"] = make_callable_type(ctx.reg,
+											{
+												Param_Type{name = "message", type_id = msg_type},
+												Param_Type{name = "timeout", type_id = TYPE_FLOAT, has_default = true},
+											},
+											ret_type,
+										)
+										ref_attrs["stop"] = make_callable_type(ctx.reg, {}, TYPE_NONE)
+										ref_attrs["is_alive"] = make_callable_type(ctx.reg, {}, TYPE_BOOL)
+										spec_class := register_type(ctx.reg, Class_Type{
+											name  = "ActorRef",
+											attrs = ref_attrs,
+										})
+										spec_instance := make_instance_type(ctx.reg, spec_class)
+										ctx.reg.actor_ref_cache[cache_key] = spec_instance
+										return spec_instance
+									}
+								}
+							}
+						}
+					}
+				}
+				if !is_class && arg_type != TYPE_UNKNOWN && arg_type != TYPE_ANY {
+					emit_diagnostic(ctx, e.loc, "T002", .Error,
+						"spawn() requires an Actor subclass",
+						fmt.aprintf("Expected an Actor class, got '%s'",
+							type_to_string(ctx.reg, arg_type),
+							allocator = ctx.reg.allocator),
+						"Pass a class that inherits from Actor")
+				}
+			}
+			return info.return_type
+		}
 		// Shape-aware tensor return: if this is a mimir.array function, compute shaped result
 		if ctx.shape_reg != nil {
 			if shaped := infer_shaped_return(e, info.return_type, ctx); shaped != TYPE_UNKNOWN {

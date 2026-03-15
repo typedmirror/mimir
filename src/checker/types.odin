@@ -190,6 +190,10 @@ Type_Registry :: struct {
 	db_execute_type: Type_ID,  // mimir.db.execute callable (0 if not registered)
 	db_conn_query_type:   Type_ID,  // Connection.query method callable (0 if not registered)
 	db_conn_execute_type: Type_ID,  // Connection.execute method callable (0 if not registered)
+	actor_spawn_type:        Type_ID,  // mimir.actor.spawn callable (0 if not registered)
+	actor_system_spawn_type: Type_ID,  // ActorSystem.spawn method callable (0 if not registered)
+	actor_ref_class:         Type_ID,  // ActorRef Class_Type (for specialization)
+	actor_ref_cache:         map[[2]Type_ID]Type_ID,  // [msg_type, ret_type] → specialized ActorRef Instance_Type
 	allocator:      mem.Allocator,
 }
 
@@ -205,6 +209,7 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.instance_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.spec_cache = make(map[u64]Spec_Cache_Entry, 8, allocator)
 	reg.tensor_cache = make(map[u64]Type_ID, 8, allocator)
+	reg.actor_ref_cache = make(map[[2]Type_ID]Type_ID, 4, allocator)
 	reg.overload_sigs = make(map[binder.Symbol_ID][dynamic]Type_ID, 8, allocator)
 
 	// Slot 0: INVALID
