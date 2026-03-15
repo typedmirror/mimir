@@ -84,7 +84,16 @@ format_file :: proc(
 		}
 	}
 
-	// Pass 4: Blank line normalization (last — may shift line numbers)
+	// Pass 4: Line wrapping (text-based, adds lines — must run before blank line normalization)
+	if config.line_length > 0 {
+		wrapped_lines, wrap_changed := wrap_long_lines(lines, config, allocator)
+		if wrap_changed {
+			lines = wrapped_lines
+			any_changed = true
+		}
+	}
+
+	// Pass 5: Blank line normalization (last — may shift line numbers)
 	lines, any_changed = normalize_blank_lines(lines, &info, any_changed, allocator)
 
 	// Join lines and ensure trailing newline
@@ -622,6 +631,363 @@ find_unquoted_hash :: proc(s: string) -> int {
 		i += 1
 	}
 	return -1
+}
+
+// ==================== Pass 4: Line Wrapping ====================
+
+// C6: Main wrapping pass — iterates lines, wraps those exceeding line_length.
+wrap_long_lines :: proc(lines: []string, config: ^Format_Config, allocator: mem.Allocator) -> ([]string, bool) {
+	in_triple := mark_triple_string_regions(lines, allocator)
+	result := make([dynamic]string, 0, len(lines) + 32, allocator)
+	changed := false
+
+	for i := 0; i < len(lines); i += 1 {
+		line := lines[i]
+
+		// Skip short lines, blank lines, and triple-string interiors
+		if len(line) <= config.line_length || in_triple[i] {
+			append(&result, line)
+			continue
+		}
+
+		// Try import wrapping first
+		import_prefix, import_names, is_import := detect_import_wrap(line, allocator)
+		if is_import {
+			wrapped := wrap_import(import_prefix, import_names, config, allocator)
+			if len(wrapped) > 0 {
+				for w in wrapped { append(&result, w) }
+				changed = true
+				continue
+			}
+		}
+
+		// Try delimiter-based wrapping
+		open_pos, close_pos, found_delim := find_wrappable_delimiter(line)
+		if found_delim {
+			elements := split_at_top_level_commas(line[open_pos + 1:close_pos], allocator)
+			if len(elements) > 1 {
+				wrapped := wrap_with_delimiter(line, open_pos, close_pos, elements, config, allocator)
+				for w in wrapped { append(&result, w) }
+				changed = true
+				continue
+			}
+		}
+
+		// Can't wrap — leave as-is
+		append(&result, line)
+	}
+
+	return result[:], changed
+}
+
+// C1: Mark which lines are inside triple-quoted strings.
+mark_triple_string_regions :: proc(lines: []string, allocator: mem.Allocator) -> []bool {
+	in_triple := make([]bool, len(lines), allocator)
+	inside := false
+	quote_char: u8 = 0
+
+	for i := 0; i < len(lines); i += 1 {
+		line := lines[i]
+		j := 0
+		if inside {
+			in_triple[i] = true
+		}
+		for j < len(line) {
+			c := line[j]
+			if !inside {
+				// Skip single-char string prefixes
+				if (c == 'r' || c == 'R' || c == 'b' || c == 'B' ||
+				    c == 'u' || c == 'U' || c == 'f' || c == 'F') &&
+				   j + 1 < len(line) && (line[j + 1] == '"' || line[j + 1] == '\'') {
+					j += 1
+					c = line[j]
+				}
+				if (c == '"' || c == '\'') && j + 2 < len(line) && line[j + 1] == c && line[j + 2] == c {
+					inside = true
+					quote_char = c
+					in_triple[i] = true
+					j += 3
+					continue
+				}
+				// Skip single-quoted strings
+				if c == '"' || c == '\'' {
+					j += 1
+					for j < len(line) {
+						if line[j] == '\\' { j += 2; continue }
+						if line[j] == c { j += 1; break }
+						j += 1
+					}
+					continue
+				}
+				// Skip comments — rest of line is not code
+				if c == '#' { break }
+			} else {
+				// Inside triple string — look for closing
+				if c == quote_char && j + 2 < len(line) && line[j + 1] == quote_char && line[j + 2] == quote_char {
+					inside = false
+					j += 3
+					continue
+				}
+				if c == '\\' { j += 2; continue }
+			}
+			j += 1
+		}
+	}
+
+	return in_triple
+}
+
+// C2: Find outermost delimiter pair on a single line.
+find_wrappable_delimiter :: proc(line: string) -> (open_pos: int, close_pos: int, ok: bool) {
+	// Find first ( [ { that has a matching closer on same line
+	depth_paren := 0
+	depth_bracket := 0
+	depth_brace := 0
+	first_open := -1
+	first_open_kind: u8 = 0
+	in_single := false
+	in_double := false
+
+	for i := 0; i < len(line); i += 1 {
+		c := line[i]
+		if c == '\\' { i += 1; continue }
+		if c == '\'' && !in_double { in_single = !in_single }
+		if c == '"' && !in_single { in_double = !in_double }
+		if in_single || in_double { continue }
+		if c == '#' { break } // Comment — stop scanning
+
+		switch c {
+		case '(':
+			if first_open < 0 { first_open = i; first_open_kind = '(' }
+			depth_paren += 1
+		case ')':
+			depth_paren -= 1
+			if depth_paren == 0 && first_open_kind == '(' {
+				return first_open, i, true
+			}
+		case '[':
+			if first_open < 0 { first_open = i; first_open_kind = '[' }
+			depth_bracket += 1
+		case ']':
+			depth_bracket -= 1
+			if depth_bracket == 0 && first_open_kind == '[' {
+				return first_open, i, true
+			}
+		case '{':
+			if first_open < 0 { first_open = i; first_open_kind = '{' }
+			depth_brace += 1
+		case '}':
+			depth_brace -= 1
+			if depth_brace == 0 && first_open_kind == '{' {
+				return first_open, i, true
+			}
+		}
+	}
+
+	return -1, -1, false
+}
+
+// C3: Split text at top-level commas (depth 0, outside quotes).
+// Handles lambda params (skip commas before ':') and comprehension detection.
+split_at_top_level_commas :: proc(inner: string, allocator: mem.Allocator) -> []string {
+	// Refuse to split comprehensions: content with ' for ' ... ' in ' pattern
+	if is_comprehension_content(inner) {
+		result := make([dynamic]string, 0, 1, allocator)
+		append(&result, inner)
+		return result[:]
+	}
+
+	elements := make([dynamic]string, 0, 8, allocator)
+	depth := 0
+	in_single := false
+	in_double := false
+	in_lambda := false  // inside lambda parameter list (before ':')
+	start := 0
+
+	for i := 0; i < len(inner); i += 1 {
+		c := inner[i]
+		if c == '\\' { i += 1; continue }
+		if c == '\'' && !in_double { in_single = !in_single }
+		if c == '"' && !in_single { in_double = !in_double }
+		if in_single || in_double { continue }
+
+		// Detect 'lambda ' keyword at depth 0
+		if depth == 0 && !in_lambda && c == 'l' && i + 7 <= len(inner) && inner[i:i+7] == "lambda " {
+			in_lambda = true
+			i += 6 // skip past 'lambda' (loop will increment to space after)
+			continue
+		}
+
+		// Lambda colon ends param list — commas after this are normal
+		if in_lambda && depth == 0 && c == ':' {
+			in_lambda = false
+			continue
+		}
+
+		switch c {
+		case '(', '[', '{': depth += 1
+		case ')', ']', '}': depth -= 1
+		case ',':
+			if depth == 0 && !in_lambda {
+				append(&elements, inner[start:i])
+				start = i + 1
+			}
+		}
+	}
+
+	// Last element
+	if start <= len(inner) {
+		append(&elements, inner[start:])
+	}
+
+	return elements[:]
+}
+
+// Detect comprehension content: has ' for ' ... ' in ' at depth 0 outside quotes.
+is_comprehension_content :: proc(inner: string) -> bool {
+	depth := 0
+	in_single := false
+	in_double := false
+	found_for := false
+
+	for i := 0; i < len(inner); i += 1 {
+		c := inner[i]
+		if c == '\\' { i += 1; continue }
+		if c == '\'' && !in_double { in_single = !in_single }
+		if c == '"' && !in_single { in_double = !in_double }
+		if in_single || in_double { continue }
+
+		switch c {
+		case '(', '[', '{': depth += 1
+		case ')', ']', '}': depth -= 1
+		}
+
+		if depth == 0 && c == ' ' && i + 5 <= len(inner) && inner[i:i+5] == " for " {
+			found_for = true
+		}
+		if found_for && depth == 0 && c == ' ' && i + 4 <= len(inner) && inner[i:i+4] == " in " {
+			return true
+		}
+	}
+
+	return false
+}
+
+// C4: Detect bare import pattern: from x import a, b, c (no parens).
+detect_import_wrap :: proc(line: string, allocator: mem.Allocator) -> (prefix: string, names: string, ok: bool) {
+	trimmed := strings.trim_left_space(line)
+
+	// Match "from ... import ..." without parens
+	if strings.has_prefix(trimmed, "from ") {
+		import_idx := strings.index(trimmed, " import ")
+		if import_idx < 0 { return "", "", false }
+		after_import := trimmed[import_idx + 8:]
+		// Already has parens — let delimiter-based wrapping handle it
+		if len(after_import) > 0 && after_import[0] == '(' { return "", "", false }
+		// Wildcard import — can't wrap
+		if strings.trim_space(after_import) == "*" { return "", "", false }
+		// Must have a comma to be wrappable
+		if strings.index(after_import, ",") < 0 { return "", "", false }
+
+		indent := line[:len(line) - len(trimmed)]
+		prefix_str := fmt.aprintf("%s%s", indent, trimmed[:import_idx + 8], allocator = allocator)
+		return prefix_str, after_import, true
+	}
+
+	return "", "", false
+}
+
+// C5a: Wrap a delimiter-based construct into multiple lines.
+wrap_with_delimiter :: proc(
+	line: string,
+	open_pos: int,
+	close_pos: int,
+	elements: []string,
+	config: ^Format_Config,
+	allocator: mem.Allocator,
+) -> []string {
+	result := make([dynamic]string, 0, len(elements) + 2, allocator)
+	indent := get_leading_whitespace(line)
+	cont_indent := make_indent(indent, config.indent_width, allocator)
+
+	// First line: everything up to and including open delimiter
+	append(&result, line[:open_pos + 1])
+
+	// Each element on its own line
+	for elem in elements {
+		trimmed := strings.trim_space(elem)
+		if len(trimmed) == 0 { continue }
+		append(&result, format_element_line(cont_indent, trimmed, allocator))
+	}
+
+	// Closing delimiter + suffix at base indent
+	suffix := line[close_pos:]
+	close_line := fmt.aprintf("%s%s", indent, suffix, allocator = allocator)
+	append(&result, close_line)
+
+	return result[:]
+}
+
+// C5b: Wrap a bare import into parenthesized multi-line form.
+wrap_import :: proc(
+	prefix: string,
+	names: string,
+	config: ^Format_Config,
+	allocator: mem.Allocator,
+) -> []string {
+	elements := split_at_top_level_commas(names, allocator)
+	if len(elements) <= 1 { return {} }
+
+	result := make([dynamic]string, 0, len(elements) + 2, allocator)
+	indent := get_leading_whitespace(prefix)
+	cont_indent := make_indent(indent, config.indent_width, allocator)
+
+	// First line: prefix + opening paren
+	first_line := fmt.aprintf("%s(", prefix, allocator = allocator)
+	append(&result, first_line)
+
+	// Each name on its own line
+	for elem in elements {
+		trimmed := strings.trim_space(elem)
+		if len(trimmed) == 0 { continue }
+		append(&result, format_element_line(cont_indent, trimmed, allocator))
+	}
+
+	// Closing paren
+	close_line := fmt.aprintf("%s)", indent, allocator = allocator)
+	append(&result, close_line)
+
+	return result[:]
+}
+
+// Format an element line with comma, handling inline comments.
+// "elem  # comment" → "indent + elem,  # comment" (comma before comment).
+format_element_line :: proc(indent: string, elem: string, allocator: mem.Allocator) -> string {
+	hash_pos := find_unquoted_hash(elem)
+	if hash_pos > 0 {
+		before := strings.trim_right(elem[:hash_pos], " \t")
+		comment := elem[hash_pos:]
+		return fmt.aprintf("%s%s,  %s", indent, before, comment, allocator = allocator)
+	}
+	return fmt.aprintf("%s%s,", indent, elem, allocator = allocator)
+}
+
+// Get leading whitespace from a line.
+get_leading_whitespace :: proc(line: string) -> string {
+	for i := 0; i < len(line); i += 1 {
+		if line[i] != ' ' && line[i] != '\t' {
+			return line[:i]
+		}
+	}
+	return line
+}
+
+// Build continuation indent: base indent + N spaces.
+make_indent :: proc(base: string, width: int, allocator: mem.Allocator) -> string {
+	buf := make([dynamic]u8, 0, len(base) + width, allocator)
+	for i := 0; i < len(base); i += 1 { append(&buf, base[i]) }
+	for _ in 0..<width { append(&buf, ' ') }
+	return string(buf[:])
 }
 
 // ==================== Diff Output ====================

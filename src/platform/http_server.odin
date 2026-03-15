@@ -210,10 +210,11 @@ generate_serve_shim :: proc(config: Serve_Config, allocator: mem.Allocator) -> s
 	_sb(&buf, "sys.modules['mimir.http'] = _http\n")
 	_sb(&buf, "\n")
 
-	// ---- Inject db/crypt/json shims so served apps can import them ----
+	// ---- Inject db/crypt/json/data shims so served apps can import them ----
 	_sb(&buf, generate_db_shim(allocator))
 	_sb(&buf, generate_crypt_shim(allocator))
 	_sb(&buf, generate_json_shim(allocator))
+	_sb(&buf, generate_data_shim(allocator))
 
 	// ---- Route registries ----
 	_sb(&buf, "_ROUTES = []\n")
