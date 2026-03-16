@@ -674,4 +674,42 @@ ALL_EXPLANATIONS := [?]Explanation{
 		example = "    @route(\"GET\", \"/health\")\n    def health(req):\n        return {\"status\": \"ok\"}  # API003: not in openapi.json",
 		note = "Add the route to openapi.json or remove the handler if it\nis no longer needed.",
 	},
+	// ==================== Compatibility ====================
+	{
+		code = "COMPAT001", name = "Python version incompatibility", category = "Compatibility", severity = "Error",
+		description = "Code uses syntax that requires a newer Python version than\ndeclared in mimir.toml requires-python.",
+		example = "    # mimir.toml: requires-python = \">=3.8\"\n    match status:  # COMPAT001: match/case requires 3.10+\n        case \"ok\": ...",
+		note = "Either update requires-python to the needed version or\navoid using this syntax for backward compatibility.",
+	},
+	{
+		code = "DEP001", name = "Unused dependency", category = "Dependencies", severity = "Warning",
+		description = "A dependency is declared in mimir.toml [dependencies] but\nnever imported in the checked file.",
+		example = "    # mimir.toml: [dependencies] redis = \"*\"\n    # No 'import redis' found → DEP001",
+		note = "Remove unused dependencies to reduce install time and\nattack surface. Note: single-file check may miss imports\nfrom other project files.",
+	},
+	{
+		code = "DEP002", name = "Missing dependency", category = "Dependencies", severity = "Warning",
+		description = "A module is imported but not declared in mimir.toml\n[dependencies]. Standard library modules are excluded.",
+		example = "    import httpx  # DEP002: not in [dependencies]\n    # Fix: mimir add httpx",
+		note = "Undeclared dependencies may not be installed in deployment.\nRun 'mimir add <package>' to declare them.",
+	},
+	// ==================== Serialization ====================
+	{
+		code = "SER001", name = "Tainted deserialization", category = "Serialization", severity = "Error",
+		description = "pickle.loads() or marshal.loads() is called with data from a\npotentially untrusted source (request body, user input, etc.).",
+		example = "    import pickle\n    data = pickle.loads(request.body)  # SER001: untrusted data",
+		note = "Deserializing untrusted data can execute arbitrary code.\nUse json.loads() for untrusted data, or validate the source.",
+	},
+	{
+		code = "SER002", name = "Shelve uses pickle", category = "Serialization", severity = "Warning",
+		description = "shelve.open() uses pickle internally for serialization.\nOpening a shelve file from an untrusted source is unsafe.",
+		example = "    import shelve\n    db = shelve.open(\"data.db\")  # SER002: uses pickle",
+		note = "Shelve files can execute arbitrary code when opened.\nUse sqlite3 or json-based storage for untrusted data.",
+	},
+	{
+		code = "SER003", name = "__dict__ serialization", category = "Serialization", severity = "Warning",
+		description = "json.dumps() on obj.__dict__ may include non-serializable\ntypes (datetime, set, bytes, custom objects).",
+		example = "    import json\n    json.dumps(user.__dict__)  # SER003: may fail at runtime",
+		note = "Use dataclasses.asdict() or explicitly select fields.\n__dict__ includes all instance attributes without filtering.",
+	},
 }
