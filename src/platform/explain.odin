@@ -629,4 +629,17 @@ ALL_EXPLANATIONS := [?]Explanation{
 		description = "A while loop without a clear termination condition may not terminate in a\nbrowser context. WASM runs on the main thread by default.",
 		example = "    @wasm\n    def spin(x: int) -> int:\n        while True:  # WASM008\n            x += 1",
 	},
+	// ==================== Regex ====================
+	{
+		code = "REG001", name = "Invalid group reference", category = "Regex", severity = "Error",
+		description = "A regex match .group(N) or match[N] references a group number that\nexceeds the number of capturing groups in the pattern.",
+		example = "    import re\n    m = re.match(r\"(\\d+)-(\\d+)\", text)\n    m.group(3)  # REG001: pattern has 2 groups",
+		note = "Group 0 is the entire match and is always valid. Group numbers\nstart at 1 for the first capturing group.",
+	},
+	{
+		code = "REG002", name = "Invalid named group reference", category = "Regex", severity = "Error",
+		description = "A regex match .group(\"name\") references a named group that does\nnot exist in the pattern.",
+		example = "    import re\n    m = re.match(r\"(?P<host>[\\w.]+):(?P<port>\\d+)\", text)\n    m.group(\"prot\")  # REG002: no group \"prot\"",
+		note = "Check the pattern for (?P<name>...) groups. Named groups must\nmatch exactly (case-sensitive).",
+	},
 }
