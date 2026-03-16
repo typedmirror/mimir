@@ -41,6 +41,7 @@ Route_Context :: struct {
 }
 
 // Entry point — called from checker.odin after type checking.
+// Returns discovered routes for downstream API contract validation.
 analyze_routes :: proc(
 	module: ^parser.Module,
 	bind_result: ^binder.Bind_Result,
@@ -49,10 +50,10 @@ analyze_routes :: proc(
 	file_path: string,
 	diagnostics: ^[dynamic]core.Diagnostic,
 	allocator: mem.Allocator,
-) {
+) -> []Route_Info {
 	// Find the Symbol_ID for the imported 'route' function
 	route_type_id := find_route_symbol(bind_result, virtual_types, reg)
-	if route_type_id == TYPE_UNKNOWN { return } // route not imported
+	if route_type_id == TYPE_UNKNOWN { return nil } // route not imported
 
 	ctx := Route_Context{
 		module        = module,
@@ -83,6 +84,8 @@ analyze_routes :: proc(
 
 	// Check for duplicate routes
 	check_duplicate_routes(&ctx)
+
+	return ctx.routes[:]
 }
 
 // Find the Type_ID that corresponds to mimir.http.route in virtual_types.

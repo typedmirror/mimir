@@ -642,4 +642,36 @@ ALL_EXPLANATIONS := [?]Explanation{
 		example = "    import re\n    m = re.match(r\"(?P<host>[\\w.]+):(?P<port>\\d+)\", text)\n    m.group(\"prot\")  # REG002: no group \"prot\"",
 		note = "Check the pattern for (?P<name>...) groups. Named groups must\nmatch exactly (case-sensitive).",
 	},
+	// ==================== Time & Encoding ====================
+	{
+		code = "TIME001", name = "Naive/aware datetime mixing", category = "Time", severity = "Warning",
+		description = "Arithmetic or comparison between a naive datetime (no timezone) and an\naware datetime (has timezone) raises TypeError at runtime.",
+		example = "    from datetime import datetime, timezone\n    naive = datetime.now()\n    aware = datetime.now(tz=timezone.utc)\n    diff = aware - naive  # TIME001",
+		note = "datetime.now() returns naive. datetime.now(tz=timezone.utc) returns\naware. Use .replace(tzinfo=...) or .astimezone() to convert.",
+	},
+	{
+		code = "ENC001", name = "str passed to bytes-expecting function", category = "Encoding", severity = "Error",
+		description = "A function that expects bytes (e.g., hashlib, hmac) received a str\nargument. This raises TypeError at runtime.",
+		example = "    import hashlib\n    password = \"secret\"\n    hashlib.sha256(password)  # ENC001: expects bytes",
+		note = "Encode the string first: password.encode() or password.encode('utf-8').\nMost hashing/HMAC functions require bytes input.",
+	},
+	// ==================== API Contract ====================
+	{
+		code = "API001", name = "Response field not in spec", category = "API Contract", severity = "Error",
+		description = "A route handler returns a field that is not defined in the\nOpenAPI specification's response schema.",
+		example = "    @route(\"POST\", \"/users\")\n    def create_user(req):\n        return {\"id\": 1, \"username\": \"foo\"}  # API001: \"username\" not in spec",
+		note = "Check the OpenAPI spec's response properties for this route.\nThe spec may use a different field name (e.g., \"name\" vs \"username\").",
+	},
+	{
+		code = "API002", name = "Required field missing from response", category = "API Contract", severity = "Warning",
+		description = "The OpenAPI specification requires a field in the response that\nthe handler does not include in its return dict.",
+		example = "    @route(\"GET\", \"/users/{id}\")\n    def get_user(req, id):\n        return {\"id\": 1}  # API002: required field \"name\" missing",
+		note = "Add the missing field to the response or update the spec\nto make the field optional.",
+	},
+	{
+		code = "API003", name = "Route not in spec", category = "API Contract", severity = "Warning",
+		description = "A route handler is defined in code but not found in the\nOpenAPI specification file (openapi.json).",
+		example = "    @route(\"GET\", \"/health\")\n    def health(req):\n        return {\"status\": \"ok\"}  # API003: not in openapi.json",
+		note = "Add the route to openapi.json or remove the handler if it\nis no longer needed.",
+	},
 }
