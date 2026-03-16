@@ -96,6 +96,17 @@ format_file :: proc(
 	// Pass 5: Blank line normalization (last — may shift line numbers)
 	lines, any_changed = normalize_blank_lines(lines, &info, any_changed, allocator)
 
+	// Pass 6: Convergence re-wrap — earlier passes (trailing comma, quote normalization)
+	// may have pushed lines over the limit. Join multi-line constructs and re-wrap.
+	if config.line_length > 0 {
+		for _ in 0..<3 {
+			joined_lines, join_changed := join_and_rewrap(lines, config, allocator)
+			if !join_changed { break }
+			lines = joined_lines
+			any_changed = true
+		}
+	}
+
 	// Join lines and ensure trailing newline
 	joined := join_lines(lines, allocator)
 	if len(joined) > 0 && joined[len(joined) - 1] != '\n' {
@@ -970,6 +981,126 @@ format_element_line :: proc(indent: string, elem: string, allocator: mem.Allocat
 		return fmt.aprintf("%s%s,  %s", indent, before, comment, allocator = allocator)
 	}
 	return fmt.aprintf("%s%s,", indent, elem, allocator = allocator)
+}
+
+// C6: Join multi-line constructs that exceed line length, then re-wrap.
+// When trailing comma insertion or quote normalization pushes a line over the limit,
+// and the closing delimiter is on a subsequent line, join them and re-wrap.
+join_and_rewrap :: proc(lines: []string, config: ^Format_Config, allocator: mem.Allocator) -> ([]string, bool) {
+	in_triple := mark_triple_string_regions(lines, allocator)
+	result := make([dynamic]string, 0, len(lines) + 32, allocator)
+	changed := false
+
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+
+		// Skip short lines, blank lines, and triple-string interiors
+		if len(line) <= config.line_length || in_triple[i] {
+			append(&result, line)
+			i += 1
+			continue
+		}
+
+		// Line is too long — check if it has an unmatched opening delimiter
+		has_unmatched := has_unmatched_open(line)
+		if has_unmatched {
+			// Scan forward for continuation lines (closing delimiter)
+			joined, end_idx := join_continuation(lines, i, allocator)
+			if end_idx > i {
+				// Re-wrap the joined line
+				open_pos, close_pos, found_delim := find_wrappable_delimiter(joined)
+				if found_delim {
+					elements := split_at_top_level_commas(joined[open_pos + 1:close_pos], allocator)
+					if len(elements) > 1 {
+						wrapped := wrap_with_delimiter(joined, open_pos, close_pos, elements, config, allocator)
+						for w in wrapped { append(&result, w) }
+						changed = true
+						i = end_idx + 1
+						continue
+					}
+				}
+				// Couldn't re-wrap — keep original lines
+				for j in i..=end_idx {
+					append(&result, lines[j])
+				}
+				i = end_idx + 1
+				continue
+			}
+		}
+
+		// Also try single-line re-wrap (line may have both delimiters)
+		open_pos, close_pos, found_delim := find_wrappable_delimiter(line)
+		if found_delim {
+			elements := split_at_top_level_commas(line[open_pos + 1:close_pos], allocator)
+			if len(elements) > 1 {
+				wrapped := wrap_with_delimiter(line, open_pos, close_pos, elements, config, allocator)
+				for w in wrapped { append(&result, w) }
+				changed = true
+				i += 1
+				continue
+			}
+		}
+
+		append(&result, line)
+		i += 1
+	}
+
+	return result[:], changed
+}
+
+// Check if a line has more opening delimiters than closing ones (outside quotes).
+has_unmatched_open :: proc(line: string) -> bool {
+	depth := 0
+	in_single := false
+	in_double := false
+	for i := 0; i < len(line); i += 1 {
+		c := line[i]
+		if c == '\\' { i += 1; continue }
+		if c == '\'' && !in_double { in_single = !in_single }
+		if c == '"' && !in_single { in_double = !in_double }
+		if in_single || in_double { continue }
+		if c == '#' { break }
+		if c == '(' || c == '[' || c == '{' { depth += 1 }
+		if c == ')' || c == ']' || c == '}' { depth -= 1 }
+	}
+	return depth > 0
+}
+
+// Join continuation lines from start_idx until delimiters balance.
+join_continuation :: proc(lines: []string, start_idx: int, allocator: mem.Allocator) -> (joined: string, end_idx: int) {
+	depth := 0
+	in_single := false
+	in_double := false
+
+	for idx := start_idx; idx < len(lines) && idx < start_idx + 20; idx += 1 {
+		line := lines[idx]
+		for i := 0; i < len(line); i += 1 {
+			c := line[i]
+			if c == '\\' { i += 1; continue }
+			if c == '\'' && !in_double { in_single = !in_single }
+			if c == '"' && !in_single { in_double = !in_double }
+			if in_single || in_double { continue }
+			if c == '#' { break }
+			if c == '(' || c == '[' || c == '{' { depth += 1 }
+			if c == ')' || c == ']' || c == '}' { depth -= 1 }
+		}
+
+		if depth <= 0 && idx > start_idx {
+			// Balanced — join all lines from start_idx to idx
+			buf := strings.builder_make(allocator)
+			for j := start_idx; j <= idx; j += 1 {
+				trimmed := lines[j]
+				if j > start_idx {
+					trimmed = strings.trim_left_space(trimmed)
+				}
+				strings.write_string(&buf, trimmed)
+			}
+			return strings.to_string(buf), idx
+		}
+	}
+
+	return "", start_idx
 }
 
 // Get leading whitespace from a line.
