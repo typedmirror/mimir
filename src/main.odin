@@ -2263,8 +2263,16 @@ cmd_gpu :: proc(args: []string) {
 		for func in gpu_funcs {
 			total_funcs += 1
 			// Only extract graph if no errors for this function
-			graph := gpu.extract_graph(func, &bind_result, &type_ctx, p.arena.allocator)
+			graph, graph_diags := gpu.extract_graph(func, &bind_result, &type_ctx, file, p.arena.allocator)
 			total_nodes += len(graph.nodes)
+
+			// Print graph-level diagnostics (shape mismatches, unsupported ops)
+			if len(graph_diags) > 0 {
+				total_errors += len(graph_diags)
+				for d in graph_diags {
+					core.diagnostic_print(d)
+				}
+			}
 
 			// Summary line
 			elem, mm, red, oth := gpu.count_ops(&graph)
@@ -2420,7 +2428,8 @@ cmd_compile_gpu :: proc(args: []string) {
 		_, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, file, &config, p.arena.allocator)
 
 		for func in gpu_funcs {
-			graph := gpu.extract_graph(func, &bind_result, &type_ctx, p.arena.allocator)
+			graph, graph_diags2 := gpu.extract_graph(func, &bind_result, &type_ctx, file, p.arena.allocator)
+			for d in graph_diags2 { core.diagnostic_print(d) }
 
 			// Phase 27: Fusion
 			if fuse_flag {

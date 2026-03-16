@@ -6,6 +6,7 @@ import "core:fmt"
 import parser "mimir:parser"
 import binder "mimir:binder"
 import checker "mimir:checker"
+import core   "mimir:core"
 
 // Compute Graph — Operation DAG extracted from typed @gpu functions.
 // This IR is what Phase 26 emits from and Phase 27 optimizes.
@@ -55,16 +56,20 @@ GPU_Graph_Context :: struct {
 	bind_result: ^binder.Bind_Result,
 	env:         map[rawptr]GPU_Node_ID, // AST node address → graph node
 	name_env:    map[string]GPU_Node_ID, // variable name → graph node
+	diagnostics: ^[dynamic]core.Diagnostic,
+	file_path:   string,
 	allocator:   mem.Allocator,
 }
 
 // Extract a compute graph from a validated @gpu function.
+// Returns graph and any diagnostics (shape mismatches, unsupported ops, invalid types).
 extract_graph :: proc(
 	func: ^parser.Func_Def,
 	bind_result: ^binder.Bind_Result,
 	type_ctx: ^GPU_Type_Context,
+	file_path: string,
 	allocator: mem.Allocator,
-) -> Compute_Graph {
+) -> (Compute_Graph, []core.Diagnostic) {
 	graph := Compute_Graph{
 		nodes     = make([dynamic]GPU_Node, 0, 32, allocator),
 		inputs    = make([dynamic]GPU_Node_ID, 0, 8, allocator),
@@ -73,12 +78,16 @@ extract_graph :: proc(
 		allocator = allocator,
 	}
 
+	diags := make([dynamic]core.Diagnostic, 0, 4, allocator)
+
 	ctx := GPU_Graph_Context{
 		graph       = &graph,
 		type_ctx    = type_ctx,
 		bind_result = bind_result,
 		env         = make(map[rawptr]GPU_Node_ID, 32, allocator),
 		name_env    = make(map[string]GPU_Node_ID, 32, allocator),
+		diagnostics = &diags,
+		file_path   = file_path,
 		allocator   = allocator,
 	}
 
@@ -86,7 +95,16 @@ extract_graph :: proc(
 	extract_stmts(func.body, &ctx)
 	propagate_shapes(&graph, &ctx)
 
-	return graph
+	// H1: Validate matmul shape compatibility
+	validate_graph_shapes(&graph, &ctx)
+
+	// H2: Check for unsupported ops that would produce wrong output
+	check_unsupported_ops(&graph, &ctx)
+
+	// H4: Check for INVALID_TYPE in output nodes
+	validate_output_types(&graph, &ctx)
+
+	return graph, diags[:]
 }
 
 // Create Param nodes for function arguments.
@@ -673,4 +691,111 @@ op_kind_string :: proc(kind: GPU_Op_Kind) -> string {
 	case .Broadcast: return "Broadcast"
 	}
 	return "Unknown"
+}
+
+// ==================== Graph Validation ====================
+
+// H1: Validate matmul shape compatibility — K dimensions must match.
+validate_graph_shapes :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
+	for &node in graph.nodes {
+		if node.kind != .MatMul { continue }
+		if len(node.inputs) < 2 { continue }
+
+		a := get_node(graph, node.inputs[0])
+		b := get_node(graph, node.inputs[1])
+		if a == nil || b == nil { continue }
+		if a.output_shape == nil || b.output_shape == nil { continue }
+		if len(a.output_shape) < 2 || len(b.output_shape) < 2 { continue }
+
+		k_a := a.output_shape[len(a.output_shape) - 1]
+		k_b := b.output_shape[len(b.output_shape) - 2]
+
+		// Skip symbolic dimensions
+		if k_a == -1 || k_b == -1 { continue }
+
+		if k_a != k_b {
+			append(ctx.diagnostics, core.Diagnostic{
+				severity = .Error,
+				location = core.Location{
+					file   = ctx.file_path,
+					line   = int(node.loc.line),
+					column = int(node.loc.col),
+				},
+				what = fmt.tprintf("matmul shape mismatch: left has K=%d, right has K=%d", k_a, k_b),
+				why  = "matrix multiplication requires inner dimensions to match (A[M,K] @ B[K,N])",
+				fix  = "ensure the inner dimensions of both matrices are equal",
+				code = "GPU011",
+			})
+		}
+	}
+}
+
+// H2: Check for unsupported ops that would produce wrong output (silent passthrough).
+check_unsupported_ops :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
+	for &node in graph.nodes {
+		#partial switch node.kind {
+		case .Softmax:
+			append(ctx.diagnostics, core.Diagnostic{
+				severity = .Error,
+				location = core.Location{
+					file   = ctx.file_path,
+					line   = int(node.loc.line),
+					column = int(node.loc.col),
+				},
+				what = "softmax cannot be compiled to a per-element GPU kernel",
+				why  = "softmax requires a reduction pass (find max, sum exp) that needs shared memory and synchronization",
+				fix  = "compute softmax on the host, or split into separate max/exp/sum/div operations",
+				code = "GPU010",
+			})
+		case .Sum, .Mean, .Max, .Min:
+			append(ctx.diagnostics, core.Diagnostic{
+				severity = .Error,
+				location = core.Location{
+					file   = ctx.file_path,
+					line   = int(node.loc.line),
+					column = int(node.loc.col),
+				},
+				what = fmt.tprintf("%s reduction cannot be compiled to a per-element GPU kernel", op_kind_string(node.kind)),
+				why  = "reductions require shared memory accumulation and work group synchronization",
+				fix  = "compute the reduction on the host or use a dedicated reduction kernel",
+				code = "GPU010",
+			})
+		case .Transpose:
+			append(ctx.diagnostics, core.Diagnostic{
+				severity = .Error,
+				location = core.Location{
+					file   = ctx.file_path,
+					line   = int(node.loc.line),
+					column = int(node.loc.col),
+				},
+				what = "transpose cannot be compiled to a per-element GPU kernel",
+				why  = "transpose requires index remapping that per-element kernels cannot express",
+				fix  = "transpose on the host or use a dedicated transpose kernel with shared memory",
+				code = "GPU010",
+			})
+		case:
+		}
+	}
+}
+
+// H4: Validate output types — INVALID_TYPE means extraction failed silently.
+validate_output_types :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
+	for &node in graph.nodes {
+		if node.kind == .Param { continue }
+		if node.kind == .Constant { continue }
+		if node.output_type == checker.INVALID_TYPE {
+			append(ctx.diagnostics, core.Diagnostic{
+				severity = .Error,
+				location = core.Location{
+					file   = ctx.file_path,
+					line   = int(node.loc.line),
+					column = int(node.loc.col),
+				},
+				what = fmt.tprintf("GPU graph node '%s' has unresolved type", op_kind_string(node.kind)),
+				why  = "type annotation could not be resolved — the kernel cannot be compiled",
+				fix  = "add explicit type annotations to all @gpu function parameters and return type",
+				code = "GPU010",
+			})
+		}
+	}
 }

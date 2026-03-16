@@ -239,8 +239,11 @@ emit_spirv :: proc(
 	// Runtime array of scalar type
 	rtarr_id := spirv_alloc_id(&m)
 	spirv_emit(&m.types, SPIRV_OP_TYPE_RUNTIME_ARRAY, rtarr_id, scalar_id)
-	// ArrayStride 4
-	spirv_emit(&m.annotations, SPIRV_OP_DECORATE, rtarr_id, SPIRV_DEC_ARRAY_STRIDE, 4)
+	// ArrayStride: depends on element type (2 for f16/bf16, 4 for f32/i32, 8 for f64/i64)
+	array_stride := 4
+	if elem_type == type_ctx.float16_id || elem_type == type_ctx.bfloat16_id { array_stride = 2 }
+	if elem_type == type_ctx.int64_id { array_stride = 8 }
+	spirv_emit(&m.annotations, SPIRV_OP_DECORATE, rtarr_id, SPIRV_DEC_ARRAY_STRIDE, u32(array_stride))
 
 	// Struct wrapping runtime array (for each buffer)
 	buf_struct_id := spirv_alloc_id(&m)
