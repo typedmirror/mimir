@@ -384,6 +384,9 @@ check_scope :: proc(
 	// Track diagnostic count before this scope (for dedup on constraint re-inference)
 	diag_count_before_scope := len(result.diagnostics)
 
+	// Match case pattern bindings (populated by check_match_stmt, consumed at BFS block entry)
+	match_case_envs := make(map[flow.Block_ID]Match_Case_Env, 4, reg.allocator)
+
 	// BFS walk from entry
 	visited := make([]bool, n_blocks, reg.allocator)
 	queue := make([dynamic]flow.Block_ID, 0, n_blocks, reg.allocator)
@@ -420,21 +423,31 @@ check_scope :: proc(
 		// Apply narrowing guards
 		apply_guards(&env, block_id, flow_result.guards[:], reg, bind_result, builtins)
 
+		// Inject match case pattern bindings (populated by check_match_stmt)
+		if mce, has_mce := match_case_envs[block_id]; has_mce {
+			for sym_id, type_id in mce.bindings {
+				env.types[sym_id] = type_id
+			}
+		}
+
 		// Build inference context
 		ctx := Infer_Context{
-			env            = &env,
-			reg            = reg,
-			bind_result    = bind_result,
-			builtins       = builtins,
-			expr_types     = &result.expr_types,
-			diagnostics    = &result.diagnostics,
-			file_path      = file_path,
-			declared_types = &declared_types,
-			current_class  = current_class,
-			scope_id       = cfg.scope_id,
-			global_types   = global_types_ptr,
-			shape_reg      = shape_reg,
-			const_map      = const_map,
+			env              = &env,
+			reg              = reg,
+			bind_result      = bind_result,
+			builtins         = builtins,
+			expr_types       = &result.expr_types,
+			diagnostics      = &result.diagnostics,
+			file_path        = file_path,
+			declared_types   = &declared_types,
+			current_class    = current_class,
+			scope_id         = cfg.scope_id,
+			global_types     = global_types_ptr,
+			shape_reg        = shape_reg,
+			const_map        = const_map,
+			cfg              = cfg,
+			current_block    = block_id,
+			match_case_envs  = &match_case_envs,
 		}
 
 		// Process each statement in the block
@@ -518,20 +531,30 @@ check_scope :: proc(
 
 				apply_guards(&env, block_id, flow_result.guards[:], reg, bind_result, builtins)
 
+				// Inject match case pattern bindings (re-inference pass)
+				if mce, has_mce := match_case_envs[block_id]; has_mce {
+					for sym_id, type_id in mce.bindings {
+						env.types[sym_id] = type_id
+					}
+				}
+
 				ctx := Infer_Context{
-					env            = &env,
-					reg            = reg,
-					bind_result    = bind_result,
-					builtins       = builtins,
-					expr_types     = &result.expr_types,
-					diagnostics    = &result.diagnostics,
-					file_path      = file_path,
-					declared_types = &declared_types,
-					current_class  = current_class,
-					scope_id       = cfg.scope_id,
-					global_types   = global_types_ptr,
-					shape_reg      = shape_reg,
-					const_map      = const_map,
+					env              = &env,
+					reg              = reg,
+					bind_result      = bind_result,
+					builtins         = builtins,
+					expr_types       = &result.expr_types,
+					diagnostics      = &result.diagnostics,
+					file_path        = file_path,
+					declared_types   = &declared_types,
+					current_class    = current_class,
+					scope_id         = cfg.scope_id,
+					global_types     = global_types_ptr,
+					shape_reg        = shape_reg,
+					const_map        = const_map,
+					cfg              = cfg,
+					current_block    = block_id,
+					match_case_envs  = &match_case_envs,
 				}
 
 				for stmt in block.stmts {
@@ -772,6 +795,7 @@ check_stmt :: proc(
 	case ^parser.Try_Stmt:
 	case ^parser.Try_Star:
 	case ^parser.Match_Stmt:
+		check_match_stmt(s, ctx)
 	case ^parser.Type_Alias_Stmt:
 	}
 }

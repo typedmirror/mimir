@@ -9,6 +9,10 @@ import core   "mimir:core"
 
 // ==================== Expression Type Inference ====================
 
+Match_Case_Env :: struct {
+	bindings: map[binder.Symbol_ID]Type_ID,
+}
+
 Infer_Context :: struct {
 	env:            ^Type_Env,
 	reg:            ^Type_Registry,
@@ -23,6 +27,9 @@ Infer_Context :: struct {
 	global_types:   ^map[binder.Symbol_ID]Type_ID, // Module-level symbol types (LEGB "G" fallback)
 	shape_reg:      ^Shape_Registry,               // Shape semantics for mimir.array functions
 	const_map:      ^flow.Const_Map,               // Constant propagation results for shape extraction
+	cfg:              ^flow.CFG,                           // CFG for match case block mapping
+	current_block:    flow.Block_ID,                     // Current block being processed
+	match_case_envs:  ^map[flow.Block_ID]Match_Case_Env, // Pattern bindings per case block
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -1301,6 +1308,201 @@ infer_shaped_return :: proc(e: ^parser.Call_Expr, base_return: Type_ID, ctx: ^In
 	}
 
 	return TYPE_UNKNOWN
+}
+
+// ==================== Match/Case Type Checking ====================
+
+// check_match_stmt: infer subject, map case blocks to patterns, check exhaustiveness.
+check_match_stmt :: proc(s: ^parser.Match_Stmt, ctx: ^Infer_Context) {
+	subject_type := infer_expr(s.subject, ctx)
+	if ctx.cfg == nil || ctx.match_case_envs == nil { return }
+
+	// Get current block's edges — case blocks are successors with Case_Match/Case_Default
+	block := flow.get_block(ctx.cfg, ctx.current_block)
+	if block == nil { return }
+
+	case_idx := 0
+	has_wildcard := false
+
+	for i in 0..<len(block.succs) {
+		kind := block.edge_kinds[i]
+		if kind != .Case_Match && kind != .Case_Default { continue }
+
+		target_block := block.succs[i]
+		if case_idx >= len(s.cases) { break }
+
+		mc := s.cases[case_idx]
+		case_idx += 1
+
+		// Build pattern bindings for this case block
+		bindings := make(map[binder.Symbol_ID]Type_ID, 4, ctx.reg.allocator)
+		bind_match_pattern(mc.pattern, subject_type, &bindings, ctx)
+
+		// Check guard expression (with pattern bindings temporarily injected)
+		if mc.guard != nil {
+			for sym_id, type_id in bindings {
+				ctx.env.types[sym_id] = type_id
+			}
+			infer_expr(mc.guard, ctx)
+		}
+
+		// Track exhaustiveness — wildcard without guard counts
+		if kind == .Case_Default && mc.guard == nil {
+			has_wildcard = true
+		}
+
+		ctx.match_case_envs[target_block] = Match_Case_Env{
+			bindings = bindings,
+		}
+	}
+
+	// MATCH001: Non-exhaustive match
+	if !has_wildcard && len(s.cases) > 0 {
+		emit_diagnostic(ctx, s.loc, "MATCH001", .Warning,
+			"Non-exhaustive match statement",
+			"Match may not handle all possible values of the subject",
+			"Add a wildcard case: case _: ...")
+	}
+}
+
+// bind_match_pattern: recursively bind pattern variables into the env map.
+// Returns the narrowed type of the subject for this pattern.
+bind_match_pattern :: proc(
+	pattern: parser.Pattern,
+	subject_type: Type_ID,
+	bindings: ^map[binder.Symbol_ID]Type_ID,
+	ctx: ^Infer_Context,
+) -> Type_ID {
+	if pattern == nil { return subject_type }
+
+	#partial switch p in pattern {
+	case ^parser.Match_As:
+		// case _ (wildcard): empty name
+		// case pattern as name: bind name to narrowed type
+		narrowed := subject_type
+		if p.pattern != nil {
+			narrowed = bind_match_pattern(p.pattern, subject_type, bindings, ctx)
+		}
+		if len(p.name) > 0 {
+			if sym_id := _match_lookup_sym(p.name, ctx); sym_id != 0 {
+				bindings[sym_id] = narrowed
+			}
+		}
+		return narrowed
+
+	case ^parser.Match_Value:
+		// case 42, case "hello" — infer the value's type
+		if p.value != nil {
+			infer_expr(p.value, ctx)
+		}
+		return subject_type
+
+	case ^parser.Match_Singleton:
+		// case True/False/None
+		#partial switch _ in p.value {
+		case parser.Const_None:
+			return TYPE_NONE
+		case bool:
+			return TYPE_BOOL
+		}
+		return subject_type
+
+	case ^parser.Match_Class:
+		// case ClassName(attr=val, ...) — narrow to class type
+		class_type := TYPE_UNKNOWN
+		if p.cls != nil {
+			class_type = infer_expr(p.cls, ctx)
+		}
+		// Bind keyword pattern variables
+		for i in 0..<len(p.kwd_patterns) {
+			kwd_type := TYPE_ANY
+			// Try to resolve attribute type from class
+			if class_type != TYPE_UNKNOWN {
+				ct := get_type(ctx.reg, class_type)
+				if ct != nil {
+					#partial switch class_info in ct.info {
+					case Class_Type:
+						if i < len(p.kwd_attrs) {
+							if attr_type, has := class_info.attrs[p.kwd_attrs[i]]; has {
+								kwd_type = attr_type
+							}
+						}
+					}
+				}
+			}
+			bind_match_pattern(p.kwd_patterns[i], kwd_type, bindings, ctx)
+		}
+		// Bind positional pattern variables
+		for pat in p.patterns {
+			bind_match_pattern(pat, TYPE_ANY, bindings, ctx)
+		}
+		// Narrow subject to the class instance type
+		if class_type != TYPE_UNKNOWN && class_type != TYPE_ANY {
+			return make_instance_type(ctx.reg, class_type)
+		}
+		return subject_type
+
+	case ^parser.Match_Sequence:
+		// case [x, y, z] — bind elements
+		elem_type := get_iterator_element_type(subject_type, ctx.reg)
+		for pat in p.patterns {
+			bind_match_pattern(pat, elem_type, bindings, ctx)
+		}
+		return subject_type
+
+	case ^parser.Match_Mapping:
+		// case {"key": val, **rest} — bind values and rest
+		val_type := TYPE_ANY
+		// Try to get dict value type from subject
+		st := get_type(ctx.reg, subject_type)
+		if st != nil {
+			#partial switch dict_info in st.info {
+			case Dict_Type:
+				val_type = dict_info.value
+			}
+		}
+		for i in 0..<len(p.patterns) {
+			if i < len(p.keys) {
+				infer_expr(p.keys[i], ctx)
+			}
+			bind_match_pattern(p.patterns[i], val_type, bindings, ctx)
+		}
+		if len(p.rest) > 0 {
+			if sym_id := _match_lookup_sym(p.rest, ctx); sym_id != 0 {
+				bindings[sym_id] = make_dict_type(ctx.reg, TYPE_STR, val_type)
+			}
+		}
+		return subject_type
+
+	case ^parser.Match_Star:
+		// case [first, *rest] — rest is a list
+		if len(p.name) > 0 {
+			if sym_id := _match_lookup_sym(p.name, ctx); sym_id != 0 {
+				elem_type := get_iterator_element_type(subject_type, ctx.reg)
+				bindings[sym_id] = make_list_type(ctx.reg, elem_type)
+			}
+		}
+		return subject_type
+
+	case ^parser.Match_Or:
+		// case 1 | 2 | 3 — bind from first alternative (all must bind same names per PEP 634)
+		for pat in p.patterns {
+			bind_match_pattern(pat, subject_type, bindings, ctx)
+		}
+		return subject_type
+	}
+
+	return subject_type
+}
+
+// Look up a symbol by name in the current scope (for match pattern variables).
+_match_lookup_sym :: proc(name: string, ctx: ^Infer_Context) -> binder.Symbol_ID {
+	scope := binder.result_get_scope(ctx.bind_result, ctx.scope_id)
+	if scope == nil { return 0 }
+	if sym_id, found := scope.symbols[name]; found {
+		return sym_id
+	}
+	return 0
 }
 
 // ==================== Helpers ====================
