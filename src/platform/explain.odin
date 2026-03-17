@@ -396,6 +396,12 @@ ALL_EXPLANATIONS := [?]Explanation{
 		example = "    async def main():\n        asyncio.run(other())  # CONC005: deadlock",
 		note = "Use 'await other()' directly instead of asyncio.run() inside async code.",
 	},
+	{
+		code = "CONC006", name = "Free-threaded unsafe", category = "Concurrency", severity = "Warning",
+		description = "A global variable is mutated inside a function. In free-threaded Python\n(PEP 703), this is a data race without explicit synchronization.",
+		example = "    counter = 0\n    def increment():\n        global counter\n        counter = counter + 1  # CONC006",
+		note = "Protect with threading.Lock, use queue.Queue, or make the variable thread-local.",
+	},
 
 	// ── Performance ──
 
@@ -421,6 +427,25 @@ ALL_EXPLANATIONS := [?]Explanation{
 		description = "A function decorated with @lru_cache has a parameter with a mutable type\n(list, dict, set) that cannot be hashed, causing a TypeError at runtime.",
 		example = "    @lru_cache\n    def process(data: list):  # PERF004: list is unhashable\n        ...",
 		note = "Use tuple instead of list for cached function parameters.",
+	},
+
+	{
+		code = "PERF005", name = "N+1 query pattern", category = "Performance", severity = "Warning",
+		description = "A database query or ORM call is executed inside a loop, causing\nN+1 round-trips to the database.",
+		example = "    for user in users:\n        orders = cursor.execute(\"SELECT ...\")  # PERF005",
+		note = "Use a JOIN, eager loading, or collect IDs and query once outside the loop.",
+	},
+	{
+		code = "PERF006", name = "Unbounded cache", category = "Performance", severity = "Warning",
+		description = "A module-level dict is used as a cache with entries added in functions\nbut never evicted, causing unbounded memory growth.",
+		example = "    _cache = {}\n    def process(key, data):\n        _cache[key] = data  # PERF006",
+		note = "Use functools.lru_cache, set a maximum size, or add an eviction policy.",
+	},
+	{
+		code = "PERF007", name = "Heavy import", category = "Performance", severity = "Info",
+		description = "A large package is imported at module level, increasing startup time\nand memory usage even if only a small part is used.",
+		example = "    import tensorflow  # PERF007: ~2.1GB, ~8s import",
+		note = "Move the import inside the function that uses it (lazy import)\nif not needed at module level.",
 	},
 
 	// ── Migration ──

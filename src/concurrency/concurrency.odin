@@ -172,6 +172,10 @@ check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: b
 			}
 			// CONC003: t = threading.Thread(target=...)
 			check_thread_target(ctx, s.value)
+			// CONC006: assignment to global in free-threaded context
+			if ctx.has_threading {
+				check_nogil_unsafe(ctx, stmt, globals)
+			}
 
 		case ^parser.Aug_Assign:
 			// CONC004: non-atomic compound assignment on global

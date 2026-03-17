@@ -139,6 +139,28 @@ check_expr_deadlock :: proc(ctx: ^Concurrency_Context, expr: parser.Expr) {
 	}
 }
 
+// CONC006: Free-threaded unsafe — global mutable state without locks
+// Fires on any assignment to a global variable inside a function (not just compound).
+// Distinct from CONC004 which only catches augmented assignment.
+check_nogil_unsafe :: proc(ctx: ^Concurrency_Context, stmt: parser.Stmt, globals: []string) {
+	#partial switch s in stmt {
+	case ^parser.Assign:
+		if len(s.targets) >= 1 {
+			if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+				for g in globals {
+					if g == name.id {
+						emit(ctx, "CONC006", s.loc,
+							fmt.tprintf("assignment to global '%s' is not thread-safe without GIL", name.id),
+							"in free-threaded Python (PEP 703), concurrent writes to shared state cause data races",
+							"protect with threading.Lock, use queue.Queue, or make the variable thread-local")
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
 // Check if a call is loop.run_until_complete(...) or asyncio.run(...)
 is_loop_blocking :: proc(ctx: ^Concurrency_Context, call: ^parser.Call_Expr) -> bool {
 	#partial switch f in call.func {

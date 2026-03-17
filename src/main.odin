@@ -97,6 +97,10 @@ main :: proc() {
 		cmd_compile_wasm(args[2:])
 	case "explain":
 		platform.cmd_explain(args[2:])
+	case "task":
+		cmd_task(args[2:])
+	case "deps":
+		cmd_deps(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -112,6 +116,131 @@ MIMIR_VERSION :: #config(MIMIR_VERSION, "0.0.1-dev")
 
 cmd_version :: proc() {
 	fmt.printfln("mimir %s", MIMIR_VERSION)
+}
+
+cmd_task :: proc(args: []string) {
+	config := platform.load_project_config()
+	if config == nil {
+		fmt.eprintfln("mimir task: no mimir.toml found")
+		os.exit(1)
+	}
+
+	tasks := platform.get_tasks(config)
+	if tasks == nil || len(tasks) == 0 {
+		fmt.eprintfln("mimir task: no [tasks] section in mimir.toml")
+		os.exit(1)
+	}
+
+	if len(args) == 0 {
+		fmt.printfln("Available tasks:")
+		for name, cmd in tasks {
+			fmt.printfln("  %-20s %s", name, cmd)
+		}
+		return
+	}
+
+	task_name := args[0]
+	cmd_str, found := tasks[task_name]
+	if !found {
+		fmt.eprintfln("mimir task: unknown task '%s'", task_name)
+		fmt.eprintfln("Available tasks:")
+		for name in tasks {
+			fmt.eprintfln("  %s", name)
+		}
+		os.exit(1)
+	}
+
+	// Execute via shell
+	shell_args := [?]string{"-c", cmd_str}
+	desc := os.Process_Desc{
+		command = {"/bin/sh", shell_args[0], shell_args[1]},
+		stdin  = os.stdin,
+		stdout = os.stdout,
+		stderr = os.stderr,
+	}
+	process, proc_err := os.process_start(desc)
+	if proc_err != nil {
+		fmt.eprintfln("mimir task: failed to start: %v", proc_err)
+		os.exit(1)
+	}
+	state, wait_err := os.process_wait(process)
+	if wait_err != nil {
+		fmt.eprintfln("mimir task: process error: %v", wait_err)
+		os.exit(1)
+	}
+	os.exit(int(state.exit_code))
+}
+
+cmd_deps :: proc(args: []string) {
+	target := "."
+	if len(args) > 0 { target = args[0] }
+
+	p: Pipeline; ok := pipeline_start("deps", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
+
+	config := platform.load_project_config()
+	declared := make(map[string]bool, 16, p.arena.allocator)
+	if config != nil {
+		deps := platform.get_dependencies(config)
+		for name in deps {
+			declared[name] = true
+		}
+	}
+
+	imported := make(map[string]bool, 32, p.arena.allocator)
+	stdlib := make(map[string]bool, 32, p.arena.allocator)
+	STDLIB_MODULES :: [?]string{
+		"os", "sys", "io", "re", "json", "math", "time", "datetime",
+		"collections", "itertools", "functools", "typing", "pathlib",
+		"logging", "unittest", "hashlib", "hmac", "secrets", "random",
+		"threading", "multiprocessing", "asyncio", "subprocess", "socket",
+		"http", "urllib", "email", "csv", "sqlite3", "pickle", "shelve",
+		"abc", "dataclasses", "enum", "copy", "pprint", "textwrap",
+		"string", "struct", "array", "queue", "shutil", "tempfile",
+		"glob", "fnmatch", "argparse", "configparser", "traceback",
+		"inspect", "importlib", "contextlib", "warnings",
+	}
+	for s in STDLIB_MODULES { stdlib[s] = true }
+
+	for file in p.files {
+		module := pipeline_parse_file(&p, "deps", file)
+		if module == nil { continue }
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		for &imp in bind_result.imports {
+			// Extract top-level module name
+			top := imp.module_name
+			for i := 0; i < len(top); i += 1 {
+				if top[i] == '.' { top = top[:i]; break }
+			}
+			if !(top in stdlib) && top != "mimir" {
+				imported[top] = true
+			}
+		}
+	}
+
+	// Report
+	unused_count := 0
+	for name in declared {
+		if !(name in imported) {
+			if unused_count == 0 { fmt.printfln("Unused (in mimir.toml but not imported):") }
+			fmt.printfln("  %s", name)
+			unused_count += 1
+		}
+	}
+
+	missing_count := 0
+	for name in imported {
+		if !(name in declared) {
+			if missing_count == 0 { fmt.printfln("Missing (imported but not in mimir.toml):") }
+			fmt.printfln("  %s", name)
+			missing_count += 1
+		}
+	}
+
+	if unused_count == 0 && missing_count == 0 {
+		fmt.printfln("mimir deps: all dependencies aligned (%d declared, %d imported)", len(declared), len(imported))
+	}
 }
 
 cmd_format :: proc(args: []string) {

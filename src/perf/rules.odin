@@ -13,6 +13,9 @@ ALL_RULES := [?]Perf_Rule{
 	{code = "PERF002", name = "unnecessary-list-comp",       check = check_unnecessary_list_comp},
 	{code = "PERF003", name = "open-read-full-file",         check = check_open_read},
 	{code = "PERF004", name = "unhashable-lru-cache-param",  check = check_unhashable_lru_cache},
+	{code = "PERF005", name = "nplus1-query",                check = check_nplus1_query},
+	{code = "PERF006", name = "unbounded-cache",             check = check_unbounded_cache},
+	{code = "PERF007", name = "heavy-import",                check = check_heavy_import},
 }
 
 is_rule_enabled :: proc(code: string, config: ^Perf_Config) -> bool {

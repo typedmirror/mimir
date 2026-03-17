@@ -170,6 +170,49 @@ default_config :: proc(dir: string, allocator: mem.Allocator) -> Project_Config 
 	}
 }
 
+// Load mimir.toml from current directory or parents. Returns nil if not found.
+load_project_config :: proc(allocator: mem.Allocator = context.allocator) -> ^Project_Config {
+	cwd, cwd_err := os.get_working_directory(allocator)
+	if cwd_err != nil { return nil }
+	config_path, found := find_config(cwd, allocator)
+	if !found { return nil }
+	config, err := read_config(config_path, allocator)
+	if err != nil { return nil }
+	result := new(Project_Config, allocator)
+	result^ = config
+	return result
+}
+
+// Get [tasks] section as a map from task name to command string.
+get_tasks :: proc(config: ^Project_Config, allocator: mem.Allocator = context.allocator) -> map[string]string {
+	// Re-read the TOML file to access the [tasks] section
+	data, read_err := os.read_entire_file(config.file_path, allocator)
+	if read_err != nil { return {} }
+	doc, parse_err := toml_parse(string(data), allocator)
+	if parse_err != nil { return {} }
+	tasks_table, has_tasks := doc.tables["tasks"]
+	if !has_tasks { return {} }
+	result := make(map[string]string, len(tasks_table.order), allocator)
+	for name in tasks_table.order {
+		if val, ok := tasks_table.entries[name]; ok {
+			if s, is_str := val.(string); is_str {
+				result[name] = s
+			}
+		}
+	}
+	return result
+}
+
+// Get dependency names from config.
+get_dependencies :: proc(config: ^Project_Config) -> []string {
+	if config == nil { return {} }
+	result := make([dynamic]string, 0, len(config.dependencies))
+	for dep in config.dependencies {
+		append(&result, dep.name)
+	}
+	return result[:]
+}
+
 // Get the basename of a directory path.
 @(private = "file")
 _dir_basename :: proc(path: string) -> string {
