@@ -54,6 +54,9 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.stats
 	register_mimir_stats(&vreg, reg)
 
+	// Register mimir.plot
+	register_mimir_plot(&vreg, reg)
+
 	return vreg
 }
 
@@ -1165,6 +1168,135 @@ register_mimir_stats :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.stats"] = Virtual_Module{
 		name    = "mimir.stats",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.plot ====================
+
+register_mimir_plot :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 32, reg.allocator)
+
+	tensor_f64 := make_tensor_type(reg, TYPE_FLOAT, {})
+	no_params  := make([]Param_Type, 0, reg.allocator)
+
+	// Common params across chart types
+	title_param   := Param_Type{name = "title",  type_id = TYPE_STR, has_default = true}
+	xlabel_param  := Param_Type{name = "xlabel", type_id = TYPE_STR, has_default = true}
+	ylabel_param  := Param_Type{name = "ylabel", type_id = TYPE_STR, has_default = true}
+	color_param   := Param_Type{name = "color",  type_id = TYPE_STR, has_default = true}
+	label_param   := Param_Type{name = "label",  type_id = TYPE_STR, has_default = true}
+
+	// ---- Figure class (returned by chart functions for chaining) ----
+	fig_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	fig_attrs["title"]  = make_callable_type(reg, {Param_Type{name = "text", type_id = TYPE_STR}}, TYPE_NONE)
+	fig_attrs["xlabel"] = make_callable_type(reg, {Param_Type{name = "text", type_id = TYPE_STR}}, TYPE_NONE)
+	fig_attrs["ylabel"] = make_callable_type(reg, {Param_Type{name = "text", type_id = TYPE_STR}}, TYPE_NONE)
+	fig_attrs["legend"] = make_callable_type(reg, no_params, TYPE_NONE)
+	fig_attrs["grid"]   = make_callable_type(reg,
+		{Param_Type{name = "visible", type_id = TYPE_BOOL, has_default = true}},
+		TYPE_NONE)
+	fig_attrs["show"]   = make_callable_type(reg, no_params, TYPE_NONE)
+	fig_attrs["save"]   = make_callable_type(reg,
+		{Param_Type{name = "path", type_id = TYPE_STR}},
+		TYPE_NONE)
+
+	fig_class := register_type(reg, Class_Type{
+		name  = "Figure",
+		attrs = fig_attrs,
+	})
+	fig_type := make_instance_type(reg, fig_class)
+
+	// ---- Chart functions ----
+	// Each accepts data (arrays or DataFrame) + styling params, returns Figure
+
+	// plot(x, y, ...) — line chart
+	exports["plot"] = make_callable_type(reg,
+		{Param_Type{name = "x", type_id = TYPE_ANY},
+		 Param_Type{name = "y", type_id = TYPE_ANY, has_default = true},
+		 title_param, xlabel_param, ylabel_param, color_param, label_param},
+		fig_type)
+
+	// scatter(x, y, ...) — scatter plot
+	exports["scatter"] = make_callable_type(reg,
+		{Param_Type{name = "x", type_id = TYPE_ANY},
+		 Param_Type{name = "y", type_id = TYPE_ANY},
+		 title_param, xlabel_param, ylabel_param, color_param,
+		 Param_Type{name = "size", type_id = TYPE_ANY, has_default = true}},
+		fig_type)
+
+	// bar(data, x, y, ...) — bar chart (DataFrame-aware)
+	exports["bar"] = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY},
+		 Param_Type{name = "x", type_id = TYPE_STR},
+		 Param_Type{name = "y", type_id = TYPE_STR},
+		 title_param, color_param},
+		fig_type)
+
+	// hist(data, ...) — histogram
+	exports["hist"] = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY},
+		 Param_Type{name = "bins", type_id = TYPE_INT, has_default = true},
+		 title_param, xlabel_param, ylabel_param, color_param},
+		fig_type)
+
+	// box(data, ...) — box plot
+	exports["box"] = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY},
+		 title_param, xlabel_param, ylabel_param},
+		fig_type)
+
+	// violin(data, ...) — violin plot
+	exports["violin"] = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY},
+		 title_param, xlabel_param, ylabel_param},
+		fig_type)
+
+	// heatmap(data, ...) — heatmap
+	exports["heatmap"] = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY},
+		 title_param,
+		 Param_Type{name = "cmap", type_id = TYPE_STR, has_default = true},
+		 Param_Type{name = "annot", type_id = TYPE_BOOL, has_default = true}},
+		fig_type)
+
+	// pie(values, labels, ...) — pie chart
+	exports["pie"] = make_callable_type(reg,
+		{Param_Type{name = "values", type_id = TYPE_ANY},
+		 Param_Type{name = "labels", type_id = TYPE_ANY, has_default = true},
+		 title_param},
+		fig_type)
+
+	// ---- Utility functions ----
+	// save(path) — save current figure
+	exports["save"] = make_callable_type(reg,
+		{Param_Type{name = "path", type_id = TYPE_STR}},
+		TYPE_NONE)
+
+	// show() — display current figure
+	exports["show"] = make_callable_type(reg, no_params, TYPE_NONE)
+
+	// figure(width, height) — create new figure
+	exports["figure"] = make_callable_type(reg,
+		{Param_Type{name = "width", type_id = TYPE_INT, has_default = true},
+		 Param_Type{name = "height", type_id = TYPE_INT, has_default = true}},
+		fig_type)
+
+	// subplot(rows, cols, index) — create subplot
+	exports["subplot"] = make_callable_type(reg,
+		{Param_Type{name = "rows", type_id = TYPE_INT},
+		 Param_Type{name = "cols", type_id = TYPE_INT},
+		 Param_Type{name = "index", type_id = TYPE_INT}},
+		fig_type)
+
+	// subplots(rows, cols) → (Figure, list[Figure])
+	exports["subplots"] = make_callable_type(reg,
+		{Param_Type{name = "rows", type_id = TYPE_INT, has_default = true},
+		 Param_Type{name = "cols", type_id = TYPE_INT, has_default = true}},
+		make_tuple_type(reg, {fig_type, make_list_type(reg, fig_type)}, false))
+
+	vreg.modules["mimir.plot"] = Virtual_Module{
+		name    = "mimir.plot",
 		exports = exports,
 	}
 }
