@@ -51,6 +51,9 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.queue
 	register_mimir_queue(&vreg, reg)
 
+	// Register mimir.stats
+	register_mimir_stats(&vreg, reg)
+
 	return vreg
 }
 
@@ -983,6 +986,185 @@ register_mimir_queue :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.queue"] = Virtual_Module{
 		name    = "mimir.queue",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.stats ====================
+
+register_mimir_stats :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 64, reg.allocator)
+
+	tensor_f64 := make_tensor_type(reg, TYPE_FLOAT, {})
+	no_params  := make([]Param_Type, 0, reg.allocator)
+
+	// ---- Distribution method attrs (continuous vs discrete) ----
+	sample_method := make_callable_type(reg,
+		{Param_Type{name = "size", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	cdf_method := make_callable_type(reg,
+		{Param_Type{name = "x", type_id = TYPE_FLOAT}},
+		TYPE_FLOAT)
+	ppf_method := make_callable_type(reg,
+		{Param_Type{name = "q", type_id = TYPE_FLOAT}},
+		TYPE_FLOAT)
+	mean_method := make_callable_type(reg, no_params, TYPE_FLOAT)
+	std_method  := make_callable_type(reg, no_params, TYPE_FLOAT)
+	var_method  := make_callable_type(reg, no_params, TYPE_FLOAT)
+
+	// Continuous: has pdf, no pmf
+	cont_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	cont_attrs["sample"] = sample_method
+	cont_attrs["pdf"]    = make_callable_type(reg, {Param_Type{name = "x", type_id = TYPE_FLOAT}}, TYPE_FLOAT)
+	cont_attrs["cdf"]    = cdf_method
+	cont_attrs["ppf"]    = ppf_method
+	cont_attrs["mean"]   = mean_method
+	cont_attrs["std"]    = std_method
+	cont_attrs["var"]    = var_method
+
+	// Discrete: has pmf, no pdf
+	disc_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	disc_attrs["sample"] = sample_method
+	disc_attrs["pmf"]    = make_callable_type(reg, {Param_Type{name = "x", type_id = TYPE_INT}}, TYPE_FLOAT)
+	disc_attrs["cdf"]    = cdf_method
+	disc_attrs["ppf"]    = ppf_method
+	disc_attrs["mean"]   = mean_method
+	disc_attrs["std"]    = std_method
+	disc_attrs["var"]    = var_method
+
+	// Helper: register a distribution class with given constructor params
+	_register_dist :: proc(
+		reg: ^Type_Registry, exports: ^map[string]Type_ID,
+		name: string, params: []Param_Type, attrs: map[string]Type_ID,
+	) {
+		class_id := register_type(reg, Class_Type{
+			name  = name,
+			attrs = attrs,
+		})
+		inst_id := make_instance_type(reg, class_id)
+		exports[name] = make_callable_type(reg, params, inst_id)
+	}
+
+	// ---- Continuous distributions ----
+	_register_dist(reg, &exports, "Normal", {
+		Param_Type{name = "mean", type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "std",  type_id = TYPE_FLOAT, has_default = true},
+	}, cont_attrs)
+	_register_dist(reg, &exports, "Uniform", {
+		Param_Type{name = "low",  type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "high", type_id = TYPE_FLOAT, has_default = true},
+	}, cont_attrs)
+	_register_dist(reg, &exports, "Exponential", {
+		Param_Type{name = "rate", type_id = TYPE_FLOAT, has_default = true},
+	}, cont_attrs)
+	_register_dist(reg, &exports, "Beta", {
+		Param_Type{name = "a", type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "b", type_id = TYPE_FLOAT, has_default = true},
+	}, cont_attrs)
+	_register_dist(reg, &exports, "Gamma", {
+		Param_Type{name = "shape", type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "scale", type_id = TYPE_FLOAT, has_default = true},
+	}, cont_attrs)
+	_register_dist(reg, &exports, "StudentT", {
+		Param_Type{name = "df", type_id = TYPE_FLOAT, has_default = true},
+	}, cont_attrs)
+	_register_dist(reg, &exports, "Chi2", {
+		Param_Type{name = "df", type_id = TYPE_FLOAT, has_default = true},
+	}, cont_attrs)
+	_register_dist(reg, &exports, "F", {
+		Param_Type{name = "dfn", type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "dfd", type_id = TYPE_FLOAT, has_default = true},
+	}, cont_attrs)
+
+	// ---- Discrete distributions ----
+	_register_dist(reg, &exports, "Binomial", {
+		Param_Type{name = "n", type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true},
+	}, disc_attrs)
+	_register_dist(reg, &exports, "Poisson", {
+		Param_Type{name = "lam", type_id = TYPE_FLOAT, has_default = true},
+	}, disc_attrs)
+	_register_dist(reg, &exports, "Geometric", {
+		Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true},
+	}, disc_attrs)
+	_register_dist(reg, &exports, "Bernoulli", {
+		Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true},
+	}, disc_attrs)
+
+	// ---- Result types ----
+	test_result_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	test_result_attrs["statistic"] = TYPE_FLOAT
+	test_result_attrs["p_value"]   = TYPE_FLOAT
+	test_result_attrs["df"]        = TYPE_FLOAT
+	test_result_class := register_type(reg, Class_Type{
+		name  = "TestResult",
+		attrs = test_result_attrs,
+	})
+	test_result := make_instance_type(reg, test_result_class)
+
+	corr_result_attrs := make(map[string]Type_ID, 3, reg.allocator)
+	corr_result_attrs["r"]       = TYPE_FLOAT
+	corr_result_attrs["p_value"] = TYPE_FLOAT
+	corr_result_class := register_type(reg, Class_Type{
+		name  = "CorrelationResult",
+		attrs = corr_result_attrs,
+	})
+	corr_result := make_instance_type(reg, corr_result_class)
+
+	reg_result_attrs := make(map[string]Type_ID, 5, reg.allocator)
+	reg_result_attrs["coefficients"] = tensor_f64
+	reg_result_attrs["intercept"]    = TYPE_FLOAT
+	reg_result_attrs["r_squared"]    = TYPE_FLOAT
+	reg_result_attrs["p_values"]     = tensor_f64
+	reg_result_attrs["accuracy"]     = TYPE_FLOAT
+	reg_result_class := register_type(reg, Class_Type{
+		name  = "RegressionResult",
+		attrs = reg_result_attrs,
+	})
+	reg_result := make_instance_type(reg, reg_result_class)
+
+	// ---- Hypothesis tests ----
+	tensor_param := Param_Type{name = "a", type_id = tensor_f64}
+	tensor_param_b := Param_Type{name = "b", type_id = tensor_f64}
+
+	exports["ttest"] = make_callable_type(reg, {tensor_param, tensor_param_b}, test_result)
+	exports["chi2_test"] = make_callable_type(reg,
+		{Param_Type{name = "observed", type_id = tensor_f64},
+		 Param_Type{name = "expected", type_id = tensor_f64, has_default = true}},
+		test_result)
+	exports["anova"] = make_callable_type(reg,
+		{Param_Type{name = "groups", type_id = TYPE_ANY}},  // *args
+		test_result)
+	exports["mann_whitney"] = make_callable_type(reg, {tensor_param, tensor_param_b}, test_result)
+	exports["ks_test"] = make_callable_type(reg, {tensor_param, tensor_param_b}, test_result)
+
+	// ---- Correlation ----
+	x_param := Param_Type{name = "x", type_id = tensor_f64}
+	y_param := Param_Type{name = "y", type_id = tensor_f64}
+
+	exports["pearson"]  = make_callable_type(reg, {x_param, y_param}, corr_result)
+	exports["spearman"] = make_callable_type(reg, {x_param, y_param}, corr_result)
+	exports["kendall"]  = make_callable_type(reg, {x_param, y_param}, corr_result)
+
+	// ---- Regression ----
+	X_param := Param_Type{name = "X", type_id = tensor_f64}
+
+	exports["linear_regression"]   = make_callable_type(reg, {X_param, y_param}, reg_result)
+	exports["logistic_regression"] = make_callable_type(reg, {X_param, y_param}, reg_result)
+
+	// ---- Descriptive statistics ----
+	a_param := Param_Type{name = "a", type_id = tensor_f64}
+
+	exports["median"]     = make_callable_type(reg, {a_param}, TYPE_FLOAT)
+	exports["mode"]       = make_callable_type(reg, {a_param}, TYPE_FLOAT)
+	exports["skew"]       = make_callable_type(reg, {a_param}, TYPE_FLOAT)
+	exports["kurtosis"]   = make_callable_type(reg, {a_param}, TYPE_FLOAT)
+	exports["percentile"] = make_callable_type(reg,
+		{a_param, Param_Type{name = "q", type_id = TYPE_FLOAT}},
+		TYPE_FLOAT)
+
+	vreg.modules["mimir.stats"] = Virtual_Module{
+		name    = "mimir.stats",
 		exports = exports,
 	}
 }
