@@ -712,4 +712,18 @@ ALL_EXPLANATIONS := [?]Explanation{
 		example = "    import json\n    json.dumps(user.__dict__)  # SER003: may fail at runtime",
 		note = "Use dataclasses.asdict() or explicitly select fields.\n__dict__ includes all instance attributes without filtering.",
 	},
+
+	// ==================== ML Pipeline ====================
+	{
+		code = "ML001", name = "Data leakage", category = "ML Pipeline", severity = "Error",
+		description = "A transformer (StandardScaler, etc.) was fit on data that is then\npassed to train_test_split. This leaks test set statistics into training.",
+		example = "    scaler = StandardScaler()\n    X_scaled = scaler.fit_transform(X)\n    X_train, X_test = train_test_split(X_scaled)  # ML001",
+		note = "Split data first, then fit_transform on the training set only:\n    X_train, X_test = train_test_split(X)\n    X_train = scaler.fit_transform(X_train)\n    X_test = scaler.transform(X_test)",
+	},
+	{
+		code = "ML002", name = "Pipeline ordering", category = "ML Pipeline", severity = "Warning",
+		description = "A preprocessor (scaler, encoder) appears after a model in a\nsklearn Pipeline. Features will not be transformed before model training.",
+		example = "    Pipeline([\n        (\"model\", LogisticRegression()),\n        (\"scaler\", StandardScaler()),\n    ])  # ML002",
+		note = "Reorder pipeline steps: preprocessors first, then models.\nPipeline executes steps in list order — transform → predict.",
+	},
 }

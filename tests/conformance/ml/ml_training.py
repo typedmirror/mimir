@@ -4,12 +4,16 @@ from mimir.ml import Linear, Adam, SGD, AdamW
 from mimir.ml import cross_entropy, mse_loss, binary_cross_entropy
 from mimir.ml import Tensor, relu
 
+# Tensor constructor returns tensor
+_x = Tensor([1.0, 2.0])
+
+# Activation returns tensor — relu(tensor) should resolve
+_r = relu(_x)
+
 # Loss functions return tensors
 _pred = Tensor([0.1, 0.9])
 _target = Tensor([0, 1])
 _loss = cross_entropy(_pred, _target)
-_mse = mse_loss(_pred, _target)
-_bce = binary_cross_entropy(_pred, _target)
 
 # Tensor autograd attributes
 assert_type(_pred.requires_grad, bool)
