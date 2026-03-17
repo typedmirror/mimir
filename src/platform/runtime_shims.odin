@@ -38,6 +38,7 @@ generate_run_bootstrap :: proc(script: string, script_args: []string, allocator:
 	_rs_sb(&buf, "\n")
 
 	// Inject all virtual module shims
+	_rs_sb(&buf, generate_array_shim(allocator))
 	_rs_sb(&buf, generate_db_shim(allocator))
 	_rs_sb(&buf, generate_crypt_shim(allocator))
 	_rs_sb(&buf, generate_json_shim(allocator))
@@ -80,6 +81,143 @@ write_run_bootstrap :: proc(content: string, allocator: mem.Allocator) -> (path:
 	}
 
 	return boot_path, true
+}
+
+// ==================== mimir.array shim ====================
+
+generate_array_shim :: proc(allocator: mem.Allocator) -> string {
+	buf := make([dynamic]u8, 0, 4096, allocator)
+
+	_rs_sb(&buf, "# ---- mimir.array runtime shim (numpy-backed) ----\n")
+	_rs_sb(&buf, "try:\n")
+	_rs_sb(&buf, "    import numpy as _np\n")
+	_rs_sb(&buf, "except ImportError:\n")
+	_rs_sb(&buf, "    class _NumpyStub:\n")
+	_rs_sb(&buf, "        def __getattr__(self, name):\n")
+	_rs_sb(&buf, "            raise ImportError(\n")
+	_rs_sb(&buf, "                'mimir.array requires numpy. Install: pip install numpy'\n")
+	_rs_sb(&buf, "            )\n")
+	_rs_sb(&buf, "    _np = _NumpyStub()\n")
+	_rs_sb(&buf, "\n")
+
+	// Free functions — thin wrappers around numpy
+	_rs_sb(&buf, "def _arr_array(data): return _np.asarray(data)\n")
+	_rs_sb(&buf, "def _arr_zeros(shape, dtype=None): return _np.zeros(shape, dtype=dtype)\n")
+	_rs_sb(&buf, "def _arr_ones(shape, dtype=None): return _np.ones(shape, dtype=dtype)\n")
+	_rs_sb(&buf, "def _arr_empty(shape, dtype=None): return _np.empty(shape, dtype=dtype)\n")
+	_rs_sb(&buf, "def _arr_full(shape, fill_value, dtype=None): return _np.full(shape, fill_value, dtype=dtype)\n")
+	_rs_sb(&buf, "def _arr_eye(N, M=None): return _np.eye(N, M)\n")
+	_rs_sb(&buf, "def _arr_arange(start, stop=None, step=1): return _np.arange(start, stop, step) if stop is not None else _np.arange(start)\n")
+	_rs_sb(&buf, "def _arr_linspace(start, stop, num=50): return _np.linspace(start, stop, num)\n")
+	_rs_sb(&buf, "\n")
+
+	// Operations
+	_rs_sb(&buf, "def _arr_matmul(a, b): return _np.matmul(a, b)\n")
+	_rs_sb(&buf, "def _arr_dot(a, b): return _np.dot(a, b)\n")
+	_rs_sb(&buf, "def _arr_cross(a, b): return _np.cross(a, b)\n")
+	_rs_sb(&buf, "\n")
+
+	// Reductions
+	_rs_sb(&buf, "def _arr_sum(a, axis=None): return _np.sum(a, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_mean(a, axis=None): return _np.mean(a, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_max(a, axis=None): return _np.max(a, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_min(a, axis=None): return _np.min(a, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_argmax(a, axis=None): return _np.argmax(a, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_argmin(a, axis=None): return _np.argmin(a, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_cumsum(a, axis=None): return _np.cumsum(a, axis=axis)\n")
+	_rs_sb(&buf, "\n")
+
+	// Shape manipulation
+	_rs_sb(&buf, "def _arr_reshape(a, shape): return _np.reshape(a, shape)\n")
+	_rs_sb(&buf, "def _arr_transpose(a): return _np.transpose(a)\n")
+	_rs_sb(&buf, "def _arr_flatten(a): return _np.asarray(a).flatten()\n")
+	_rs_sb(&buf, "def _arr_squeeze(a, axis=None): return _np.squeeze(a, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_expand_dims(a, axis): return _np.expand_dims(a, axis)\n")
+	_rs_sb(&buf, "def _arr_concatenate(arrays, axis=0): return _np.concatenate(arrays, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_stack(arrays, axis=0): return _np.stack(arrays, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_split(a, indices_or_sections, axis=0): return _np.split(a, indices_or_sections, axis=axis)\n")
+	_rs_sb(&buf, "\n")
+
+	// Linalg
+	_rs_sb(&buf, "def _arr_solve(a, b): return _np.linalg.solve(a, b)\n")
+	_rs_sb(&buf, "def _arr_inv(a): return _np.linalg.inv(a)\n")
+	_rs_sb(&buf, "def _arr_det(a): return _np.linalg.det(a)\n")
+	_rs_sb(&buf, "def _arr_norm(a, ord=None, axis=None): return _np.linalg.norm(a, ord=ord, axis=axis)\n")
+	_rs_sb(&buf, "def _arr_eig(a): return _np.linalg.eig(a)\n")
+	_rs_sb(&buf, "def _arr_svd(a): return _np.linalg.svd(a)\n")
+	_rs_sb(&buf, "\n")
+
+	// Comparison / math
+	_rs_sb(&buf, "def _arr_allclose(a, b, rtol=1e-5, atol=1e-8): return _np.allclose(a, b, rtol=rtol, atol=atol)\n")
+	_rs_sb(&buf, "def _arr_isnan(a): return _np.isnan(a)\n")
+	_rs_sb(&buf, "def _arr_isinf(a): return _np.isinf(a)\n")
+	_rs_sb(&buf, "def _arr_where(condition, x, y): return _np.where(condition, x, y)\n")
+	_rs_sb(&buf, "def _arr_clip(a, a_min=None, a_max=None): return _np.clip(a, a_min, a_max)\n")
+	_rs_sb(&buf, "def _arr_abs(a): return _np.abs(a)\n")
+	_rs_sb(&buf, "def _arr_sqrt(a): return _np.sqrt(a)\n")
+	_rs_sb(&buf, "def _arr_exp(a): return _np.exp(a)\n")
+	_rs_sb(&buf, "def _arr_log(a): return _np.log(a)\n")
+	_rs_sb(&buf, "\n")
+
+	// Random sub-module
+	_rs_sb(&buf, "class _ArrayRandom:\n")
+	_rs_sb(&buf, "    def normal(self, loc=0.0, scale=1.0, size=None): return _np.random.normal(loc, scale, size)\n")
+	_rs_sb(&buf, "    def uniform(self, low=0.0, high=1.0, size=None): return _np.random.uniform(low, high, size)\n")
+	_rs_sb(&buf, "    def randint(self, low, high=None, size=None): return _np.random.randint(low, high, size)\n")
+	_rs_sb(&buf, "    def seed(self, seed): _np.random.seed(seed)\n")
+	_rs_sb(&buf, "    def shuffle(self, x): _np.random.shuffle(x)\n")
+	_rs_sb(&buf, "\n")
+
+	// Module wiring
+	_rs_sb(&buf, "# Wire mimir.array module\n")
+	_rs_sb(&buf, "_mimir_array_mod = ModuleType('mimir.array')\n")
+	_rs_sb(&buf, "_mimir_array_mod.array = _arr_array\n")
+	_rs_sb(&buf, "_mimir_array_mod.zeros = _arr_zeros\n")
+	_rs_sb(&buf, "_mimir_array_mod.ones = _arr_ones\n")
+	_rs_sb(&buf, "_mimir_array_mod.empty = _arr_empty\n")
+	_rs_sb(&buf, "_mimir_array_mod.full = _arr_full\n")
+	_rs_sb(&buf, "_mimir_array_mod.eye = _arr_eye\n")
+	_rs_sb(&buf, "_mimir_array_mod.arange = _arr_arange\n")
+	_rs_sb(&buf, "_mimir_array_mod.linspace = _arr_linspace\n")
+	_rs_sb(&buf, "_mimir_array_mod.matmul = _arr_matmul\n")
+	_rs_sb(&buf, "_mimir_array_mod.dot = _arr_dot\n")
+	_rs_sb(&buf, "_mimir_array_mod.cross = _arr_cross\n")
+	_rs_sb(&buf, "_mimir_array_mod.sum = _arr_sum\n")
+	_rs_sb(&buf, "_mimir_array_mod.mean = _arr_mean\n")
+	_rs_sb(&buf, "_mimir_array_mod.max = _arr_max\n")
+	_rs_sb(&buf, "_mimir_array_mod.min = _arr_min\n")
+	_rs_sb(&buf, "_mimir_array_mod.argmax = _arr_argmax\n")
+	_rs_sb(&buf, "_mimir_array_mod.argmin = _arr_argmin\n")
+	_rs_sb(&buf, "_mimir_array_mod.cumsum = _arr_cumsum\n")
+	_rs_sb(&buf, "_mimir_array_mod.reshape = _arr_reshape\n")
+	_rs_sb(&buf, "_mimir_array_mod.transpose = _arr_transpose\n")
+	_rs_sb(&buf, "_mimir_array_mod.flatten = _arr_flatten\n")
+	_rs_sb(&buf, "_mimir_array_mod.squeeze = _arr_squeeze\n")
+	_rs_sb(&buf, "_mimir_array_mod.expand_dims = _arr_expand_dims\n")
+	_rs_sb(&buf, "_mimir_array_mod.concatenate = _arr_concatenate\n")
+	_rs_sb(&buf, "_mimir_array_mod.stack = _arr_stack\n")
+	_rs_sb(&buf, "_mimir_array_mod.split = _arr_split\n")
+	_rs_sb(&buf, "_mimir_array_mod.solve = _arr_solve\n")
+	_rs_sb(&buf, "_mimir_array_mod.inv = _arr_inv\n")
+	_rs_sb(&buf, "_mimir_array_mod.det = _arr_det\n")
+	_rs_sb(&buf, "_mimir_array_mod.norm = _arr_norm\n")
+	_rs_sb(&buf, "_mimir_array_mod.eig = _arr_eig\n")
+	_rs_sb(&buf, "_mimir_array_mod.svd = _arr_svd\n")
+	_rs_sb(&buf, "_mimir_array_mod.allclose = _arr_allclose\n")
+	_rs_sb(&buf, "_mimir_array_mod.isnan = _arr_isnan\n")
+	_rs_sb(&buf, "_mimir_array_mod.isinf = _arr_isinf\n")
+	_rs_sb(&buf, "_mimir_array_mod.where = _arr_where\n")
+	_rs_sb(&buf, "_mimir_array_mod.clip = _arr_clip\n")
+	_rs_sb(&buf, "_mimir_array_mod.abs = _arr_abs\n")
+	_rs_sb(&buf, "_mimir_array_mod.sqrt = _arr_sqrt\n")
+	_rs_sb(&buf, "_mimir_array_mod.exp = _arr_exp\n")
+	_rs_sb(&buf, "_mimir_array_mod.log = _arr_log\n")
+	_rs_sb(&buf, "_mimir_array_mod.random = _ArrayRandom()\n")
+	_rs_sb(&buf, "sys.modules['mimir.array'] = _mimir_array_mod\n")
+	_rs_sb(&buf, "sys.modules['mimir.array.random'] = _mimir_array_mod.random\n")
+	_rs_sb(&buf, "\n")
+
+	return string(buf[:])
 }
 
 // ==================== mimir.db shim ====================

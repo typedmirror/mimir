@@ -30,6 +30,7 @@ Infer_Context :: struct {
 	cfg:              ^flow.CFG,                           // CFG for match case block mapping
 	current_block:    flow.Block_ID,                     // Current block being processed
 	match_case_envs:  ^map[flow.Block_ID]Match_Case_Env, // Pattern bindings per case block
+	groupby_sources:  ^map[binder.Symbol_ID]GroupBy_Info, // symbol → groupby source info for column tracking
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -123,7 +124,7 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			should_flag := false
 			#partial switch _ in rt.info {
 			case Instance_Type, Class_Type, Module_Type, Protocol_Type, TypedDict_Type,
-		     DataFrame_Type, Series_Type:
+		     DataFrame_Type, Series_Type, Tensor_Type:
 				should_flag = true
 			}
 			// Skip dunder attrs — implicit object methods not tracked yet
@@ -515,6 +516,105 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 	// Check for typing special forms before normal dispatch
 	if typing_result, handled := try_typing_call(e, ctx); handled {
 		return typing_result
+	}
+
+	// DataFrame/GroupBy method intercepts — column-aware return types
+	if attr_expr, attr_ok := e.func.(^parser.Attribute_Expr); attr_ok {
+		recv_type := infer_expr(attr_expr.value, ctx)
+		recv_t := get_type(ctx.reg, recv_type)
+		if recv_t != nil {
+			#partial switch recv_info in recv_t.info {
+			case DataFrame_Type:
+				// df.merge(right, on="key") → combined columns
+				if attr_expr.attr == "merge" && len(e.args) >= 1 {
+					right_type := infer_expr(e.args[0], ctx)
+					join_key := ""
+					for kw in e.keywords {
+						if kw.arg == "on" {
+							if c, c_ok := kw.value.(^parser.Constant_Expr); c_ok {
+								if ks, ks_ok := c.value.(string); ks_ok {
+									join_key = ks
+								}
+							}
+						}
+					}
+					// Also check positional "on" arg (2nd arg)
+					if join_key == "" && len(e.args) >= 2 {
+						if c, c_ok := e.args[1].(^parser.Constant_Expr); c_ok {
+							if ks, ks_ok := c.value.(string); ks_ok {
+								join_key = ks
+							}
+						}
+					}
+					return compute_merge_result(ctx.reg, recv_type, right_type, join_key)
+				}
+				// df.rename(columns={"old": "new"}) → updated column names
+				if attr_expr.attr == "rename" {
+					for kw in e.keywords {
+						if kw.arg == "columns" {
+							if dict_lit, d_ok := kw.value.(^parser.Dict_Expr); d_ok {
+								rename_map := make(map[string]string, len(dict_lit.keys), context.temp_allocator)
+								for key, i in dict_lit.keys {
+									if key == nil { continue }
+									if kc, kc_ok := key.(^parser.Constant_Expr); kc_ok {
+										if old_name, on_ok := kc.value.(string); on_ok {
+											if vc, vc_ok := dict_lit.values[i].(^parser.Constant_Expr); vc_ok {
+												if new_name, nn_ok := vc.value.(string); nn_ok {
+													rename_map[old_name] = new_name
+												}
+											}
+										}
+									}
+								}
+								if len(rename_map) > 0 {
+									return compute_rename_result(ctx.reg, recv_type, rename_map)
+								}
+							}
+						}
+					}
+				}
+			case Instance_Type:
+				// GroupBy method intercept: grouped.sum()/mean()/etc. → column-aware DataFrame
+				if ctx.reg.data_groupby_class != 0 && recv_info.class_type == ctx.reg.data_groupby_class {
+					agg_name := attr_expr.attr
+					if agg_name == "sum" || agg_name == "mean" || agg_name == "min" ||
+					   agg_name == "max" || agg_name == "count" || agg_name == "std" {
+						// Path 1: named receiver — grouped = df.groupby("k"); grouped.sum()
+						if recv_name, rn_ok := attr_expr.value.(^parser.Name_Expr); rn_ok {
+							if recv_sym, rsym_ok := binder.get_ref(ctx.bind_result, rawptr(recv_name)); rsym_ok {
+								if gb_info, gb_found := ctx.groupby_sources[recv_sym]; gb_found {
+									return compute_groupby_result(ctx.reg, &gb_info, agg_name)
+								}
+							}
+						}
+						// Path 2: chained call — df.groupby("k").sum()
+						if gb_call, gc_ok := attr_expr.value.(^parser.Call_Expr); gc_ok {
+							if gb_attr, ga_ok := gb_call.func.(^parser.Attribute_Expr); ga_ok {
+								if gb_attr.attr == "groupby" && len(gb_call.args) >= 1 {
+									// Get receiver's DataFrame type
+									gb_recv_type := infer_expr(gb_attr.value, ctx)
+									gb_recv_t := get_type(ctx.reg, gb_recv_type)
+									if gb_recv_t != nil {
+										#partial switch _ in gb_recv_t.info {
+										case DataFrame_Type:
+											if c, c_ok := gb_call.args[0].(^parser.Constant_Expr); c_ok {
+												if key_str, ks_ok := c.value.(string); ks_ok {
+													gb_info := GroupBy_Info{
+														df_type   = gb_recv_type,
+														group_key = key_str,
+													}
+													return compute_groupby_result(ctx.reg, &gb_info, agg_name)
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// super() or super(Cls, self) → Instance of first base class in current class context
@@ -1082,6 +1182,8 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 		return resolve_dataframe_attr(reg, &info, attr)
 	case Series_Type:
 		return resolve_series_attr(reg, &info, attr)
+	case Tensor_Type:
+		return resolve_tensor_attr(reg, &info, attr)
 	}
 
 	return TYPE_UNKNOWN
@@ -1101,6 +1203,12 @@ get_subscript_type :: proc(container: Type_ID, reg: ^Type_Registry) -> Type_ID {
 		return TYPE_UNKNOWN
 	case Series_Type:
 		return info.element
+	case Tensor_Type:
+		// Integer index on 1D → element type; otherwise sub-tensor
+		if info.ndim <= 1 {
+			return info.element_type
+		}
+		return make_tensor_type(reg, info.element_type, {}) // sub-tensor with unknown shape
 	}
 	if container == TYPE_STR { return TYPE_STR }
 	if container == TYPE_BYTES { return TYPE_INT }

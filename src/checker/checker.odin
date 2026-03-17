@@ -411,6 +411,9 @@ check_scope :: proc(
 	// Track declared annotation types across blocks (for reassignment checking)
 	declared_types := make(map[binder.Symbol_ID]Type_ID, 16, reg.allocator)
 
+	// Track groupby source DataFrames for column-aware aggregation
+	groupby_sources := make(map[binder.Symbol_ID]GroupBy_Info, 4, reg.allocator)
+
 	// Set global_types for non-module scopes (LEGB "G" fallback)
 	global_types_ptr: ^map[binder.Symbol_ID]Type_ID = nil
 	if scope != nil && scope.kind != .Module {
@@ -484,6 +487,7 @@ check_scope :: proc(
 			cfg              = cfg,
 			current_block    = block_id,
 			match_case_envs  = &match_case_envs,
+			groupby_sources  = &groupby_sources,
 		}
 
 		// Process each statement in the block
@@ -591,6 +595,7 @@ check_scope :: proc(
 					cfg              = cfg,
 					current_block    = block_id,
 					match_case_envs  = &match_case_envs,
+					groupby_sources  = &groupby_sources,
 				}
 
 				for stmt in block.stmts {
@@ -684,6 +689,84 @@ check_stmt :: proc(
 		}
 		for target in s.targets {
 			assign_target(target, rhs_type, ctx)
+		}
+		// GroupBy state recording: result = df.groupby("key")
+		// Record source DataFrame + group key for column-aware aggregation
+		if len(s.targets) == 1 {
+			if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+					if call, call_ok := s.value.(^parser.Call_Expr); call_ok {
+						if attr, attr_ok := call.func.(^parser.Attribute_Expr); attr_ok {
+							if attr.attr == "groupby" {
+								// Check if receiver is a DataFrame
+								recv_type := TYPE_UNKNOWN
+								if recv_name, rn_ok := attr.value.(^parser.Name_Expr); rn_ok {
+									if recv_sym, rsym_ok := binder.get_ref(ctx.bind_result, rawptr(recv_name)); rsym_ok {
+										if rt, rt_found := ctx.env.types[recv_sym]; rt_found {
+											recv_type = rt
+										}
+									}
+								}
+								if recv_type != TYPE_UNKNOWN {
+									rt := get_type(ctx.reg, recv_type)
+									if rt != nil {
+										#partial switch _ in rt.info {
+										case DataFrame_Type:
+											// Extract group key from first arg
+											if len(call.args) >= 1 {
+												if c, c_ok := call.args[0].(^parser.Constant_Expr); c_ok {
+													if key_str, ks_ok := c.value.(string); ks_ok {
+														ctx.groupby_sources[sym_id] = GroupBy_Info{
+															df_type   = recv_type,
+															group_key = key_str,
+														}
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		// DataFrame column assignment: df["col"] = expr → update df's type
+		for target in s.targets {
+			if sub, ok := target.(^parser.Subscript_Expr); ok {
+				if name, name_ok := sub.value.(^parser.Name_Expr); name_ok {
+					if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+						if cur_type, found := ctx.env.types[sym_id]; found {
+							cur_t := get_type(ctx.reg, cur_type)
+							if cur_t != nil {
+								#partial switch df_info in cur_t.info {
+								case DataFrame_Type:
+									// Get column name from subscript key
+									if key, key_ok := sub.slice.(^parser.Constant_Expr); key_ok {
+										if col_name, str_ok := key.value.(string); str_ok {
+											// Build new columns map with added/updated column
+											new_cols := make(map[string]Type_ID, len(df_info.columns) + 1, ctx.reg.allocator)
+											for cn, ct in df_info.columns { new_cols[cn] = ct }
+											// Determine element type for the new column
+											elem_type := rhs_type
+											et := get_type(ctx.reg, rhs_type)
+											if et != nil {
+												#partial switch si in et.info {
+												case Series_Type: elem_type = si.element
+												case List_Type:   elem_type = si.element
+												}
+											}
+											new_cols[col_name] = elem_type
+											ctx.env.types[sym_id] = make_dataframe_type(ctx.reg, new_cols)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 
 	case ^parser.Ann_Assign:

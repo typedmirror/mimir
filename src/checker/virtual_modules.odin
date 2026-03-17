@@ -160,102 +160,172 @@ resolve_virtual_imports :: proc(
 // ==================== mimir.array ====================
 
 register_mimir_array :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
-	exports := make(map[string]Type_ID, 16, reg.allocator)
+	exports := make(map[string]Type_ID, 64, reg.allocator)
 
 	// Tensor types for return values
-	tensor_f64 := make_tensor_type(reg, TYPE_FLOAT, {})   // unknown shape
-	tensor_int := make_tensor_type(reg, TYPE_INT, {})
+	tensor_f64  := make_tensor_type(reg, TYPE_FLOAT, {})   // unknown shape
+	tensor_int  := make_tensor_type(reg, TYPE_INT, {})
+	tensor_bool := make_tensor_type(reg, TYPE_BOOL, {})
 
-	// Variadic tuple param for shape arguments
+	// Common param patterns
 	shape_param := Param_Type{name = "shape", type_id = TYPE_ANY, has_default = false}
 	dtype_param := Param_Type{name = "dtype", type_id = TYPE_ANY, has_default = true}
+	axis_param  := Param_Type{name = "axis",  type_id = TYPE_INT, has_default = true}
+	a_param     := Param_Type{name = "a", type_id = tensor_f64}
+	no_params   := make([]Param_Type, 0, reg.allocator)
 
-	// array(data) -> Tensor[f64]
+	// ---- Creation ----
 	exports["array"] = make_callable_type(reg,
 		{Param_Type{name = "data", type_id = TYPE_ANY}},
-		tensor_f64,
-	)
-
-	// zeros(shape, dtype=f64) -> Tensor[f64]
-	exports["zeros"] = make_callable_type(reg,
-		{shape_param, dtype_param},
-		tensor_f64,
-	)
-
-	// ones(shape, dtype=f64) -> Tensor[f64]
-	exports["ones"] = make_callable_type(reg,
-		{shape_param, dtype_param},
-		tensor_f64,
-	)
-
-	// arange(start, stop, step) -> Tensor[int]
+		tensor_f64)
+	exports["zeros"] = make_callable_type(reg, {shape_param, dtype_param}, tensor_f64)
+	exports["ones"]  = make_callable_type(reg, {shape_param, dtype_param}, tensor_f64)
+	exports["empty"] = make_callable_type(reg, {shape_param, dtype_param}, tensor_f64)
+	exports["full"]  = make_callable_type(reg,
+		{shape_param, Param_Type{name = "fill_value", type_id = TYPE_FLOAT}, dtype_param},
+		tensor_f64)
+	exports["eye"] = make_callable_type(reg,
+		{Param_Type{name = "N", type_id = TYPE_INT}, Param_Type{name = "M", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
 	exports["arange"] = make_callable_type(reg,
 		{
 			Param_Type{name = "start", type_id = TYPE_INT},
 			Param_Type{name = "stop",  type_id = TYPE_INT, has_default = true},
 			Param_Type{name = "step",  type_id = TYPE_INT, has_default = true},
 		},
-		tensor_int,
-	)
-
-	// linspace(start, stop, num) -> Tensor[f64]
+		tensor_int)
 	exports["linspace"] = make_callable_type(reg,
 		{
 			Param_Type{name = "start", type_id = TYPE_FLOAT},
 			Param_Type{name = "stop",  type_id = TYPE_FLOAT},
 			Param_Type{name = "num",   type_id = TYPE_INT, has_default = true},
 		},
-		tensor_f64,
-	)
+		tensor_f64)
 
-	// matmul(a, b) -> Tensor[f64]
+	// ---- Arithmetic / operations ----
 	exports["matmul"] = make_callable_type(reg,
-		{
-			Param_Type{name = "a", type_id = tensor_f64},
-			Param_Type{name = "b", type_id = tensor_f64},
-		},
-		tensor_f64,
-	)
+		{a_param, Param_Type{name = "b", type_id = tensor_f64}},
+		tensor_f64)
+	exports["dot"] = make_callable_type(reg,
+		{a_param, Param_Type{name = "b", type_id = tensor_f64}},
+		tensor_f64)
+	exports["cross"] = make_callable_type(reg,
+		{a_param, Param_Type{name = "b", type_id = tensor_f64}},
+		tensor_f64)
 
-	// reshape(a, shape) -> Tensor[f64]
-	exports["reshape"] = make_callable_type(reg,
-		{
-			Param_Type{name = "a",     type_id = tensor_f64},
-			Param_Type{name = "shape", type_id = TYPE_ANY},
-		},
-		tensor_f64,
-	)
+	// ---- Reductions ----
+	exports["sum"]    = make_callable_type(reg, {a_param, axis_param}, tensor_f64)
+	exports["mean"]   = make_callable_type(reg, {a_param, axis_param}, tensor_f64)
+	exports["max"]    = make_callable_type(reg, {a_param, axis_param}, tensor_f64)
+	exports["min"]    = make_callable_type(reg, {a_param, axis_param}, tensor_f64)
+	exports["argmax"] = make_callable_type(reg, {a_param, axis_param}, tensor_int)
+	exports["argmin"] = make_callable_type(reg, {a_param, axis_param}, tensor_int)
+	exports["cumsum"] = make_callable_type(reg, {a_param, axis_param}, tensor_f64)
 
-	// sum(a) -> Tensor[f64]
-	exports["sum"] = make_callable_type(reg,
-		{Param_Type{name = "a", type_id = tensor_f64}},
-		tensor_f64,
-	)
+	// ---- Shape manipulation ----
+	exports["reshape"]    = make_callable_type(reg, {a_param, Param_Type{name = "shape", type_id = TYPE_ANY}}, tensor_f64)
+	exports["transpose"]  = make_callable_type(reg, {a_param}, tensor_f64)
+	exports["flatten"]    = make_callable_type(reg, {a_param}, tensor_f64)
+	exports["squeeze"]    = make_callable_type(reg, {a_param, axis_param}, tensor_f64)
+	exports["expand_dims"] = make_callable_type(reg,
+		{a_param, Param_Type{name = "axis", type_id = TYPE_INT}},
+		tensor_f64)
+	exports["concatenate"] = make_callable_type(reg,
+		{Param_Type{name = "arrays", type_id = TYPE_ANY}, axis_param},
+		tensor_f64)
+	exports["stack"] = make_callable_type(reg,
+		{Param_Type{name = "arrays", type_id = TYPE_ANY}, axis_param},
+		tensor_f64)
+	exports["split"] = make_callable_type(reg,
+		{a_param, Param_Type{name = "indices_or_sections", type_id = TYPE_ANY}, axis_param},
+		make_list_type(reg, tensor_f64))
 
-	// mean(a) -> Tensor[f64]
-	exports["mean"] = make_callable_type(reg,
-		{Param_Type{name = "a", type_id = tensor_f64}},
-		tensor_f64,
-	)
+	// ---- Linear algebra ----
+	exports["solve"] = make_callable_type(reg,
+		{a_param, Param_Type{name = "b", type_id = tensor_f64}},
+		tensor_f64)
+	exports["inv"]  = make_callable_type(reg, {a_param}, tensor_f64)
+	exports["det"]  = make_callable_type(reg, {a_param}, TYPE_FLOAT)
+	exports["norm"] = make_callable_type(reg,
+		{a_param, Param_Type{name = "ord", type_id = TYPE_ANY, has_default = true}, axis_param},
+		TYPE_FLOAT)
+	exports["eig"] = make_callable_type(reg, {a_param},
+		make_tuple_type(reg, {tensor_f64, tensor_f64}, false))
+	exports["svd"] = make_callable_type(reg, {a_param},
+		make_tuple_type(reg, {tensor_f64, tensor_f64, tensor_f64}, false))
 
-	// transpose(a) -> Tensor[f64]
-	exports["transpose"] = make_callable_type(reg,
-		{Param_Type{name = "a", type_id = tensor_f64}},
-		tensor_f64,
-	)
+	// ---- Comparison / logic ----
+	exports["allclose"] = make_callable_type(reg,
+		{a_param, Param_Type{name = "b", type_id = tensor_f64},
+		 Param_Type{name = "rtol", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "atol", type_id = TYPE_FLOAT, has_default = true}},
+		TYPE_BOOL)
+	exports["isnan"] = make_callable_type(reg, {a_param}, tensor_bool)
+	exports["isinf"] = make_callable_type(reg, {a_param}, tensor_bool)
+	exports["where"] = make_callable_type(reg,
+		{Param_Type{name = "condition", type_id = tensor_bool},
+		 Param_Type{name = "x", type_id = tensor_f64},
+		 Param_Type{name = "y", type_id = tensor_f64}},
+		tensor_f64)
+	exports["clip"] = make_callable_type(reg,
+		{a_param,
+		 Param_Type{name = "a_min", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "a_max", type_id = TYPE_FLOAT, has_default = true}},
+		tensor_f64)
+	exports["abs"] = make_callable_type(reg, {a_param}, tensor_f64)
+	exports["sqrt"] = make_callable_type(reg, {a_param}, tensor_f64)
+	exports["exp"] = make_callable_type(reg, {a_param}, tensor_f64)
+	exports["log"] = make_callable_type(reg, {a_param}, tensor_f64)
 
-	// Shape semantics for each export
-	shape_sems := make(map[string]Shape_Semantic, 16, reg.allocator)
-	shape_sems["zeros"]     = .Creation
-	shape_sems["ones"]      = .Creation
-	shape_sems["array"]     = .Creation
-	shape_sems["linspace"]  = .Creation
-	shape_sems["arange"]    = .Arange
-	shape_sems["matmul"]    = .Matmul
-	shape_sems["reshape"]   = .Reshape
-	shape_sems["transpose"] = .Transpose
-	shape_sems["sum"]       = .Reduction
-	shape_sems["mean"]      = .Reduction
+	// ---- Random sub-module ----
+	random_exports := make(map[string]Type_ID, 8, reg.allocator)
+	random_exports["normal"] = make_callable_type(reg,
+		{Param_Type{name = "loc", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "scale", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "size", type_id = TYPE_ANY, has_default = true}},
+		tensor_f64)
+	random_exports["uniform"] = make_callable_type(reg,
+		{Param_Type{name = "low", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "high", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "size", type_id = TYPE_ANY, has_default = true}},
+		tensor_f64)
+	random_exports["randint"] = make_callable_type(reg,
+		{Param_Type{name = "low", type_id = TYPE_INT},
+		 Param_Type{name = "high", type_id = TYPE_INT, has_default = true},
+		 Param_Type{name = "size", type_id = TYPE_ANY, has_default = true}},
+		tensor_int)
+	random_exports["seed"] = make_callable_type(reg,
+		{Param_Type{name = "seed", type_id = TYPE_INT}},
+		TYPE_NONE)
+	random_exports["shuffle"] = make_callable_type(reg,
+		{Param_Type{name = "x", type_id = tensor_f64}},
+		TYPE_NONE)
+
+	random_mod := register_type(reg, Module_Type{
+		name    = "random",
+		exports = random_exports,
+	})
+	exports["random"] = random_mod
+
+	// ---- Shape semantics ----
+	shape_sems := make(map[string]Shape_Semantic, 32, reg.allocator)
+	shape_sems["zeros"]      = .Creation
+	shape_sems["ones"]       = .Creation
+	shape_sems["empty"]      = .Creation
+	shape_sems["full"]       = .Creation
+	shape_sems["eye"]        = .Creation
+	shape_sems["array"]      = .Creation
+	shape_sems["linspace"]   = .Creation
+	shape_sems["arange"]     = .Arange
+	shape_sems["matmul"]     = .Matmul
+	shape_sems["dot"]        = .Matmul
+	shape_sems["reshape"]    = .Reshape
+	shape_sems["transpose"]  = .Transpose
+	shape_sems["sum"]        = .Reduction
+	shape_sems["mean"]       = .Reduction
+	shape_sems["max"]        = .Reduction
+	shape_sems["min"]        = .Reduction
+	shape_sems["cumsum"]     = .Reduction
 
 	vreg.modules["mimir.array"] = Virtual_Module{
 		name             = "mimir.array",
@@ -564,6 +634,20 @@ register_mimir_data :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 		},
 		empty_df,
 	)
+
+	// Register GroupBy class for method resolution
+	gb_no_params := make([]Param_Type, 0, reg.allocator)
+	gb_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	gb_attrs["sum"]   = make_callable_type(reg, gb_no_params, empty_df)
+	gb_attrs["mean"]  = make_callable_type(reg, gb_no_params, empty_df)
+	gb_attrs["min"]   = make_callable_type(reg, gb_no_params, empty_df)
+	gb_attrs["max"]   = make_callable_type(reg, gb_no_params, empty_df)
+	gb_attrs["count"] = make_callable_type(reg, gb_no_params, empty_df)
+	gb_attrs["std"]   = make_callable_type(reg, gb_no_params, empty_df)
+	reg.data_groupby_class = register_type(reg, Class_Type{
+		name  = "GroupBy",
+		attrs = gb_attrs,
+	})
 
 	vreg.modules["mimir.data"] = Virtual_Module{
 		name    = "mimir.data",
