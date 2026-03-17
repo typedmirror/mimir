@@ -57,6 +57,9 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.plot
 	register_mimir_plot(&vreg, reg)
 
+	// Register mimir.ml
+	register_mimir_ml(&vreg, reg)
+
 	return vreg
 }
 
@@ -1297,6 +1300,164 @@ register_mimir_plot :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.plot"] = Virtual_Module{
 		name    = "mimir.plot",
+		exports = exports,
+	}
+}
+
+// ==================== mimir.ml ====================
+
+register_mimir_ml :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 64, reg.allocator)
+
+	tensor_f64 := make_tensor_type(reg, TYPE_FLOAT, {})
+	no_params  := make([]Param_Type, 0, reg.allocator)
+
+	// ---- Module base class ----
+	module_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	module_attrs["forward"]    = make_callable_type(reg,
+		{Param_Type{name = "x", type_id = tensor_f64}}, tensor_f64)
+	module_attrs["parameters"] = make_callable_type(reg, no_params,
+		make_list_type(reg, tensor_f64))
+	module_attrs["train"]      = make_callable_type(reg, no_params, TYPE_NONE)
+	module_attrs["eval"]       = make_callable_type(reg, no_params, TYPE_NONE)
+	module_attrs["state_dict"] = make_callable_type(reg, no_params,
+		make_dict_type(reg, TYPE_STR, tensor_f64))
+	module_attrs["load_state_dict"] = make_callable_type(reg,
+		{Param_Type{name = "state", type_id = make_dict_type(reg, TYPE_STR, tensor_f64)}},
+		TYPE_NONE)
+
+	module_class := register_type(reg, Class_Type{
+		name  = "Module",
+		attrs = module_attrs,
+	})
+	module_inst := make_instance_type(reg, module_class)
+	exports["Module"] = make_callable_type(reg, no_params, module_inst)
+
+	// ---- Layer classes ----
+	// Helper: register a layer class that is callable (Tensor → Tensor) + has Module methods
+	_register_layer :: proc(
+		reg: ^Type_Registry, exports: ^map[string]Type_ID,
+		name: string, params: []Param_Type,
+		module_attrs: map[string]Type_ID, tensor_type: Type_ID,
+	) {
+		layer_attrs := make(map[string]Type_ID, len(module_attrs) + 2, reg.allocator)
+		for k, v in module_attrs { layer_attrs[k] = v }
+		layer_attrs["__call__"] = make_callable_type(reg,
+			{Param_Type{name = "x", type_id = tensor_type}}, tensor_type)
+
+		class_id := register_type(reg, Class_Type{
+			name  = name,
+			attrs = layer_attrs,
+		})
+		inst_id := make_instance_type(reg, class_id)
+		exports[name] = make_callable_type(reg, params, inst_id)
+	}
+
+	// Linear(in_features, out_features, bias=True)
+	_register_layer(reg, &exports, "Linear", {
+		Param_Type{name = "in_features",  type_id = TYPE_INT},
+		Param_Type{name = "out_features", type_id = TYPE_INT},
+		Param_Type{name = "bias", type_id = TYPE_BOOL, has_default = true},
+	}, module_attrs, tensor_f64)
+
+	// Conv2d(in_channels, out_channels, kernel_size, stride=1, padding=0)
+	_register_layer(reg, &exports, "Conv2d", {
+		Param_Type{name = "in_channels",  type_id = TYPE_INT},
+		Param_Type{name = "out_channels", type_id = TYPE_INT},
+		Param_Type{name = "kernel_size",  type_id = TYPE_INT},
+		Param_Type{name = "stride",  type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "padding", type_id = TYPE_INT, has_default = true},
+	}, module_attrs, tensor_f64)
+
+	// LayerNorm(normalized_shape)
+	_register_layer(reg, &exports, "LayerNorm", {
+		Param_Type{name = "normalized_shape", type_id = TYPE_INT},
+	}, module_attrs, tensor_f64)
+
+	// BatchNorm(num_features)
+	_register_layer(reg, &exports, "BatchNorm", {
+		Param_Type{name = "num_features", type_id = TYPE_INT},
+	}, module_attrs, tensor_f64)
+
+	// Dropout(p=0.5)
+	_register_layer(reg, &exports, "Dropout", {
+		Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true},
+	}, module_attrs, tensor_f64)
+
+	// Embedding(num_embeddings, embedding_dim)
+	_register_layer(reg, &exports, "Embedding", {
+		Param_Type{name = "num_embeddings", type_id = TYPE_INT},
+		Param_Type{name = "embedding_dim",  type_id = TYPE_INT},
+	}, module_attrs, tensor_f64)
+
+	// ---- Activation functions (Tensor → Tensor) ----
+	act_type := make_callable_type(reg,
+		{Param_Type{name = "x", type_id = tensor_f64}}, tensor_f64)
+	exports["relu"]       = act_type
+	exports["gelu"]       = act_type
+	exports["silu"]       = act_type
+	exports["sigmoid"]    = act_type
+	exports["tanh"]       = act_type
+	exports["softmax"]    = make_callable_type(reg,
+		{Param_Type{name = "x", type_id = tensor_f64},
+		 Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["log_softmax"] = make_callable_type(reg,
+		{Param_Type{name = "x", type_id = tensor_f64},
+		 Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+
+	// ---- Loss functions ((Tensor, Tensor) → Tensor) ----
+	loss_type := make_callable_type(reg,
+		{Param_Type{name = "input",  type_id = tensor_f64},
+		 Param_Type{name = "target", type_id = tensor_f64}},
+		tensor_f64)
+	exports["cross_entropy"]        = loss_type
+	exports["mse_loss"]             = loss_type
+	exports["binary_cross_entropy"] = loss_type
+
+	// ---- Optimizer classes ----
+	opt_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	opt_attrs["step"]      = make_callable_type(reg, no_params, TYPE_NONE)
+	opt_attrs["zero_grad"] = make_callable_type(reg, no_params, TYPE_NONE)
+
+	params_param := Param_Type{name = "params", type_id = TYPE_ANY}
+	lr_param     := Param_Type{name = "lr", type_id = TYPE_FLOAT}
+
+	// SGD(params, lr, momentum=0)
+	sgd_class := register_type(reg, Class_Type{name = "SGD", attrs = opt_attrs})
+	sgd_inst  := make_instance_type(reg, sgd_class)
+	exports["SGD"] = make_callable_type(reg, {
+		params_param, lr_param,
+		Param_Type{name = "momentum", type_id = TYPE_FLOAT, has_default = true},
+	}, sgd_inst)
+
+	// Adam(params, lr=1e-3, betas=(0.9,0.999), eps=1e-8)
+	adam_class := register_type(reg, Class_Type{name = "Adam", attrs = opt_attrs})
+	adam_inst  := make_instance_type(reg, adam_class)
+	exports["Adam"] = make_callable_type(reg, {
+		params_param,
+		Param_Type{name = "lr",   type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "betas", type_id = TYPE_ANY, has_default = true},
+		Param_Type{name = "eps",  type_id = TYPE_FLOAT, has_default = true},
+	}, adam_inst)
+
+	// AdamW(params, lr=1e-3, weight_decay=0.01)
+	adamw_class := register_type(reg, Class_Type{name = "AdamW", attrs = opt_attrs})
+	adamw_inst  := make_instance_type(reg, adamw_class)
+	exports["AdamW"] = make_callable_type(reg, {
+		params_param,
+		Param_Type{name = "lr",           type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "weight_decay", type_id = TYPE_FLOAT, has_default = true},
+	}, adamw_inst)
+
+	// ---- Tensor (constructor: Tensor(data) → Tensor) ----
+	exports["Tensor"] = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY}},
+		tensor_f64)
+
+	vreg.modules["mimir.ml"] = Virtual_Module{
+		name    = "mimir.ml",
 		exports = exports,
 	}
 }

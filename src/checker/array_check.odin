@@ -129,6 +129,16 @@ resolve_tensor_attr :: proc(reg: ^Type_Registry, tensor: ^Tensor_Type, attr: str
 		return make_callable_type(reg,
 			{Param_Type{name = "decimals", type_id = TYPE_INT, has_default = true}},
 			same_tensor)
+
+	// Autograd (mimir.ml tensor extensions)
+	case "backward":
+		return make_callable_type(reg, no_params, TYPE_NONE)
+	case "grad":
+		return same_tensor
+	case "requires_grad":
+		return TYPE_BOOL
+	case "detach":
+		return make_callable_type(reg, no_params, same_tensor)
 	}
 
 	return TYPE_UNKNOWN
