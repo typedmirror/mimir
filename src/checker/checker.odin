@@ -2013,6 +2013,31 @@ backfill_inferred_returns :: proc(result: ^Check_Result, bind_result: ^binder.Bi
 				info.return_type = inferred_ret
 			}
 		}
+
+		// Also update the Class_Type attrs copy if this is a method.
+		// build_func_type is called twice (check_stmt + scan_class_body),
+		// producing different Type_IDs. Backfill must update BOTH.
+		if parent != nil && parent.kind == .Class {
+			// Find the class type and update its attrs entry
+			for _, ct_id in reg.class_types {
+				ct := get_type(reg, ct_id)
+				#partial switch &cls in ct.info {
+				case Class_Type:
+					if cls.scope_id == parent.id {
+						if attr_type_id, has_attr := cls.attrs[scope.name]; has_attr {
+							attr_t := get_type(reg, attr_type_id)
+							#partial switch &attr_info in attr_t.info {
+							case Callable_Type:
+								if attr_info.return_type == TYPE_UNKNOWN {
+									attr_info.return_type = inferred_ret
+								}
+							}
+						}
+						break
+					}
+				}
+			}
+		}
 	}
 }
 

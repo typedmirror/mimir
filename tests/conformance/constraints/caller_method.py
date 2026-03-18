@@ -1,7 +1,7 @@
-# Method call: annotated method return type propagates through revalidation
+# Method call caller→param: obj.method(42) → param inferred, return propagated
 
 class Calc:
-    def add(self, x: int, y: int) -> int:
+    def add(self, x, y):
         return x + y
 
 c = Calc()
