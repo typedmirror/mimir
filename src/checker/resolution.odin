@@ -426,32 +426,71 @@ collect_calls_in_stmt :: proc(
 			call, is_call := expr.(^parser.Call_Expr)
 			if !is_call { return }
 
-			// Only handle direct name calls: f(args)
-			name, is_name := call.func.(^parser.Name_Expr)
-			if !is_name { return }
+			callee_scope: binder.Scope_ID
+			callee_args: ^parser.Arguments
+			self_offset := 0  // 0 for direct calls, 1 for method calls (implicit self)
 
-			func_sym, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name))
-			if !ref_ok { return }
+			// Try direct name call: f(args)
+			if name, is_name := call.func.(^parser.Name_Expr); is_name {
+				func_sym, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name))
+				if !ref_ok { return }
+				scope, has_scope := ctx.sym_to_scope[func_sym]
+				if !has_scope { return }
+				args, has_args := ctx.func_args_map[scope]
+				if !has_args || args == nil { return }
+				callee_scope = scope
+				callee_args = args
+			} else if attr, is_attr := call.func.(^parser.Attribute_Expr); is_attr {
+				// Method call: obj.method(args) — resolve obj type → class → method scope
+				obj_type, has_obj := ctx.result.expr_types[expr_to_rawptr(attr.value)]
+				if !has_obj { return }
 
-			// Find the callee's scope
-			callee_scope, has_scope := ctx.sym_to_scope[func_sym]
-			if !has_scope { return }
+				// Unwrap Instance_Type → Class_Type
+				class_type_id := TYPE_UNKNOWN
+				t := get_type(ctx.reg, obj_type)
+				#partial switch info in t.info {
+				case Instance_Type:
+					class_type_id = info.class_type
+				case Class_Type:
+					class_type_id = obj_type
+				}
+				if class_type_id == TYPE_UNKNOWN { return }
 
-			// Check if callee has unannotated params (via func_args_map)
-			callee_args, has_args := ctx.func_args_map[callee_scope]
-			if !has_args || callee_args == nil { return }
+				// Find method in class scope
+				ct := get_type(ctx.reg, class_type_id)
+				#partial switch cls in ct.info {
+				case Class_Type:
+					if cls.scope_id == binder.INVALID_SCOPE { return }
+					class_scope := binder.result_get_scope(ctx.bind_result, cls.scope_id)
+					if class_scope == nil { return }
+					method_sym, has_method := class_scope.symbols[attr.attr]
+					if !has_method { return }
+					method_scope, has_scope := ctx.sym_to_scope[method_sym]
+					if !has_scope { return }
+					args, has_args := ctx.func_args_map[method_scope]
+					if !has_args || args == nil { return }
+					callee_scope = method_scope
+					callee_args = args
+					self_offset = 1  // skip self param
+				}
+				if callee_scope == binder.INVALID_SCOPE { return }
+			} else {
+				return
+			}
 
 			// For each positional arg, record its type as evidence
+			// self_offset shifts the param index for method calls (implicit self)
 			n_posonly := len(callee_args.posonlyargs)
 			n_params := n_posonly + len(callee_args.args)
 			for arg, i in call.args {
-				if i >= n_params { break }
+				param_idx := i + self_offset
+				if param_idx >= n_params { break }
 				arg_ptr := expr_to_rawptr(arg)
 				arg_type, has_type := ctx.result.expr_types[arg_ptr]
 				if !has_type { continue }
 				if arg_type == TYPE_UNKNOWN || arg_type == TYPE_ANY { continue }
 
-				record_caller_evidence(ctx.cpt, callee_scope, i, arg_type, ctx.reg, ctx.allocator)
+				record_caller_evidence(ctx.cpt, callee_scope, param_idx, arg_type, ctx.reg, ctx.allocator)
 			}
 
 			// For each keyword arg, match by name to find param index
