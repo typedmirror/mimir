@@ -104,6 +104,7 @@ check :: proc(
 
 	prev_return_count := len(result.inferred_returns)
 	prev_caller_count := 0
+	prev_caller_hash : u64 = 0
 	caller_param_types: Caller_Param_Types
 	sym_to_scope := build_sym_to_scope(bind_result, allocator)
 
@@ -113,10 +114,14 @@ check :: proc(
 		caller_param_types = collect_caller_param_types(
 			&result, bind_result, flow_result, &func_args_map, &sym_to_scope, &result.registry, allocator)
 
-		// Count total caller param evidence
+		// Count total caller param evidence + type hash for change detection
 		new_caller_count := 0
-		for _, params in caller_param_types {
+		new_caller_hash : u64 = 0
+		for scope_id, params in caller_param_types {
 			new_caller_count += len(params)
+			for idx, type_id in params {
+				new_caller_hash ~= u64(type_id) * (u64(scope_id) + u64(idx) * 31 + 1)
+			}
 		}
 
 		// On first round, skip if no evidence at all
@@ -166,9 +171,10 @@ check :: proc(
 
 		// Check convergence: did we discover new return types or caller params?
 		new_return_count := len(result.inferred_returns)
-		if new_return_count == prev_return_count && new_caller_count == prev_caller_count { break }
+		if new_return_count == prev_return_count && new_caller_count == prev_caller_count && new_caller_hash == prev_caller_hash { break }
 		prev_return_count = new_return_count
 		prev_caller_count = new_caller_count
+		prev_caller_hash = new_caller_hash
 	}
 
 	// Re-validate module-level assignments against updated return types
@@ -311,6 +317,7 @@ check_with_imports :: proc(
 
 	prev_ret_count := len(result.inferred_returns)
 	prev_caller_count_multi := 0
+	prev_caller_hash_multi : u64 = 0
 	caller_param_types_multi: Caller_Param_Types
 	sym_to_scope_multi := build_sym_to_scope(bind_result, allocator)
 
@@ -320,8 +327,12 @@ check_with_imports :: proc(
 			&result, bind_result, flow_result, &func_args_map, &sym_to_scope_multi, registry, allocator)
 
 		new_caller_count_multi := 0
-		for _, params in caller_param_types_multi {
+		new_caller_hash_multi : u64 = 0
+		for scope_id, params in caller_param_types_multi {
 			new_caller_count_multi += len(params)
+			for idx, type_id in params {
+				new_caller_hash_multi ~= u64(type_id) * (u64(scope_id) + u64(idx) * 31 + 1)
+			}
 		}
 		if round == 0 && len(result.inferred_returns) == 0 && new_caller_count_multi == 0 { break }
 
@@ -366,9 +377,10 @@ check_with_imports :: proc(
 		backfill_inferred_returns(&result, bind_result, registry)
 
 		new_ret_count := len(result.inferred_returns)
-		if new_ret_count == prev_ret_count && new_caller_count_multi == prev_caller_count_multi { break }
+		if new_ret_count == prev_ret_count && new_caller_count_multi == prev_caller_count_multi && new_caller_hash_multi == prev_caller_hash_multi { break }
 		prev_ret_count = new_ret_count
 		prev_caller_count_multi = new_caller_count_multi
+		prev_caller_hash_multi = new_caller_hash_multi
 	}
 
 	if len(result.inferred_returns) > 0 {

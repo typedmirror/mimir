@@ -31,6 +31,7 @@ Constraint :: union {
 	Subscriptable,
 	Type_Subtype,    // Phase II: var <: type (from call-site argument matching)
 	Supports_Op,     // Phase II: var supports binary/unary operation
+	Dict_Key_Set,    // Phase III: x["key"] = val → TypedDict inference (§3.5)
 }
 
 Has_Method :: struct {
@@ -89,6 +90,14 @@ Supports_Op :: struct {
 	loc:          parser.Src_Loc,
 }
 
+// §3.5: x["key"] = val → x has string key "key" with value type
+Dict_Key_Set :: struct {
+	var:        Constraint_Var,
+	key:        string,       // string literal key
+	value_type: Type_ID,
+	loc:        parser.Src_Loc,
+}
+
 // ==================== Constraint Set ====================
 
 Constraint_Set :: struct {
@@ -139,6 +148,7 @@ add_constraint :: proc(cs: ^Constraint_Set, c: Constraint) {
 	case Subscriptable: var_id = cv.var
 	case Type_Subtype:  var_id = cv.var
 	case Supports_Op:   var_id = cv.var
+	case Dict_Key_Set:  var_id = cv.var
 	}
 	if var_id != INVALID_CONSTRAINT_VAR {
 		if vc, ok := &cs.var_constraints[var_id]; ok {
@@ -321,7 +331,7 @@ collect_scope_constraints :: proc(
 	return cs
 }
 
-// Check statement-level patterns (for loops → Iterable_Of)
+// Check statement-level patterns (for loops → Iterable_Of, dict assignment → Dict_Key_Set)
 collect_stmt_constraints :: proc(stmt: parser.Stmt, ctx: ^Collect_Context) {
 	#partial switch s in stmt {
 	case ^parser.For_Stmt:
@@ -329,7 +339,50 @@ collect_stmt_constraints :: proc(stmt: parser.Stmt, ctx: ^Collect_Context) {
 		collect_iter_constraint(s.iter, s.target, ctx)
 	case ^parser.Async_For:
 		collect_iter_constraint(s.iter, s.target, ctx)
+	case ^parser.Assign:
+		// `x["key"] = val` → Dict_Key_Set(x, key, typeof(val))
+		if len(s.targets) == 1 {
+			collect_dict_key_assign(s.targets[0], s.value, ctx)
+		}
 	}
+}
+
+// x["key"] = val where x is unknown param and "key" is string literal
+collect_dict_key_assign :: proc(target: parser.Expr, value: parser.Expr, ctx: ^Collect_Context) {
+	sub, is_sub := target.(^parser.Subscript_Expr)
+	if !is_sub { return }
+
+	// Check if the subscript base is an unknown param
+	sym_id := resolve_to_symbol(sub.value, ctx.bind_result)
+	if sym_id == binder.INVALID_SYMBOL { return }
+	if sym_id not_in ctx.unknown_syms { return }
+
+	// Check if the key is a string literal
+	key_str := ""
+	if sub.slice != nil {
+		if const_expr, ok := sub.slice.(^parser.Constant_Expr); ok {
+			if str_val, is_str := const_expr.value.(string); is_str {
+				key_str = str_val
+			}
+		}
+	}
+	if key_str == "" { return }
+
+	// Get value type
+	val_type := TYPE_UNKNOWN
+	if value != nil {
+		if t, found := ctx.expr_types[expr_to_rawptr(value)]; found {
+			val_type = t
+		}
+	}
+
+	cv := get_or_create_var(ctx.cs, sym_id, ctx.scope_id, TYPE_UNKNOWN)
+	add_constraint(ctx.cs, Dict_Key_Set{
+		var        = cv,
+		key        = key_str,
+		value_type = val_type,
+		loc        = sub.loc,
+	})
 }
 
 collect_iter_constraint :: proc(iter_expr: parser.Expr, target: parser.Expr, ctx: ^Collect_Context) {

@@ -259,6 +259,12 @@ resolve_single_constraint :: proc(
 			append(&result, make_dict_type(reg, cv.key_type, val))
 		}
 
+	case Dict_Key_Set:
+		// x["key"] = val → x is dict-like (TypedDict synthesized in fallback)
+		// For intersection, produce dict[str, val_type] as candidate
+		val := cv.value_type if cv.value_type != TYPE_UNKNOWN else TYPE_ANY
+		append(&result, make_dict_type(reg, TYPE_STR, val))
+
 	case Type_Subtype:
 		// Direct type constraint: var must be assignable to cv.type_id
 		// The candidate is the type itself (or subtypes)
@@ -576,10 +582,10 @@ Caller_Call_Ctx :: struct {
 
 // ==================== Protocol Inference (§3.6) ====================
 
-// Synthesize a Protocol_Type from accumulated constraints on a variable.
-// Fallback when no concrete type matches all constraints — the constraints
-// themselves define a structural protocol.
-synthesize_protocol :: proc(
+// Synthesize a structural type from accumulated constraints on a variable.
+// Tries TypedDict first (if Dict_Key_Set constraints present), then Protocol.
+// Fallback when no concrete type matches all constraints.
+synthesize_structural_type :: proc(
 	cs: ^Constraint_Set,
 	var_id: Constraint_Var,
 	reg: ^Type_Registry,
@@ -588,14 +594,14 @@ synthesize_protocol :: proc(
 	constraint_indices, ok := cs.var_constraints[var_id]
 	if !ok || len(constraint_indices) == 0 { return TYPE_UNKNOWN }
 
-	methods := make(map[string]Type_ID, 4, allocator)
-	attrs   := make(map[string]Type_ID, 4, allocator)
+	methods    := make(map[string]Type_ID, 4, allocator)
+	attrs      := make(map[string]Type_ID, 4, allocator)
+	dict_keys  := make(map[string]Type_ID, 4, allocator)
 
 	for ci in constraint_indices {
 		c := cs.constraints[ci]
 		#partial switch cv in c {
 		case Has_Method:
-			// Build Callable_Type for the method signature
 			params := make([]Param_Type, len(cv.arg_types), allocator)
 			for a, i in cv.arg_types {
 				params[i] = Param_Type{
@@ -608,17 +614,37 @@ synthesize_protocol :: proc(
 		case Has_Attr:
 			attr_type := cv.attr_type if cv.attr_type != TYPE_UNKNOWN else TYPE_ANY
 			attrs[cv.attr_name] = attr_type
+		case Dict_Key_Set:
+			val_type := cv.value_type if cv.value_type != TYPE_UNKNOWN else TYPE_ANY
+			dict_keys[cv.key] = val_type
 		}
 	}
 
-	// Only synthesize if we have meaningful structural evidence
-	if len(methods) == 0 && len(attrs) == 0 { return TYPE_UNKNOWN }
+	// §3.5: If Dict_Key_Set constraints present → synthesize TypedDict
+	if len(dict_keys) > 0 {
+		return make_typeddict_type(reg, "", dict_keys, true)
+	}
 
-	return register_type(reg, Protocol_Type{
-		name    = "",
-		methods = methods,
-		attrs   = attrs,
-	})
+	// §3.6: If Has_Method/Has_Attr present → synthesize Protocol
+	if len(methods) > 0 || len(attrs) > 0 {
+		return register_type(reg, Protocol_Type{
+			name    = "",
+			methods = methods,
+			attrs   = attrs,
+		})
+	}
+
+	return TYPE_UNKNOWN
+}
+
+// Keep old name as alias for backward compatibility
+synthesize_protocol :: proc(
+	cs: ^Constraint_Set,
+	var_id: Constraint_Var,
+	reg: ^Type_Registry,
+	allocator: mem.Allocator,
+) -> Type_ID {
+	return synthesize_structural_type(cs, var_id, reg, allocator)
 }
 
 // ==================== Enhanced Resolution with Caller Types ====================
