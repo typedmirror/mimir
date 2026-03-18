@@ -807,6 +807,12 @@ check_caller_conflict :: proc(
 	if !has_pt { return }
 	if param_t == TYPE_UNKNOWN || param_t == TYPE_ANY { return }
 	if !is_assignable(reg, caller_t, param_t) {
+		// Deduplicate: skip if T010 already emitted for this location
+		for &d in diagnostics {
+			if d.code == "T010" && d.location.line == int(arg.loc.line) && d.location.column == int(arg.loc.col) {
+				return
+			}
+		}
 		emit_diagnostic_raw(diagnostics, file_path, arg.loc, "T010", .Warning,
 			"Conflicting type constraints",
 			fmt.tprintf("Parameter '%s' inferred as '%s' from body but called with '%s'",

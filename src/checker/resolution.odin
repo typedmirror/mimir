@@ -361,16 +361,30 @@ widen_candidates :: proc(candidates: map[Type_ID]bool, reg: ^Type_Registry) -> T
 		return TYPE_UNKNOWN
 	}
 
-	// For backward inference from body constraints, prefer the most common type.
-	// Priority: int > str > float > bytes > bool > complex > instance types
-	priority := [?]Type_ID{TYPE_INT, TYPE_STR, TYPE_FLOAT, TYPE_BYTES, TYPE_BOOL, TYPE_COMPLEX}
-	for p in priority {
-		if p in reduced { return p }
+	// Multiple non-promotion candidates remain — check if all are primitives
+	// If so, pick narrowest by priority (backward inference heuristic).
+	// If mixed primitive+non-primitive, build union per spec "conflict → union".
+	all_primitive := true
+	for t in reduced {
+		if t != TYPE_INT && t != TYPE_FLOAT && t != TYPE_BOOL && t != TYPE_COMPLEX &&
+		   t != TYPE_STR && t != TYPE_BYTES {
+			all_primitive = false
+			break
+		}
 	}
 
-	// Return first instance type
-	for t in reduced { return t }
-	return TYPE_UNKNOWN
+	if all_primitive {
+		// All primitives — pick narrowest (backward inference heuristic)
+		priority := [?]Type_ID{TYPE_INT, TYPE_STR, TYPE_FLOAT, TYPE_BYTES, TYPE_BOOL, TYPE_COMPLEX}
+		for p in priority {
+			if p in reduced { return p }
+		}
+	}
+
+	// Mixed or non-primitive candidates — build union (spec: conflict → union)
+	types := make([dynamic]Type_ID, 0, len(reduced), reg.allocator)
+	for t in reduced { append(&types, t) }
+	return make_union_type(reg, types[:])
 }
 
 // ==================== Caller→Param Type Collection ====================
