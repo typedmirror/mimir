@@ -171,6 +171,10 @@ resolve_single_constraint :: proc(
 			append(&result, make_set_type(reg, TYPE_ANY))
 		case "issubset", "issuperset":
 			append(&result, make_set_type(reg, TYPE_ANY))
+		case "update":
+			// Shared: dict.update(other_dict) and set.update(other_set)
+			append(&result, make_dict_type(reg, TYPE_ANY, TYPE_ANY))
+			append(&result, make_set_type(reg, TYPE_ANY))
 		}
 
 		// Also check user-defined classes
@@ -204,9 +208,18 @@ resolve_single_constraint :: proc(
 		// Modules have attributes — skip for now (params aren't usually modules)
 
 	case Callable_With:
-		// The symbol itself is callable — could be a function or class
-		// For Phase I, this is hard to resolve without more context
-		// Leave empty — won't constrain the type
+		// x(args) → x is Callable with matching signature
+		// Construct a Callable_Type from observed arg/return types
+		params := make([]Param_Type, len(cv.arg_types), allocator)
+		for a, i in cv.arg_types {
+			params[i] = Param_Type{
+				name    = "",
+				type_id = a if a != TYPE_UNKNOWN else TYPE_ANY,
+			}
+		}
+		ret := cv.return_type if cv.return_type != TYPE_UNKNOWN else TYPE_ANY
+		callable_id := make_callable_type(reg, params, ret)
+		append(&result, callable_id)
 
 	case Iterable_Of:
 		// Known iterable types
