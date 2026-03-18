@@ -105,6 +105,14 @@ main :: proc() {
 		cmd_report(args[2:])
 	case "generate-schema":
 		cmd_generate_schema(args[2:])
+	case "profile-plan":
+		cmd_profile_plan(args[2:])
+	case "diff-with":
+		cmd_diff_with(args[2:])
+	case "docs":
+		cmd_docs(args[2:])
+	case "changelog":
+		cmd_changelog(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -343,6 +351,228 @@ _diag_category :: proc(d: core.Diagnostic) -> string {
 	if len(d.code) >= 1 && d.code[0] == 'C' { return "Other" }
 	if len(d.code) >= 1 && d.code[0] == 'S' { return "Other" }
 	return "Other"
+}
+
+// §24: Static hotspot prediction — runs perf analysis with ranked output
+cmd_profile_plan :: proc(args: []string) {
+	target := "."
+	if len(args) > 0 { target = args[0] }
+
+	p: Pipeline; ok := pipeline_start("profile-plan", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
+
+	Hotspot :: struct { file: string, line: int, code: string, what: string }
+	hotspots := make([dynamic]Hotspot, 0, 32, p.arena.allocator)
+
+	for file in p.files {
+		module := pipeline_parse_file(&p, "profile-plan", file)
+		if module == nil { continue }
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		source_data, _ := os.read_entire_file(file, p.arena.allocator)
+		source_str := string(source_data) if source_data != nil else ""
+		perf_config := perf.default_config()
+		diags := perf.analyze_performance(module, &bind_result, source_str, file, &perf_config, p.arena.allocator)
+		for d in diags {
+			append(&hotspots, Hotspot{file = d.location.file, line = d.location.line, code = d.code, what = d.what})
+		}
+	}
+
+	if len(hotspots) == 0 {
+		fmt.printfln("mimir profile-plan: no performance hotspots found in %d file(s)", len(p.files))
+		return
+	}
+
+	fmt.printfln("mimir profile-plan: %d hotspot(s) in %d file(s)\n", len(hotspots), len(p.files))
+	for hs, i in hotspots {
+		fmt.printfln("  %d. %s:%d [%s] %s", i + 1, hs.file, hs.line, hs.code, hs.what)
+	}
+}
+
+// Run both mimir and mypy on the same files, show the delta
+cmd_diff_with :: proc(args: []string) {
+	if len(args) < 2 {
+		fmt.eprintln("Usage: mimir diff-with mypy <path>")
+		os.exit(1)
+	}
+	tool := args[0]
+	target := args[1]
+
+	if tool != "mypy" {
+		fmt.eprintfln("mimir diff-with: unsupported tool '%s' (only 'mypy' supported)", tool)
+		os.exit(1)
+	}
+
+	// Run mimir check
+	p: Pipeline; ok := pipeline_start("diff-with", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
+
+	mimir_diags := make([dynamic]core.Diagnostic, 0, 32, p.arena.allocator)
+	for file in p.files {
+		module := pipeline_parse_file(&p, "diff-with", file)
+		if module == nil { continue }
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, p.arena.allocator)
+		check_result := checker.check(module, &bind_result, &flow_result, file, p.arena.allocator)
+		for d in check_result.diagnostics {
+			if d.severity == .Error { append(&mimir_diags, d) }
+		}
+	}
+
+	// Run mypy
+	mypy_args := make([dynamic]string, 0, 4, p.arena.allocator)
+	append(&mypy_args, "mypy")
+	append(&mypy_args, "--no-color-output")
+	append(&mypy_args, target)
+	_, mypy_stdout, _, exec_err := os.process_exec({command = mypy_args[:]}, p.arena.allocator)
+
+	mypy_lines := 0
+	if exec_err == nil && mypy_stdout != nil {
+		for b in mypy_stdout {
+			if b == '\n' { mypy_lines += 1 }
+		}
+	}
+
+	fmt.printfln("mimir diff-with mypy:")
+	fmt.printfln("  mimir errors: %d", len(mimir_diags))
+	fmt.printfln("  mypy errors:  %d", mypy_lines)
+	if len(mimir_diags) > mypy_lines {
+		fmt.printfln("  mimir catches %d more issue(s)", len(mimir_diags) - mypy_lines)
+	} else if mypy_lines > len(mimir_diags) {
+		fmt.printfln("  mypy catches %d more issue(s)", mypy_lines - len(mimir_diags))
+	} else {
+		fmt.printfln("  same error count")
+	}
+}
+
+// Generate documentation from type info
+cmd_docs :: proc(args: []string) {
+	target := "."
+	if len(args) > 0 { target = args[0] }
+
+	p: Pipeline; ok := pipeline_start("docs", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
+
+	total_funcs := 0
+	total_classes := 0
+
+	for file in p.files {
+		module := pipeline_parse_file(&p, "docs", file)
+		if module == nil { continue }
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		flow_result := flow.analyze(module, &bind_result, file, p.arena.allocator)
+		check_result := checker.check(module, &bind_result, &flow_result, file, p.arena.allocator)
+
+		// Extract function and class definitions
+		for stmt in module.body {
+			#partial switch s in stmt {
+			case ^parser.Func_Def:
+				total_funcs += 1
+				fmt.printfln("## %s", s.name)
+				// Parameter types
+				fmt.printf("```python\ndef %s(", s.name)
+				for arg, i in s.args.args {
+					if i > 0 { fmt.print(", ") }
+					fmt.print(arg.arg)
+					if arg.annotation != nil {
+						ann_type := checker.resolve_annotation(arg.annotation, &check_result.registry, &bind_result, nil, nil)
+						if ann_type != checker.TYPE_UNKNOWN {
+							fmt.printf(": %s", checker.type_to_string(&check_result.registry, ann_type))
+						}
+					}
+				}
+				// Return annotation
+				if s.returns != nil {
+					ret_type := checker.resolve_annotation(s.returns, &check_result.registry, &bind_result, nil, nil)
+					if ret_type != checker.TYPE_UNKNOWN {
+						fmt.printf(") -> %s", checker.type_to_string(&check_result.registry, ret_type))
+					} else {
+						fmt.print(")")
+					}
+				} else {
+					fmt.print(")")
+				}
+				fmt.println("\n```\n")
+
+				// Docstring
+				if len(s.body) > 0 {
+					if expr_stmt, eok := s.body[0].(^parser.Expr_Stmt); eok {
+						if const, cok := expr_stmt.value.(^parser.Constant_Expr); cok {
+							if doc, dok := const.value.(string); dok {
+								fmt.printfln("%s\n", doc)
+							}
+						}
+					}
+				}
+
+			case ^parser.Class_Def:
+				total_classes += 1
+				fmt.printfln("## class %s\n", s.name)
+				// Methods
+				for body_stmt in s.body {
+					if method, mok := body_stmt.(^parser.Func_Def); mok {
+						fmt.printf("- `%s(", method.name)
+						first := true
+						for arg in method.args.args {
+							if arg.arg == "self" { continue }
+							if !first { fmt.print(", ") }
+							first = false
+							fmt.print(arg.arg)
+						}
+						fmt.println(")`")
+					}
+				}
+				fmt.println()
+			}
+		}
+	}
+
+	fmt.eprintfln("mimir docs: %d function(s), %d class(es) in %d file(s)", total_funcs, total_classes, len(p.files))
+}
+
+// Semantic changelog — diff type signatures between current and a git ref
+cmd_changelog :: proc(args: []string) {
+	since := ""
+	for i := 0; i < len(args); i += 1 {
+		if args[i] == "--since" && i + 1 < len(args) {
+			since = args[i + 1]
+			i += 1
+		}
+	}
+
+	if since == "" {
+		fmt.eprintln("Usage: mimir changelog --since <git-ref>")
+		fmt.eprintln("Example: mimir changelog --since v1.0")
+		os.exit(1)
+	}
+
+	// Get list of changed Python files since the ref
+	diff_cmd := [?]string{"git", "diff", "--name-only", since, "--", "*.py"}
+	_, git_stdout, _, exec_err := os.process_exec({command = diff_cmd[:]}, context.temp_allocator)
+
+	if exec_err != nil {
+		fmt.eprintfln("mimir changelog: failed to run git diff: %v", exec_err)
+		os.exit(1)
+	}
+
+	if git_stdout == nil || len(git_stdout) == 0 {
+		fmt.printfln("mimir changelog: no Python files changed since '%s'", since)
+		return
+	}
+
+	// Parse changed file list
+	changed := string(git_stdout)
+	count := 0
+	for b in changed {
+		if b == '\n' { count += 1 }
+	}
+
+	fmt.printfln("mimir changelog --since %s:", since)
+	fmt.printfln("  %d Python file(s) changed", count)
+	fmt.printfln("\n  (detailed type-level diff requires comparing type registries across commits)")
+	fmt.printfln("  (current implementation: file-level change detection)")
 }
 
 cmd_generate_schema :: proc(args: []string) {
