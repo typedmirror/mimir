@@ -1,8 +1,10 @@
 package checker
 
 import "core:mem"
+import parser "mimir:parser"
 import binder "mimir:binder"
 import flow   "mimir:flow"
+import core   "mimir:core"
 
 // ==================== Constraint Resolution ====================
 //
@@ -60,8 +62,8 @@ resolve_constraints :: proc(
 				break
 			}
 		} else {
-			// Multiple candidates — pick the most specific
-			best := pick_most_specific(candidates, reg)
+			// Multiple candidates — widen (union or promotion)
+			best := widen_candidates(candidates, reg)
 			if best != TYPE_UNKNOWN {
 				result[var_info.symbol_id] = best
 			}
@@ -211,21 +213,299 @@ resolve_single_constraint :: proc(
 	return result[:]
 }
 
-// When multiple types match all constraints, pick the most specific one.
-// Priority: int > float > str > bytes > bool. Int is the most common Python type
-// and the most likely backward inference target for arithmetic operations.
-pick_most_specific :: proc(candidates: map[Type_ID]bool, reg: ^Type_Registry) -> Type_ID {
-	priority := [?]Type_ID{TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_BYTES, TYPE_BOOL}
-	for p in priority {
-		if p in candidates { return p }
-	}
+// Widen multiple candidates into the best resolved type.
+// Applies Python's numeric promotion hierarchy (bool <: int <: float <: complex),
+// then falls back to priority-based selection for non-numeric types.
+// Only builds union types when candidates are truly disjoint (e.g., str | int from callers).
+widen_candidates :: proc(candidates: map[Type_ID]bool, reg: ^Type_Registry) -> Type_ID {
+	has_bool    := TYPE_BOOL    in candidates
+	has_int     := TYPE_INT     in candidates
+	has_float   := TYPE_FLOAT   in candidates
+	has_complex := TYPE_COMPLEX in candidates
 
-	// Return first instance type if any
+	// Reduce numeric promotion chain to narrowest useful type
+	// For backward inference, we want the NARROWEST (most specific) type that
+	// satisfies all constraints — not the widest. If both int and float are
+	// candidates, the actual constraint only requires int (since int <: float).
+	reduced := make(map[Type_ID]bool, len(candidates), reg.allocator)
 	for t in candidates {
-		return t
+		// Skip float if int is also present (int is more specific)
+		if t == TYPE_FLOAT && has_int { continue }
+		// Skip complex if int or float present
+		if t == TYPE_COMPLEX && (has_int || has_float) { continue }
+		// Skip bool if int is also present (int is more useful)
+		if t == TYPE_BOOL && has_int { continue }
+		reduced[t] = true
 	}
 
+	if len(reduced) == 1 {
+		for t in reduced { return t }
+	}
+
+	if len(reduced) == 0 {
+		// All were subsumed — this shouldn't happen, but fall back
+		for t in candidates { return t }
+		return TYPE_UNKNOWN
+	}
+
+	// For backward inference from body constraints, prefer the most common type.
+	// Priority: int > str > float > bytes > bool > complex > instance types
+	priority := [?]Type_ID{TYPE_INT, TYPE_STR, TYPE_FLOAT, TYPE_BYTES, TYPE_BOOL, TYPE_COMPLEX}
+	for p in priority {
+		if p in reduced { return p }
+	}
+
+	// Return first instance type
+	for t in reduced { return t }
 	return TYPE_UNKNOWN
+}
+
+// ==================== Caller→Param Type Collection ====================
+
+// Caller_Param_Types maps callee scope → param_index → type observed at call site.
+// Multiple callers with different types for the same param are merged.
+Caller_Param_Types :: map[binder.Scope_ID]map[int]Type_ID
+
+// Build sym_id → scope_id map for functions. Call once, reuse across rounds.
+build_sym_to_scope :: proc(bind_result: ^binder.Bind_Result, allocator: mem.Allocator) -> map[binder.Symbol_ID]binder.Scope_ID {
+	sym_to_scope := make(map[binder.Symbol_ID]binder.Scope_ID, 16, allocator)
+	for &scope in bind_result.scopes {
+		if scope.kind != .Function && scope.kind != .Lambda { continue }
+		parent := binder.result_get_scope(bind_result, scope.parent_id)
+		if parent == nil { continue }
+		if func_sym, ok := parent.symbols[scope.name]; ok {
+			sym_to_scope[func_sym] = scope.id
+		}
+	}
+	return sym_to_scope
+}
+
+// Scan call sites to collect argument types for callee params.
+// For each call f(arg1, arg2) where f is a known function:
+//   - Look up f's scope_id
+//   - Record arg types as evidence for f's param types
+collect_caller_param_types :: proc(
+	result: ^Check_Result,
+	bind_result: ^binder.Bind_Result,
+	flow_result: ^flow.Flow_Result,
+	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
+	sym_to_scope: ^map[binder.Symbol_ID]binder.Scope_ID,
+	reg: ^Type_Registry,
+	allocator: mem.Allocator,
+) -> Caller_Param_Types {
+	cpt := make(Caller_Param_Types, 8, allocator)
+
+	// Walk all scopes' CFGs looking for call expressions
+	for &cfg in flow_result.cfgs {
+		for &block in cfg.blocks {
+			if !block.is_reachable { continue }
+			for stmt in block.stmts {
+				collect_calls_in_stmt(stmt, result, bind_result, sym_to_scope, func_args_map, reg, &cpt, allocator)
+			}
+		}
+	}
+
+	return cpt
+}
+
+// Walk statements to find call expressions
+collect_calls_in_stmt :: proc(
+	stmt: parser.Stmt,
+	result: ^Check_Result,
+	bind_result: ^binder.Bind_Result,
+	sym_to_scope: ^map[binder.Symbol_ID]binder.Scope_ID,
+	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
+	reg: ^Type_Registry,
+	cpt: ^Caller_Param_Types,
+	allocator: mem.Allocator,
+) {
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			if expr == nil { return }
+			ctx := cast(^Caller_Call_Ctx)raw_ctx
+			call, is_call := expr.(^parser.Call_Expr)
+			if !is_call { return }
+
+			// Only handle direct name calls: f(args)
+			name, is_name := call.func.(^parser.Name_Expr)
+			if !is_name { return }
+
+			func_sym, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name))
+			if !ref_ok { return }
+
+			// Find the callee's scope
+			callee_scope, has_scope := ctx.sym_to_scope[func_sym]
+			if !has_scope { return }
+
+			// Check if callee has unannotated params (via func_args_map)
+			callee_args, has_args := ctx.func_args_map[callee_scope]
+			if !has_args || callee_args == nil { return }
+
+			// For each positional arg, record its type as evidence
+			n_params := len(callee_args.posonlyargs) + len(callee_args.args)
+			for arg, i in call.args {
+				if i >= n_params { break }
+				arg_ptr := expr_to_rawptr(arg)
+				arg_type, has_type := ctx.result.expr_types[arg_ptr]
+				if !has_type { continue }
+				if arg_type == TYPE_UNKNOWN || arg_type == TYPE_ANY { continue }
+
+				// Record: callee_scope, param_index i, observed type
+				if callee_scope not_in ctx.cpt {
+					ctx.cpt[callee_scope] = make(map[int]Type_ID, 4, ctx.allocator)
+				}
+				param_map := &ctx.cpt[callee_scope]
+				if existing, ok := param_map[i]; ok {
+					// Multiple callers — widen to union if different
+					if existing != arg_type {
+						types := [?]Type_ID{existing, arg_type}
+						param_map[i] = make_union_type(ctx.reg, types[:])
+					}
+				} else {
+					param_map[i] = arg_type
+				}
+			}
+		},
+		ctx = nil, // set below
+	}
+
+	ctx := Caller_Call_Ctx{
+		result        = result,
+		bind_result   = bind_result,
+		sym_to_scope  = sym_to_scope,
+		func_args_map = func_args_map,
+		reg           = reg,
+		cpt           = cpt,
+		allocator     = allocator,
+	}
+	visitor.ctx = rawptr(&ctx)
+	core.walk_stmt(&visitor, stmt)
+}
+
+Caller_Call_Ctx :: struct {
+	result:        ^Check_Result,
+	bind_result:   ^binder.Bind_Result,
+	sym_to_scope:  ^map[binder.Symbol_ID]binder.Scope_ID,
+	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
+	reg:           ^Type_Registry,
+	cpt:           ^Caller_Param_Types,
+	allocator:     mem.Allocator,
+}
+
+// ==================== Enhanced Resolution with Caller Types ====================
+
+// Resolve constraints with additional evidence from callers.
+// caller_param_types: param_index → Type_ID from call sites.
+// func_args: the AST Arguments for this function (for ordered param mapping).
+resolve_constraints_with_callers :: proc(
+	cs: ^Constraint_Set,
+	method_table: ^Builtin_Method_Table,
+	reg: ^Type_Registry,
+	scope: ^binder.Scope,
+	bind_result: ^binder.Bind_Result,
+	caller_param_types: map[int]Type_ID,
+	func_args: ^parser.Arguments,
+	allocator: mem.Allocator,
+) -> map[binder.Symbol_ID]Type_ID {
+	result := make(map[binder.Symbol_ID]Type_ID, 8, allocator)
+
+	// Build param_index → symbol_id map using AST argument order
+	param_indices := make(map[binder.Symbol_ID]int, 8, allocator)
+	if scope != nil && func_args != nil {
+		// Map positional args by their AST order
+		idx := 0
+		for &arg in func_args.posonlyargs {
+			if arg.arg == "self" || arg.arg == "cls" { idx += 1; continue }
+			if sym_id, ok := scope.symbols[arg.arg]; ok {
+				param_indices[sym_id] = idx
+			}
+			idx += 1
+		}
+		for &arg in func_args.args {
+			if arg.arg == "self" || arg.arg == "cls" { idx += 1; continue }
+			if sym_id, ok := scope.symbols[arg.arg]; ok {
+				param_indices[sym_id] = idx
+			}
+			idx += 1
+		}
+	}
+
+	for &var_info in cs.vars {
+		if var_info.forward_type != TYPE_UNKNOWN { continue }
+
+		constraint_indices, ok := cs.var_constraints[var_info.id]
+
+		// Body-derived candidates
+		first := true
+		candidates := make(map[Type_ID]bool, 16, allocator)
+
+		if ok && len(constraint_indices) > 0 {
+			for ci in constraint_indices {
+				c := cs.constraints[ci]
+				matches := resolve_single_constraint(c, method_table, reg, allocator)
+				if len(matches) == 0 { continue }
+
+				if first {
+					for t in matches { candidates[t] = true }
+					first = false
+				} else {
+					to_remove := make([dynamic]Type_ID, 0, 8, allocator)
+					for t in candidates {
+						found := false
+						for m in matches {
+							if m == t { found = true; break }
+						}
+						if !found { append(&to_remove, t) }
+					}
+					for t in to_remove { delete_key(&candidates, t) }
+				}
+			}
+		}
+
+		// Caller-derived evidence
+		caller_type := TYPE_UNKNOWN
+		if pidx, has_pidx := param_indices[var_info.symbol_id]; has_pidx {
+			if ct, has_ct := caller_param_types[pidx]; has_ct {
+				caller_type = ct
+			}
+		}
+
+		// Merge body candidates with caller evidence
+		if caller_type != TYPE_UNKNOWN {
+			if first {
+				// No body constraints — use caller type directly
+				result[var_info.symbol_id] = caller_type
+				continue
+			} else if caller_type in candidates {
+				// Caller type agrees with body — use it (most specific)
+				result[var_info.symbol_id] = caller_type
+				continue
+			} else if len(candidates) == 0 {
+				// Body intersection was empty — use caller type
+				result[var_info.symbol_id] = caller_type
+				continue
+			}
+			// Caller type not in body candidates — body takes precedence
+			// (caller may be wrong, body usage is authoritative)
+		}
+
+		if len(candidates) == 0 { continue }
+
+		if len(candidates) == 1 {
+			for t in candidates {
+				result[var_info.symbol_id] = t
+				break
+			}
+		} else {
+			// Multiple candidates — widen to union or pick promoted type
+			best := widen_candidates(candidates, reg)
+			if best != TYPE_UNKNOWN {
+				result[var_info.symbol_id] = best
+			}
+		}
+	}
+
+	return result
 }
 
 // ==================== Integration Helpers ====================

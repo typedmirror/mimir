@@ -95,30 +95,56 @@ check :: proc(
 		)
 	}
 
-	// Post-check: backfill inferred return types into Callable_Types
+	// ==================== Fixed-Point Convergence Loop (§3.2) ====================
+	// Iterate: backfill returns → collect caller→param types → re-check → repeat
+	// Converges when no new return types or param types are discovered.
+	MAX_FIXPOINT_ROUNDS :: 5
+
 	backfill_inferred_returns(&result, bind_result)
 
-	// Cross-function fixpoint: if returns were inferred, re-check FUNCTION scopes
-	// that may reference updated callable types. Skip module scope — re-running it
-	// would rebuild callable types from annotations, overwriting backfilled returns.
-	if len(result.inferred_returns) > 0 {
+	prev_return_count := len(result.inferred_returns)
+	prev_caller_count := 0
+	caller_param_types: Caller_Param_Types
+	sym_to_scope := build_sym_to_scope(bind_result, allocator)
+
+	for round in 0..<MAX_FIXPOINT_ROUNDS {
+
+		// Collect caller→param types from call sites
+		caller_param_types = collect_caller_param_types(
+			&result, bind_result, flow_result, &func_args_map, &sym_to_scope, &result.registry, allocator)
+
+		// Count total caller param evidence
+		new_caller_count := 0
+		for _, params in caller_param_types {
+			new_caller_count += len(params)
+		}
+
+		// On first round, skip if no evidence at all
+		if round == 0 && len(result.inferred_returns) == 0 && new_caller_count == 0 { break }
+
+		// Re-check unannotated function/lambda scopes with new evidence
 		for &cfg in flow_result.cfgs {
 			scope := binder.result_get_scope(bind_result, cfg.scope_id)
 			if scope == nil { continue }
-			// Only re-check function/lambda scopes, not module/class
 			if scope.kind != .Function && scope.kind != .Lambda { continue }
 
 			declared_return := TYPE_UNKNOWN
 			if ret, ok := return_type_map[cfg.scope_id]; ok {
 				declared_return = ret
 			}
-			// Skip functions with explicit return annotations — they don't benefit
 			if declared_return != TYPE_UNKNOWN { continue }
 
 			fixpoint_cm: ^flow.Const_Map = nil
 			if scope_cm, ok := &flow_result.const_maps[cfg.scope_id]; ok {
 				fixpoint_cm = scope_cm
 			}
+
+			// Get caller evidence for this scope (if any)
+			scope_caller_types: map[int]Type_ID
+			if cfg.scope_id in caller_param_types {
+				scope_caller_types = caller_param_types[cfg.scope_id]
+			}
+
 			check_scope(
 				&cfg,
 				bind_result,
@@ -131,11 +157,18 @@ check :: proc(
 				method_table = &mt,
 				shape_reg = shape_reg_ptr,
 				const_map = fixpoint_cm,
+				caller_param_types = scope_caller_types,
 			)
 		}
 
-		// Second backfill — pick up any newly inferred returns from the refinement
+		// Backfill newly inferred returns
 		backfill_inferred_returns(&result, bind_result)
+
+		// Check convergence: did we discover new return types or caller params?
+		new_return_count := len(result.inferred_returns)
+		if new_return_count == prev_return_count && new_caller_count == prev_caller_count { break }
+		prev_return_count = new_return_count
+		prev_caller_count = new_caller_count
 	}
 
 	// Re-validate module-level assignments against updated return types
@@ -272,10 +305,26 @@ check_with_imports :: proc(
 		)
 	}
 
+	// ==================== Fixed-Point Convergence Loop (§3.2) ====================
+	MAX_FIXPOINT_ROUNDS_MULTI :: 5
 	backfill_inferred_returns(&result, bind_result, registry)
 
-	// Cross-function fixpoint refinement pass
-	if len(result.inferred_returns) > 0 {
+	prev_ret_count := len(result.inferred_returns)
+	prev_caller_count_multi := 0
+	caller_param_types_multi: Caller_Param_Types
+	sym_to_scope_multi := build_sym_to_scope(bind_result, allocator)
+
+	for round in 0..<MAX_FIXPOINT_ROUNDS_MULTI {
+
+		caller_param_types_multi = collect_caller_param_types(
+			&result, bind_result, flow_result, &func_args_map, &sym_to_scope_multi, registry, allocator)
+
+		new_caller_count_multi := 0
+		for _, params in caller_param_types_multi {
+			new_caller_count_multi += len(params)
+		}
+		if round == 0 && len(result.inferred_returns) == 0 && new_caller_count_multi == 0 { break }
+
 		for &cfg in flow_result.cfgs {
 			scope := binder.result_get_scope(bind_result, cfg.scope_id)
 			if scope == nil { continue }
@@ -291,6 +340,11 @@ check_with_imports :: proc(
 			if scope_cm, ok := &flow_result.const_maps[cfg.scope_id]; ok {
 				fp_cm = scope_cm
 			}
+			scope_caller_types_multi: map[int]Type_ID
+			if cfg.scope_id in caller_param_types_multi {
+				scope_caller_types_multi = caller_param_types_multi[cfg.scope_id]
+			}
+
 			check_scope(
 				&cfg,
 				bind_result,
@@ -305,10 +359,16 @@ check_with_imports :: proc(
 				method_table  = &mt,
 				shape_reg     = shape_reg_ptr,
 				const_map     = fp_cm,
+				caller_param_types = scope_caller_types_multi,
 			)
 		}
 
 		backfill_inferred_returns(&result, bind_result, registry)
+
+		new_ret_count := len(result.inferred_returns)
+		if new_ret_count == prev_ret_count && new_caller_count_multi == prev_caller_count_multi { break }
+		prev_ret_count = new_ret_count
+		prev_caller_count_multi = new_caller_count_multi
 	}
 
 	if len(result.inferred_returns) > 0 {
@@ -389,6 +449,7 @@ check_scope :: proc(
 	method_table: ^Builtin_Method_Table = nil,
 	shape_reg: ^Shape_Registry = nil,
 	const_map: ^flow.Const_Map = nil,
+	caller_param_types: map[int]Type_ID = nil,
 ) {
 	// Use shared registry if provided, otherwise use result's own
 	reg := reg_override if reg_override != nil else &result.registry
@@ -541,7 +602,7 @@ check_scope :: proc(
 	// Find parameters that forward inference left as TYPE_UNKNOWN
 	unknown_params := find_unknown_params(cfg, scope, envs[:], bind_result, reg)
 
-	if len(unknown_params) > 0 {
+	if len(unknown_params) > 0 || len(caller_param_types) > 0 {
 		// Collect usage constraints from the function body
 		cs := collect_scope_constraints(cfg, bind_result, reg, envs[:],
 			&result.expr_types, &result.symbol_types, unknown_params[:], reg.allocator)
@@ -553,7 +614,15 @@ check_scope :: proc(
 			mt_local = init_method_table(reg)
 			mt_ptr = &mt_local
 		}
-		resolved := resolve_constraints(&cs, mt_ptr, reg, reg.allocator)
+
+		// Use caller-aware resolution when caller evidence is available
+		resolved: map[binder.Symbol_ID]Type_ID
+		if len(caller_param_types) > 0 {
+			resolved = resolve_constraints_with_callers(
+				&cs, mt_ptr, reg, scope, bind_result, caller_param_types, func_args, reg.allocator)
+		} else {
+			resolved = resolve_constraints(&cs, mt_ptr, reg, reg.allocator)
+		}
 
 		if len(resolved) > 0 {
 			// Truncate diagnostics from the first pass — re-inference reproduces valid ones
