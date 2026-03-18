@@ -442,7 +442,8 @@ collect_calls_in_stmt :: proc(
 			if !has_args || callee_args == nil { return }
 
 			// For each positional arg, record its type as evidence
-			n_params := len(callee_args.posonlyargs) + len(callee_args.args)
+			n_posonly := len(callee_args.posonlyargs)
+			n_params := n_posonly + len(callee_args.args)
 			for arg, i in call.args {
 				if i >= n_params { break }
 				arg_ptr := expr_to_rawptr(arg)
@@ -450,20 +451,32 @@ collect_calls_in_stmt :: proc(
 				if !has_type { continue }
 				if arg_type == TYPE_UNKNOWN || arg_type == TYPE_ANY { continue }
 
-				// Record: callee_scope, param_index i, observed type
-				if callee_scope not_in ctx.cpt {
-					ctx.cpt[callee_scope] = make(map[int]Type_ID, 4, ctx.allocator)
+				record_caller_evidence(ctx.cpt, callee_scope, i, arg_type, ctx.reg, ctx.allocator)
+			}
+
+			// For each keyword arg, match by name to find param index
+			for &kw in call.keywords {
+				if kw.arg == "" { continue } // **kwargs unpacking, skip
+				kw_type, has_kw := ctx.result.expr_types[expr_to_rawptr(kw.value)]
+				if !has_kw { continue }
+				if kw_type == TYPE_UNKNOWN || kw_type == TYPE_ANY { continue }
+
+				// Find param index by name in callee's args
+				found_idx := -1
+				idx := 0
+				for &param in callee_args.posonlyargs {
+					if param.arg == kw.arg { found_idx = idx; break }
+					idx += 1
 				}
-				param_map := &ctx.cpt[callee_scope]
-				if existing, ok := param_map[i]; ok {
-					// Multiple callers — widen to union if different
-					if existing != arg_type {
-						types := [?]Type_ID{existing, arg_type}
-						param_map[i] = make_union_type(ctx.reg, types[:])
+				if found_idx == -1 {
+					for &param in callee_args.args {
+						if param.arg == kw.arg { found_idx = idx; break }
+						idx += 1
 					}
-				} else {
-					param_map[i] = arg_type
 				}
+				if found_idx == -1 { continue }
+
+				record_caller_evidence(ctx.cpt, callee_scope, found_idx, kw_type, ctx.reg, ctx.allocator)
 			}
 		},
 		ctx = nil, // set below
@@ -480,6 +493,29 @@ collect_calls_in_stmt :: proc(
 	}
 	visitor.ctx = rawptr(&ctx)
 	core.walk_stmt(&visitor, stmt)
+}
+
+// Record caller evidence for a callee param at a given index
+record_caller_evidence :: proc(
+	cpt: ^Caller_Param_Types,
+	callee_scope: binder.Scope_ID,
+	param_idx: int,
+	arg_type: Type_ID,
+	reg: ^Type_Registry,
+	allocator: mem.Allocator,
+) {
+	if callee_scope not_in cpt {
+		cpt[callee_scope] = make(map[int]Type_ID, 4, allocator)
+	}
+	param_map := &cpt[callee_scope]
+	if existing, ok := param_map[param_idx]; ok {
+		if existing != arg_type {
+			types := [?]Type_ID{existing, arg_type}
+			param_map[param_idx] = make_union_type(reg, types[:])
+		}
+	} else {
+		param_map[param_idx] = arg_type
+	}
 }
 
 Caller_Call_Ctx :: struct {
