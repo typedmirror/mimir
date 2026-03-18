@@ -1197,6 +1197,12 @@ apply_positive_guard :: proc(
 		if ok {
 			env.types[guard.symbol_id] = remove_none(reg, current)
 		}
+	case .Type_Guard:
+		// TypeGuard function call — look up target type from registry
+		func_sym := binder.Symbol_ID(guard.resolved_type)
+		if target, has_target := reg.typeguard_targets[func_sym]; has_target {
+			env.types[guard.symbol_id] = target
+		}
 	}
 }
 
@@ -1289,6 +1295,28 @@ build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 	}
 
 	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+
+	// Detect TypeGuard[T] return annotation → store target for guard narrowing
+	if fd.returns != nil {
+		if sub, sub_ok := fd.returns.(^parser.Subscript_Expr); sub_ok {
+			base_name := get_annotation_name(sub.value)
+			if orig, orig_ok := ctx.bind_result.typing_names[base_name]; orig_ok {
+				if orig == "TypeGuard" {
+					target := resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					if target != TYPE_UNKNOWN {
+						// Find function symbol to key the registry entry
+						scope := binder.result_get_scope(ctx.bind_result, ctx.scope_id)
+						if scope != nil {
+							if func_sym, has_sym := scope.symbols[fd.name]; has_sym {
+								ctx.reg.typeguard_targets[func_sym] = target
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return make_callable_type(ctx.reg, actual_params, ret_type)
 }
 

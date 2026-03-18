@@ -195,6 +195,7 @@ Type_Registry :: struct {
 	actor_system_spawn_type: Type_ID,  // ActorSystem.spawn method callable (0 if not registered)
 	actor_ref_class:         Type_ID,  // ActorRef Class_Type (for specialization)
 	actor_ref_cache:         map[[2]Type_ID]Type_ID,  // [msg_type, ret_type] → specialized ActorRef Instance_Type
+	typeguard_targets:       map[binder.Symbol_ID]Type_ID,  // func sym → TypeGuard[T] target type
 	allocator:      mem.Allocator,
 }
 

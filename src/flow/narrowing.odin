@@ -15,16 +15,18 @@ Guard_Kind :: enum u8 {
 	Is_Falsy,
 	Type_Is,
 	Type_Is_Not,
+	Type_Guard,       // TypeGuard function call — resolved_type has target
 }
 
 Guard :: struct {
-	kind:         Guard_Kind,
-	symbol_id:    binder.Symbol_ID,
-	type_expr:    parser.Expr,
-	branch_block: Block_ID,
-	true_block:   Block_ID,
-	false_block:  Block_ID,
-	loc:          parser.Src_Loc,
+	kind:          Guard_Kind,
+	symbol_id:     binder.Symbol_ID,
+	type_expr:     parser.Expr,
+	branch_block:  Block_ID,
+	true_block:    Block_ID,
+	false_block:   Block_ID,
+	loc:           parser.Src_Loc,
+	resolved_type: u32,  // Pre-resolved Type_ID for TypeGuard (0 = use type_expr instead)
 }
 
 // ==================== Extraction ====================
@@ -100,6 +102,27 @@ analyze_condition :: proc(
 						false_block  = false_block,
 						loc          = loc,
 					})
+				}
+			}
+		} else if len(e.args) >= 1 {
+			// Potential TypeGuard call: func(arg) where func returns TypeGuard[T]
+			// Create a Type_Guard guard — checker verifies if func is actually a TypeGuard
+			if name, name_ok := e.func.(^parser.Name_Expr); name_ok {
+				func_sym, ref_ok := binder.get_ref(bind_result, rawptr(name))
+				if ref_ok {
+					arg_sym := expr_to_symbol(e.args[0], bind_result, scope_id)
+					if arg_sym != binder.INVALID_SYMBOL {
+						append(guards, Guard{
+							kind          = .Type_Guard,
+							symbol_id     = arg_sym,
+							type_expr     = parser.Expr(name), // store func name for checker lookup
+							branch_block  = branch_block,
+							true_block    = true_block,
+							false_block   = false_block,
+							loc           = loc,
+							resolved_type = u32(func_sym), // store func sym_id for TypeGuard target lookup
+						})
+					}
 				}
 			}
 		}
@@ -324,6 +347,7 @@ invert_guard_kind :: proc(kind: Guard_Kind) -> Guard_Kind {
 	case .Is_Falsy:        return .Is_Truthy
 	case .Type_Is:         return .Type_Is_Not
 	case .Type_Is_Not:     return .Type_Is
+	case .Type_Guard:      return .Type_Guard  // TypeGuard inversion: no narrowing in false branch
 	}
 	return kind
 }

@@ -280,6 +280,11 @@ resolve_annotation :: proc(
 				}
 			}
 			return TYPE_ANY
+		case "TypeGuard":
+			// TypeGuard[T] — returns bool at runtime, but stores T for guard narrowing
+			// The target type T is stored on the registry by the Func_Def handler
+			resolve_annotation(e.slice, reg, bind_result, builtins, env)
+			return TYPE_BOOL
 		}
 		// User-defined generic class: MyClass[int]
 		base_type := resolve_annotation(e.value, reg, bind_result, builtins, env)
