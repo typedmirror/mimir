@@ -161,7 +161,71 @@ build_cfgs_for_defs :: proc(result: ^Flow_Result, stmts: []parser.Stmt, bind_res
 			for mc in s.cases {
 				build_cfgs_for_defs(result, mc.body, bind_result, file_path, allocator)
 			}
+
+		// Scan expressions for lambda definitions
+		case ^parser.Assign:
+			if s.value != nil {
+				build_cfgs_for_lambdas(result, s.value, bind_result, file_path, allocator)
+			}
+		case ^parser.Ann_Assign:
+			if s.value != nil {
+				build_cfgs_for_lambdas(result, s.value, bind_result, file_path, allocator)
+			}
+		case ^parser.Expr_Stmt:
+			if s.value != nil {
+				build_cfgs_for_lambdas(result, s.value, bind_result, file_path, allocator)
+			}
+		case ^parser.Return_Stmt:
+			if s.value != nil {
+				build_cfgs_for_lambdas(result, s.value, bind_result, file_path, allocator)
+			}
 		}
+	}
+}
+
+// Find Lambda_Expr in expression trees and build CFGs for them.
+// Lambda body (single expr) is wrapped in a synthetic Return_Stmt.
+build_cfgs_for_lambdas :: proc(
+	result: ^Flow_Result,
+	expr: parser.Expr,
+	bind_result: ^binder.Bind_Result,
+	file_path: string,
+	allocator: mem.Allocator,
+) {
+	if expr == nil { return }
+	#partial switch e in expr {
+	case ^parser.Lambda_Expr:
+		scope_id := find_scope_for_def(bind_result, "<lambda>", e.loc, .Lambda)
+		if scope_id != binder.INVALID_SCOPE {
+			// Wrap lambda body expression in a synthetic Return_Stmt
+			// Must be arena-allocated — stack allocation would dangle after this proc returns
+			synthetic_return := new(parser.Return_Stmt, allocator)
+			synthetic_return.base = parser.Node_Base{loc = e.loc}
+			synthetic_return.value = e.body
+			synthetic_stmts := [1]parser.Stmt{synthetic_return}
+			cfg := build_cfg_for_stmts(
+				synthetic_stmts[:], scope_id, "<lambda>",
+				bind_result, file_path, &result.diagnostics, allocator,
+			)
+			compute_reachability(&cfg)
+			idx := len(result.cfgs)
+			append(&result.cfgs, cfg)
+			result.scope_to_cfg[scope_id] = idx
+		}
+	case ^parser.Call_Expr:
+		build_cfgs_for_lambdas(result, e.func, bind_result, file_path, allocator)
+		for arg in e.args { build_cfgs_for_lambdas(result, arg, bind_result, file_path, allocator) }
+		for &kw in e.keywords { build_cfgs_for_lambdas(result, kw.value, bind_result, file_path, allocator) }
+	case ^parser.If_Expr:
+		build_cfgs_for_lambdas(result, e.body, bind_result, file_path, allocator)
+		build_cfgs_for_lambdas(result, e.test, bind_result, file_path, allocator)
+		build_cfgs_for_lambdas(result, e.orelse, bind_result, file_path, allocator)
+	case ^parser.Tuple_Expr:
+		for el in e.elts { build_cfgs_for_lambdas(result, el, bind_result, file_path, allocator) }
+	case ^parser.List_Expr:
+		for el in e.elts { build_cfgs_for_lambdas(result, el, bind_result, file_path, allocator) }
+	case ^parser.Dict_Expr:
+		for v in e.values { build_cfgs_for_lambdas(result, v, bind_result, file_path, allocator) }
 	}
 }
 
