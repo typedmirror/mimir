@@ -1741,6 +1741,12 @@ try_typing_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> (Type_ID, 
 		case "cast":        return handle_cast(e, ctx), true
 		case "TypeVar":
 			return handle_typevar(e, ctx), true
+		case "ParamSpec":
+			// ParamSpec('P') — captures parameter signatures for decorators.
+			// Minimal support: treat as TYPE_ANY (any parameter list).
+			// When used in Callable[P, R], P = ANY means any params accepted.
+			for arg in e.args { infer_expr(arg, ctx) }
+			return TYPE_ANY, true
 		case "TypedDict":
 			return handle_typeddict_call(e, ctx), true
 		case:
