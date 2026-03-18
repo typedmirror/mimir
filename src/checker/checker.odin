@@ -928,12 +928,31 @@ check_stmt :: proc(
 											ctx.env.types[sym_id] = make_dataframe_type(ctx.reg, new_cols)
 										}
 									}
-								}
+								case Dict_Type:
+									// §3.5: dict["key"] = val → accumulate into TypedDict
+									if key, key_ok := sub.slice.(^parser.Constant_Expr); key_ok {
+										if key_name, str_ok := key.value.(string); str_ok {
+											new_fields := make(map[string]Type_ID, 4, ctx.reg.allocator)
+											new_fields[key_name] = rhs_type
+											ctx.env.types[sym_id] = make_typeddict_type(ctx.reg, "", new_fields, true)
+										}
+									}
+								case TypedDict_Type:
+									// §3.5: existing TypedDict + new key → accumulate
+									if key, key_ok := sub.slice.(^parser.Constant_Expr); key_ok {
+										if key_name, str_ok := key.value.(string); str_ok {
+											new_fields := make(map[string]Type_ID, len(df_info.fields) + 1, ctx.reg.allocator)
+											for fn, ft in df_info.fields { new_fields[fn] = ft }
+											new_fields[key_name] = rhs_type
+											ctx.env.types[sym_id] = make_typeddict_type(ctx.reg, df_info.name, new_fields, df_info.total)
+										}
+									}
 							}
 						}
 					}
 				}
 			}
+		}
 		}
 
 	case ^parser.Ann_Assign:
