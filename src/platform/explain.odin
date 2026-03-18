@@ -372,6 +372,21 @@ ALL_EXPLANATIONS := [?]Explanation{
 		note = "Move the operation inside the 'with' block, or re-open the resource.",
 	},
 
+	// ── Runtime Model ──
+
+	{
+		code = "RT001", name = "Reference cycle", category = "Runtime", severity = "Info",
+		description = "An object is assigned to an attribute of itself, creating a reference cycle.\nCircular references prevent reference counting from freeing objects.",
+		example = "    child.parent = self  # RT001: reference cycle",
+		note = "Use weakref.ref() for back-references to avoid cycles.",
+	},
+	{
+		code = "RT002", name = "Object creation hotspot", category = "Runtime", severity = "Info",
+		description = "A constructor call (ClassName(...)) appears inside a loop body.\nCreating objects per iteration increases GC pressure.",
+		example = "    for event in events:\n        handler = EventHandler(event)  # RT002",
+		note = "Move construction outside the loop if the object can be reused,\nor use object pooling for expensive constructors.",
+	},
+
 	// ── Cross-Process ──
 
 	{
