@@ -773,11 +773,24 @@ check_scope :: proc(
 	// Infer function return type from body when no annotation present
 	if declared_return == TYPE_UNKNOWN && scope != nil &&
 	   (scope.kind == .Function || scope.kind == .Lambda) {
+		// Filter out TYPE_UNKNOWN from return_types — recursive calls produce
+		// Unknown returns (the function's own return type isn't inferred yet).
+		// If concrete types exist alongside Unknown, use only the concrete ones.
+		concrete_returns := make([dynamic]Type_ID, 0, len(return_types), reg.allocator)
+		for rt in return_types {
+			if rt != TYPE_UNKNOWN {
+				append(&concrete_returns, rt)
+			}
+		}
+
 		inferred_ret := TYPE_NONE // default: implicit None return
-		if len(return_types) == 1 {
-			inferred_ret = return_types[0]
-		} else if len(return_types) > 1 {
-			inferred_ret = make_union_type(reg, return_types[:])
+		if len(concrete_returns) == 1 {
+			inferred_ret = concrete_returns[0]
+		} else if len(concrete_returns) > 1 {
+			inferred_ret = make_union_type(reg, concrete_returns[:])
+		} else if len(return_types) > 0 && len(concrete_returns) == 0 {
+			// All returns are Unknown (purely recursive with no base case typed)
+			inferred_ret = TYPE_UNKNOWN
 		}
 		if inferred_ret != TYPE_UNKNOWN {
 			result.inferred_returns[cfg.scope_id] = inferred_ret
