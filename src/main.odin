@@ -103,6 +103,8 @@ main :: proc() {
 		cmd_deps(args[2:])
 	case "report":
 		cmd_report(args[2:])
+	case "generate-schema":
+		cmd_generate_schema(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -341,6 +343,69 @@ _diag_category :: proc(d: core.Diagnostic) -> string {
 	if len(d.code) >= 1 && d.code[0] == 'C' { return "Other" }
 	if len(d.code) >= 1 && d.code[0] == 'S' { return "Other" }
 	return "Other"
+}
+
+cmd_generate_schema :: proc(args: []string) {
+	target := "."
+	if len(args) > 0 { target = args[0] }
+
+	p: Pipeline; ok := pipeline_start("generate-schema", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
+
+	all_routes := make([dynamic]checker.Route_Info, 0, 16, p.arena.allocator)
+
+	reg := checker.init_registry(p.arena.allocator)
+	vreg := checker.init_virtual_registry(&reg)
+
+	for file in p.files {
+		module := pipeline_parse_file(&p, "generate-schema", file)
+		if module == nil { continue }
+
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		virtual_imports := checker.resolve_virtual_imports(
+			&vreg, &bind_result, &reg, nil,
+		)
+
+		diags := make([dynamic]core.Diagnostic, 0, 4, p.arena.allocator)
+		routes := checker.analyze_routes(module, &bind_result, &reg, &virtual_imports, file, &diags, p.arena.allocator)
+		for r in routes { append(&all_routes, r) }
+	}
+
+	if len(all_routes) == 0 {
+		fmt.eprintfln("mimir generate-schema: no @route handlers found in '%s'", target)
+		return
+	}
+
+	// Emit OpenAPI 3.0 JSON using printfln with escaped braces
+	fmt.printfln("{{")
+	fmt.printfln(`  "openapi": "3.0.0",`)
+	fmt.printfln(`  "info": {{"title": "API", "version": "1.0.0"}},`)
+	fmt.printfln(`  "paths": {{`)
+
+	for route, idx in all_routes {
+		oapi_path := route.path
+		method_lower := strings.to_lower(route.method, context.temp_allocator)
+
+		fmt.printf(`    "%s": {{"%s": {{"summary": "%s"`, oapi_path, method_lower, route.handler_name)
+
+		if len(route.path_params) > 0 {
+			fmt.print(`, "parameters": [`)
+			for pp, pi in route.path_params {
+				if pi > 0 { fmt.print(",") }
+				fmt.printf(`{{"name": "%s", "in": "path", "required": true, "schema": {{"type": "string"}}}}`, pp)
+			}
+			fmt.print("]")
+		}
+
+		fmt.print(`, "responses": {"200": {"description": "OK"}}`)
+		fmt.print("}}")
+		if idx < len(all_routes) - 1 { fmt.println(",") } else { fmt.println() }
+	}
+
+	fmt.printfln("  }}")
+	fmt.printfln("}}")
+	fmt.eprintfln("mimir generate-schema: %d route(s) → OpenAPI 3.0", len(all_routes))
 }
 
 cmd_format :: proc(args: []string) {
