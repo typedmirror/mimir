@@ -649,9 +649,19 @@ synthesize_protocol :: proc(
 
 // ==================== Enhanced Resolution with Caller Types ====================
 
+// Conflict between body constraints and caller evidence
+Constraint_Conflict :: struct {
+	symbol_id:    binder.Symbol_ID,
+	param_name:   string,
+	caller_type:  Type_ID,
+	body_types:   [dynamic]Type_ID,
+	loc:          parser.Src_Loc,
+}
+
 // Resolve constraints with additional evidence from callers.
 // caller_param_types: param_index → Type_ID from call sites.
 // func_args: the AST Arguments for this function (for ordered param mapping).
+// Returns resolved types + any conflicts detected.
 resolve_constraints_with_callers :: proc(
 	cs: ^Constraint_Set,
 	method_table: ^Builtin_Method_Table,
@@ -661,6 +671,7 @@ resolve_constraints_with_callers :: proc(
 	caller_param_types: map[int]Type_ID,
 	func_args: ^parser.Arguments,
 	allocator: mem.Allocator,
+	conflicts: ^[dynamic]Constraint_Conflict = nil,
 ) -> map[binder.Symbol_ID]Type_ID {
 	result := make(map[binder.Symbol_ID]Type_ID, 8, allocator)
 
@@ -740,8 +751,31 @@ resolve_constraints_with_callers :: proc(
 				result[var_info.symbol_id] = caller_type
 				continue
 			}
-			// Caller type not in body candidates — body takes precedence
-			// (caller may be wrong, body usage is authoritative)
+			// Caller type not in body candidates — conflict detected
+			// Body usage is authoritative, but record the conflict
+			if conflicts != nil {
+				body_types := make([dynamic]Type_ID, 0, len(candidates), allocator)
+				for t in candidates { append(&body_types, t) }
+				sym := binder.result_get_symbol(bind_result, var_info.symbol_id)
+				param_name := sym.name if sym != nil else ""
+				// Find loc from first constraint
+				loc: parser.Src_Loc
+				if ok && len(constraint_indices) > 0 {
+					#partial switch cv in cs.constraints[constraint_indices[0]] {
+					case Has_Method:    loc = cv.loc
+					case Has_Attr:      loc = cv.loc
+					case Callable_With: loc = cv.loc
+					case Supports_Op:   loc = cv.loc
+					}
+				}
+				append(conflicts, Constraint_Conflict{
+					symbol_id   = var_info.symbol_id,
+					param_name  = param_name,
+					caller_type = caller_type,
+					body_types  = body_types,
+					loc         = loc,
+				})
+			}
 		}
 
 		if len(candidates) == 0 {

@@ -1,5 +1,6 @@
 package checker
 
+import "core:fmt"
 import "core:mem"
 
 import parser "mimir:parser"
@@ -629,11 +630,22 @@ check_scope :: proc(
 
 		// Use caller-aware resolution when caller evidence is available
 		resolved: map[binder.Symbol_ID]Type_ID
+		constraint_conflicts := make([dynamic]Constraint_Conflict, 0, 4, reg.allocator)
 		if len(caller_param_types) > 0 {
 			resolved = resolve_constraints_with_callers(
-				&cs, mt_ptr, reg, scope, bind_result, caller_param_types, func_args, reg.allocator)
+				&cs, mt_ptr, reg, scope, bind_result, caller_param_types, func_args, reg.allocator, &constraint_conflicts)
 		} else {
 			resolved = resolve_constraints(&cs, mt_ptr, reg, reg.allocator)
+		}
+
+		// Emit T010 for any body/caller conflicts (from constraint resolution)
+		for &conflict in constraint_conflicts {
+			caller_str := type_to_string(reg, conflict.caller_type)
+			emit_diagnostic_raw(&result.diagnostics, file_path, conflict.loc, "T010", .Warning,
+				"Conflicting type constraints",
+				fmt.tprintf("Parameter '%s' called with '%s' but body usage requires a different type",
+					conflict.param_name, caller_str),
+				"Check call sites or add type annotation to resolve ambiguity")
 		}
 
 		if len(resolved) > 0 {
@@ -742,6 +754,22 @@ check_scope :: proc(
 		}
 	}
 
+	// T010: Check caller→param type conflicts against final inferred param types
+	if scope != nil && func_args != nil && len(caller_param_types) > 0 {
+		entry_idx := int(cfg.entry) - 1
+		if entry_idx >= 0 && entry_idx < n_blocks {
+			idx := 0
+			for &arg in func_args.posonlyargs {
+				check_caller_conflict(&arg, idx, scope, &envs[entry_idx], caller_param_types, reg, &result.diagnostics, file_path)
+				idx += 1
+			}
+			for &arg in func_args.args {
+				check_caller_conflict(&arg, idx, scope, &envs[entry_idx], caller_param_types, reg, &result.diagnostics, file_path)
+				idx += 1
+			}
+		}
+	}
+
 	// Infer function return type from body when no annotation present
 	if declared_return == TYPE_UNKNOWN && scope != nil &&
 	   (scope.kind == .Function || scope.kind == .Lambda) {
@@ -754,6 +782,36 @@ check_scope :: proc(
 		if inferred_ret != TYPE_UNKNOWN {
 			result.inferred_returns[cfg.scope_id] = inferred_ret
 		}
+	}
+}
+
+// T010: Check if caller-provided type conflicts with body-inferred param type
+check_caller_conflict :: proc(
+	arg: ^parser.Arg,
+	idx: int,
+	scope: ^binder.Scope,
+	entry_env: ^Type_Env,
+	caller_param_types: map[int]Type_ID,
+	reg: ^Type_Registry,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	file_path: string,
+) {
+	if arg.arg == "self" || arg.arg == "cls" { return }
+	if arg.annotation != nil { return } // annotated params don't need inference conflict check
+	caller_t, has_ct := caller_param_types[idx]
+	if !has_ct { return }
+	if caller_t == TYPE_UNKNOWN || caller_t == TYPE_ANY { return }
+	sym_id, has_sym := scope.symbols[arg.arg]
+	if !has_sym { return }
+	param_t, has_pt := entry_env.types[sym_id]
+	if !has_pt { return }
+	if param_t == TYPE_UNKNOWN || param_t == TYPE_ANY { return }
+	if !is_assignable(reg, caller_t, param_t) {
+		emit_diagnostic_raw(diagnostics, file_path, arg.loc, "T010", .Warning,
+			"Conflicting type constraints",
+			fmt.tprintf("Parameter '%s' inferred as '%s' from body but called with '%s'",
+				arg.arg, type_to_string(reg, param_t), type_to_string(reg, caller_t)),
+			"Check call sites or add type annotation")
 	}
 }
 
