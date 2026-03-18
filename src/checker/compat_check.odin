@@ -17,6 +17,7 @@ import core   "mimir:core"
 //
 // Diagnostics:
 //   COMPAT001 — Python version incompatibility (syntax requires newer Python)
+//   COMPAT002 — Deprecated library API usage (§19.1)
 //   DEP001    — Unused dependency (declared but never imported)
 //   DEP002    — Missing dependency (imported but not declared, not stdlib)
 
@@ -49,6 +50,9 @@ analyze_compat :: proc(
 		}
 	}
 
+	// §19.1: Deprecated library API usage (runs regardless of mimir.toml)
+	check_deprecated_apis(module, bind_result, file_path, diagnostics, allocator)
+
 	config_path, min_version, deps := read_compat_config(dir, allocator)
 	if len(config_path) == 0 { return }
 
@@ -79,6 +83,7 @@ analyze_compat :: proc(
 	if len(deps) > 0 {
 		check_dependencies(bind_result, deps, file_path, diagnostics, allocator)
 	}
+
 }
 
 // ==================== §19.2: Version Compatibility ====================
@@ -397,4 +402,121 @@ parse_min_version :: proc(spec: string) -> Py_Version {
 	if !minor_ok { return {} }
 
 	return Py_Version{major = major, minor = minor}
+}
+
+// ==================== §19.1: Deprecated Library API (COMPAT002) ====================
+
+Deprecated_API :: struct {
+	module:      string,  // import module name
+	attr:        string,  // attribute name (empty = entire module)
+	replacement: string,  // suggested replacement
+	version:     string,  // version where deprecated/removed
+}
+
+DEPRECATED_APIS :: [?]Deprecated_API{
+	// distutils removed in Python 3.12
+	{"distutils",        "",                  "setuptools",                     "removed in 3.12"},
+	// collections direct access deprecated since 3.3, removed 3.10
+	{"collections",      "MutableMapping",    "collections.abc.MutableMapping", "moved in 3.3"},
+	{"collections",      "MutableSequence",   "collections.abc.MutableSequence","moved in 3.3"},
+	{"collections",      "MutableSet",        "collections.abc.MutableSet",     "moved in 3.3"},
+	{"collections",      "Mapping",           "collections.abc.Mapping",        "moved in 3.3"},
+	{"collections",      "Sequence",          "collections.abc.Sequence",       "moved in 3.3"},
+	{"collections",      "Iterable",          "collections.abc.Iterable",       "moved in 3.3"},
+	{"collections",      "Iterator",          "collections.abc.Iterator",       "moved in 3.3"},
+	{"collections",      "Callable",          "collections.abc.Callable",       "moved in 3.3"},
+	// imp module deprecated since 3.4
+	{"imp",              "",                  "importlib",                      "deprecated since 3.4"},
+	// pkg_resources → importlib.metadata
+	{"pkg_resources",    "",                  "importlib.metadata",             "deprecated"},
+	// cgi module deprecated in 3.11, removed in 3.13
+	{"cgi",              "",                  "email.message or urllib.parse",  "removed in 3.13"},
+	// pipes module deprecated
+	{"pipes",            "",                  "subprocess",                     "removed in 3.13"},
+	// asynchat/asyncore deprecated since 3.6
+	{"asynchat",         "",                  "asyncio",                        "removed in 3.12"},
+	{"asyncore",         "",                  "asyncio",                        "removed in 3.12"},
+}
+
+check_deprecated_apis :: proc(
+	module: ^parser.Module,
+	bind_result: ^binder.Bind_Result,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	allocator: mem.Allocator,
+) {
+	// Build import map: local_name → module_name
+	import_map := make(map[string]string, 16, allocator)
+	for &imp in bind_result.imports {
+		// Whole module import
+		top := imp.module_name
+		for i in 0..<len(top) {
+			if top[i] == '.' { top = top[:i]; break }
+		}
+		import_map[top] = imp.module_name
+	}
+
+	// Check whole-module deprecated imports (e.g., import distutils)
+	for stmt in module.body {
+		#partial switch s in stmt {
+		case ^parser.Import_Stmt:
+			for alias in s.names {
+				for dep in DEPRECATED_APIS {
+					if len(dep.attr) == 0 && alias.name == dep.module {
+						append(diagnostics, core.Diagnostic{
+							severity = .Warning,
+							location = core.Location{
+								file   = file_path,
+								line   = int(s.loc.line),
+								column = int(s.loc.col),
+							},
+							code = "COMPAT002",
+							what = fmt.tprintf("deprecated module '%s' (%s)", dep.module, dep.version),
+							why  = fmt.tprintf("'%s' is deprecated and may be removed in future Python versions", dep.module),
+							fix  = fmt.tprintf("use '%s' instead", dep.replacement),
+						})
+					}
+				}
+			}
+		case ^parser.Import_From:
+			if s.level > 0 { continue }
+			for dep in DEPRECATED_APIS {
+				// Whole-module deprecation: from distutils import ...
+				if len(dep.attr) == 0 && s.module == dep.module {
+					append(diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = file_path,
+							line   = int(s.loc.line),
+							column = int(s.loc.col),
+						},
+						code = "COMPAT002",
+						what = fmt.tprintf("deprecated module '%s' (%s)", dep.module, dep.version),
+						why  = fmt.tprintf("'%s' is deprecated and may be removed in future Python versions", dep.module),
+						fix  = fmt.tprintf("use '%s' instead", dep.replacement),
+					})
+					break
+				}
+				// Specific attribute deprecation: from collections import MutableMapping
+				if dep.module == s.module && len(dep.attr) > 0 {
+					for alias in s.names {
+						if alias.name == dep.attr {
+							append(diagnostics, core.Diagnostic{
+								severity = .Warning,
+								location = core.Location{
+									file   = file_path,
+									line   = int(s.loc.line),
+									column = int(s.loc.col),
+								},
+								code = "COMPAT002",
+								what = fmt.tprintf("deprecated: '%s.%s' (%s)", dep.module, dep.attr, dep.version),
+								why  = fmt.tprintf("'%s.%s' has been moved/deprecated", dep.module, dep.attr),
+								fix  = fmt.tprintf("use '%s' instead", dep.replacement),
+							})
+						}
+					}
+				}
+			}
+		}
+	}
 }

@@ -1,6 +1,7 @@
 package checker
 
 import "core:mem"
+import "core:strings"
 
 import parser "mimir:parser"
 import binder "mimir:binder"
@@ -214,6 +215,13 @@ resolve_annotation :: proc(
 				case "Never":          return TYPE_NEVER
 				case "NoReturn":       return TYPE_NEVER
 				case "object":         return TYPE_OBJECT
+				case "Self":
+					if reg.current_resolve_class != INVALID_TYPE {
+						return make_instance_type(reg, reg.current_resolve_class)
+					}
+					return TYPE_UNKNOWN
+				case "Final":     return TYPE_ANY  // Bare Final — type inferred from RHS
+				case "ClassVar":  return TYPE_ANY  // Bare ClassVar — type inferred from RHS
 				case "List", "list":   return make_list_type(reg, TYPE_ANY)
 				case "Dict", "dict":   return make_dict_type(reg, TYPE_ANY, TYPE_ANY)
 				case "Set", "set":     return make_set_type(reg, TYPE_ANY)
@@ -285,6 +293,43 @@ resolve_annotation :: proc(
 			// The target type T is stored on the registry by the Func_Def handler
 			resolve_annotation(e.slice, reg, bind_result, builtins, env)
 			return TYPE_BOOL
+		case "Final":
+			// Final[T] — immutable variable with type T
+			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
+		case "ClassVar":
+			// ClassVar[T] — class-level attribute with type T
+			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
+		case "Annotated":
+			// Annotated[T, metadata...] — extract T, ignore metadata
+			#partial switch slice in e.slice {
+			case ^parser.Tuple_Expr:
+				if len(slice.elts) > 0 {
+					return resolve_annotation(slice.elts[0], reg, bind_result, builtins, env)
+				}
+			}
+			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
+		case "Required":
+			// Required[T] — field is required even in total=False TypedDict
+			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
+		case "NotRequired":
+			// NotRequired[T] — field is optional even in total=True TypedDict
+			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
+		case "Literal":
+			// Literal["read", "write"] or Literal[1, 2] → union of literal types
+			return resolve_literal_annotation(e.slice, reg)
+		case "type":
+			// type[X] → the Class_Type for X (class object, not instance)
+			inner := resolve_annotation(e.slice, reg, bind_result, builtins, env)
+			// Inner resolves to Instance_Type — unwrap to get Class_Type
+			it := get_type(reg, inner)
+			#partial switch inst in it.info {
+			case Instance_Type:
+				return inst.class_type
+			case Class_Type:
+				return inner
+			}
+			// Bare type[int] etc. — return TYPE_OBJECT as fallback
+			return TYPE_OBJECT
 		}
 		// User-defined generic class: MyClass[int]
 		base_type := resolve_annotation(e.value, reg, bind_result, builtins, env)
@@ -328,6 +373,25 @@ resolve_annotation :: proc(
 			case "bytes": return TYPE_BYTES
 			case "None":  return TYPE_NONE
 			}
+			// Handle "X | Y" union syntax in string annotations
+			if strings.contains(str_val, " | ") {
+				parts := strings.split(str_val, " | ", allocator = reg.allocator)
+				if len(parts) >= 2 {
+					members := make([dynamic]Type_ID, 0, len(parts), reg.allocator)
+					for part in parts {
+						p := strings.trim_space(part)
+						pt := resolve_string_type_name(p, reg)
+						if pt != TYPE_UNKNOWN {
+							append(&members, pt)
+						}
+					}
+					if len(members) >= 2 {
+						return make_union_type(reg, members[:])
+					} else if len(members) == 1 {
+						return members[0]
+					}
+				}
+			}
 			// Try class name lookup in registry
 			for _, class_type_id in reg.class_types {
 				ct := get_type(reg, class_type_id)
@@ -365,6 +429,128 @@ get_annotation_name :: proc(expr: parser.Expr) -> string {
 		return e.attr
 	}
 	return ""
+}
+
+// Check if an annotation is Final or Final[T]
+is_final_annotation :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result) -> bool {
+	if expr == nil { return false }
+	#partial switch e in expr {
+	case ^parser.Name_Expr:
+		if orig, ok := bind_result.typing_names[e.id]; ok {
+			return orig == "Final"
+		}
+	case ^parser.Subscript_Expr:
+		base_name := get_annotation_name(e.value)
+		if orig, ok := bind_result.typing_names[base_name]; ok {
+			return orig == "Final"
+		}
+	}
+	return false
+}
+
+// Check if an annotation is Required[T]
+is_required_annotation :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result) -> bool {
+	if expr == nil { return false }
+	#partial switch e in expr {
+	case ^parser.Subscript_Expr:
+		base_name := get_annotation_name(e.value)
+		if orig, ok := bind_result.typing_names[base_name]; ok {
+			return orig == "Required"
+		}
+	}
+	return false
+}
+
+// Check if an annotation is NotRequired[T]
+is_notrequired_annotation :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result) -> bool {
+	if expr == nil { return false }
+	#partial switch e in expr {
+	case ^parser.Subscript_Expr:
+		base_name := get_annotation_name(e.value)
+		if orig, ok := bind_result.typing_names[base_name]; ok {
+			return orig == "NotRequired"
+		}
+	}
+	return false
+}
+
+// Resolve Literal[...] annotation → Literal types or union thereof
+resolve_literal_annotation :: proc(expr: parser.Expr, reg: ^Type_Registry) -> Type_ID {
+	if expr == nil { return TYPE_UNKNOWN }
+	// Single value: Literal[42] or Literal["read"]
+	lit_type := resolve_literal_value(expr, reg)
+	if lit_type != TYPE_UNKNOWN { return lit_type }
+	// Multiple values: Literal["read", "write"] → union
+	#partial switch e in expr {
+	case ^parser.Tuple_Expr:
+		members := make([dynamic]Type_ID, 0, len(e.elts), reg.allocator)
+		for elt in e.elts {
+			lt := resolve_literal_value(elt, reg)
+			if lt != TYPE_UNKNOWN {
+				append(&members, lt)
+			}
+		}
+		if len(members) == 0 { return TYPE_UNKNOWN }
+		if len(members) == 1 { return members[0] }
+		return make_union_type(reg, members[:])
+	}
+	return TYPE_UNKNOWN
+}
+
+// Resolve a single constant expression to a Literal type
+resolve_literal_value :: proc(expr: parser.Expr, reg: ^Type_Registry) -> Type_ID {
+	if expr == nil { return TYPE_UNKNOWN }
+	#partial switch e in expr {
+	case ^parser.Constant_Expr:
+		#partial switch v in e.value {
+		case i64:    return register_type(reg, Literal_Int_Type{value = v})
+		case string: return register_type(reg, Literal_Str_Type{value = v})
+		case bool:   return register_type(reg, Literal_Bool_Type{value = v})
+		}
+	case ^parser.Unary_Op_Expr:
+		// Literal[-1] → negate
+		if e.op == .USub {
+			if c, ok := e.operand.(^parser.Constant_Expr); ok {
+				if val, is_int := c.value.(i64); is_int {
+					return register_type(reg, Literal_Int_Type{value = -val})
+				}
+			}
+		}
+	case ^parser.Name_Expr:
+		// Literal[True] / Literal[False] / Literal[None]
+		switch e.id {
+		case "True":  return register_type(reg, Literal_Bool_Type{value = true})
+		case "False": return register_type(reg, Literal_Bool_Type{value = false})
+		case "None":  return TYPE_NONE
+		}
+	}
+	return TYPE_UNKNOWN
+}
+
+// Resolve a simple type name from a string annotation component (for "X | Y" parsing)
+resolve_string_type_name :: proc(name: string, reg: ^Type_Registry) -> Type_ID {
+	switch name {
+	case "int":    return TYPE_INT
+	case "str":    return TYPE_STR
+	case "float":  return TYPE_FLOAT
+	case "bool":   return TYPE_BOOL
+	case "bytes":  return TYPE_BYTES
+	case "None":   return TYPE_NONE
+	case "object": return TYPE_OBJECT
+	case "Any":    return TYPE_ANY
+	case "Never":  return TYPE_NEVER
+	}
+	// Try class name lookup
+	for _, class_type_id in reg.class_types {
+		ct := get_type(reg, class_type_id)
+		#partial switch cls in ct.info {
+		case Class_Type:
+			if cls.name == name {
+				return make_instance_type(reg, class_type_id)
+			}
+		}
+	}
+	return TYPE_UNKNOWN
 }
 
 // Helper: resolve two generic args from a Tuple_Expr (for dict[K, V])

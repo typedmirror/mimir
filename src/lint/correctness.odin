@@ -246,3 +246,132 @@ check_assert_tuple :: proc(ctx: ^Lint_Context) {
 	core.walk_all_stmts(&visitor, ctx.module.body)
 }
 
+// L007 — Comparison to True/False (use truthiness)
+check_compare_to_bool :: proc(ctx: ^Lint_Context) {
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			lint_ctx := cast(^Lint_Context)raw_ctx
+			cmp, ok := expr.(^parser.Compare_Expr)
+			if !ok { return }
+			for i in 0..<len(cmp.ops) {
+				if cmp.ops[i] != .Eq && cmp.ops[i] != .Not_Eq { continue }
+				comp := cmp.comparators[i] if i < len(cmp.comparators) else nil
+				if comp == nil { continue }
+				if _is_bool_literal(comp) || (i == 0 && _is_bool_literal(cmp.left)) {
+					op_str := "==" if cmp.ops[i] == .Eq else "!="
+					append(&lint_ctx.diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = lint_ctx.file_path,
+							line   = int(cmp.loc.line),
+							column = int(cmp.loc.col),
+						},
+						what = fmt.tprintf("comparison to True/False with '%s'", op_str),
+						why  = "use truthiness testing directly instead of comparing to True/False",
+						fix  = "use 'if x:' instead of 'if x == True:' (or 'if not x:' for False)",
+						code = "L007",
+					})
+					break
+				}
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
+}
+
+// L008 — Comparison to None using == instead of is
+check_compare_to_none :: proc(ctx: ^Lint_Context) {
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			lint_ctx := cast(^Lint_Context)raw_ctx
+			cmp, ok := expr.(^parser.Compare_Expr)
+			if !ok { return }
+			for i in 0..<len(cmp.ops) {
+				if cmp.ops[i] != .Eq && cmp.ops[i] != .Not_Eq { continue }
+				comp := cmp.comparators[i] if i < len(cmp.comparators) else nil
+				if comp == nil { continue }
+				if _is_none_literal(comp) || (i == 0 && _is_none_literal(cmp.left)) {
+					op_str := "==" if cmp.ops[i] == .Eq else "!="
+					is_str := "is" if cmp.ops[i] == .Eq else "is not"
+					append(&lint_ctx.diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = lint_ctx.file_path,
+							line   = int(cmp.loc.line),
+							column = int(cmp.loc.col),
+						},
+						what = fmt.tprintf("comparison to None using '%s'", op_str),
+						why  = "None is a singleton; use 'is' for identity comparison, not '==' for equality",
+						fix  = fmt.tprintf("use '%s None' instead of '%s None'", is_str, op_str),
+						code = "L008",
+					})
+					break
+				}
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
+}
+
+// L009 — type(x) == Y instead of isinstance(x, Y)
+check_type_equality :: proc(ctx: ^Lint_Context) {
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			lint_ctx := cast(^Lint_Context)raw_ctx
+			cmp, ok := expr.(^parser.Compare_Expr)
+			if !ok { return }
+			if len(cmp.ops) != 1 || len(cmp.comparators) != 1 { return }
+			if cmp.ops[0] != .Eq && cmp.ops[0] != .Not_Eq && cmp.ops[0] != .Is && cmp.ops[0] != .Is_Not { return }
+			if _is_type_call(cmp.left) || _is_type_call(cmp.comparators[0]) {
+				append(&lint_ctx.diagnostics, core.Diagnostic{
+					severity = .Warning,
+					location = core.Location{
+						file   = lint_ctx.file_path,
+						line   = int(cmp.loc.line),
+						column = int(cmp.loc.col),
+					},
+					what = "comparing type() result directly",
+					why  = "type(x) == Y does not account for subclasses; isinstance() is safer",
+					fix  = "use isinstance(x, Y) instead of type(x) == Y",
+					code = "L009",
+				})
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
+}
+
+// Helpers
+_is_bool_literal :: proc(expr: parser.Expr) -> bool {
+	if name, ok := expr.(^parser.Name_Expr); ok {
+		return name.id == "True" || name.id == "False"
+	}
+	if c, ok := expr.(^parser.Constant_Expr); ok {
+		_, is_bool := c.value.(bool)
+		return is_bool
+	}
+	return false
+}
+
+_is_none_literal :: proc(expr: parser.Expr) -> bool {
+	if name, ok := expr.(^parser.Name_Expr); ok {
+		return name.id == "None"
+	}
+	if c, ok := expr.(^parser.Constant_Expr); ok {
+		_, is_none := c.value.(parser.Const_None)
+		return is_none
+	}
+	return false
+}
+
+_is_type_call :: proc(expr: parser.Expr) -> bool {
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return false }
+	name, name_ok := call.func.(^parser.Name_Expr)
+	if !name_ok { return false }
+	return name.id == "type" && len(call.args) == 1
+}
+

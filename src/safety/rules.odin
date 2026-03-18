@@ -16,6 +16,8 @@ ALL_RULES := [?]Safety_Rule{
 	{code = "SAF007", name = "sensitive-log-data",           check = check_sensitive_log_data},
 	{code = "SAF008", name = "expensive-log-format",         check = check_expensive_log_format},
 	{code = "SAF009", name = "mutable-default-argument",     check = check_mutable_default},
+	{code = "SAF011", name = "mutable-class-variable",       check = check_mutable_class_var},
+	{code = "SAF012", name = "open-without-with",            check = check_open_without_with},
 }
 
 is_rule_enabled :: proc(code: string, config: ^Safety_Config) -> bool {

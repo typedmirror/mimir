@@ -41,8 +41,47 @@ check_unawaited :: proc(ctx: ^Concurrency_Context, stmt: ^parser.Expr_Stmt, in_a
 	}
 }
 
+// §6.2: GIL-releasing function database.
+// Functions that release the GIL during execution (IO, sleep, network, subprocess).
+// Thread targets calling these are IO-bound and correctly use threads.
+GIL_RELEASING_MODULES :: [?]string{
+	"time",         // time.sleep releases GIL
+	"socket",       // all socket ops
+	"requests",     // HTTP client
+	"urllib",       // HTTP client
+	"http",         // HTTP server/client
+	"subprocess",   // process management
+	"sqlite3",      // database
+	"psycopg2",     // PostgreSQL
+	"mysql",        // MySQL
+	"pymongo",      // MongoDB
+	"redis",        // Redis
+	"smtplib",      // email
+	"ftplib",       // FTP
+	"ssl",          // TLS
+	"select",       // I/O multiplexing
+	"selectors",    // I/O multiplexing
+}
+
+GIL_RELEASING_FUNCS :: [?]string{
+	"sleep",        // time.sleep
+	"open",         // file I/O
+	"read",         // file I/O
+	"write",        // file I/O
+	"recv",         // socket
+	"send",         // socket
+	"connect",      // socket/db
+	"accept",       // socket
+	"listen",       // socket
+	"get",          // requests.get
+	"post",         // requests.post
+	"urlopen",      // urllib
+	"input",        // stdin blocks
+}
+
 // CONC003: CPU-bound work in threads
-// Fires when threading.Thread(target=func) is detected.
+// Fires when threading.Thread(target=func) is detected AND the target
+// function body has no GIL-releasing calls (§6.2).
 check_thread_target :: proc(ctx: ^Concurrency_Context, expr: parser.Expr) {
 	if expr == nil { return }
 	call, ok := expr.(^parser.Call_Expr)
@@ -61,18 +100,107 @@ check_thread_target :: proc(ctx: ^Concurrency_Context, expr: parser.Expr) {
 			break
 		}
 	}
-	// Also check first positional argument (Thread(group, target))
-	// But Thread usually uses keyword. Skip positional for now.
 
 	if len(target_name) == 0 { return }
 
-	// Check if the target function has any known IO/GIL-releasing calls
-	// For now, simple heuristic: flag all Thread(target=...) and let user judge
-	// Future: analyze the target function body for IO calls
+	// Find the target function's body and check for GIL-releasing calls
+	target_body := find_func_body(ctx.module.body, target_name)
+	if target_body != nil && has_gil_releasing_call(target_body, ctx) {
+		// IO-bound — threads are the correct choice, no warning
+		return
+	}
+
 	emit(ctx, "CONC003", call.loc,
-		fmt.tprintf("`%s` used as thread target — may be CPU-bound", target_name),
+		fmt.tprintf("`%s` used as thread target — appears CPU-bound", target_name),
 		"CPU-bound work in threads gains no parallelism due to the GIL",
 		"if CPU-bound, use `multiprocessing.Pool` or `concurrent.futures.ProcessPoolExecutor`")
+}
+
+// Find a function's body statements by name in the module
+find_func_body :: proc(stmts: []parser.Stmt, name: string) -> []parser.Stmt {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			if s.name == name { return s.body }
+		case ^parser.Async_Func_Def:
+			if s.name == name { return s.body }
+		case ^parser.Class_Def:
+			if result := find_func_body(s.body, name); result != nil { return result }
+		case ^parser.If_Stmt:
+			if result := find_func_body(s.body, name); result != nil { return result }
+			if result := find_func_body(s.orelse, name); result != nil { return result }
+		}
+	}
+	return nil
+}
+
+// Check if a function body contains any GIL-releasing calls
+has_gil_releasing_call :: proc(stmts: []parser.Stmt, ctx: ^Concurrency_Context) -> bool {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			if _is_gil_releasing_expr(s.value, ctx) { return true }
+		case ^parser.Assign:
+			if _is_gil_releasing_expr(s.value, ctx) { return true }
+		case ^parser.Return_Stmt:
+			if s.value != nil && _is_gil_releasing_expr(s.value, ctx) { return true }
+		case ^parser.If_Stmt:
+			if has_gil_releasing_call(s.body, ctx) { return true }
+			if has_gil_releasing_call(s.orelse, ctx) { return true }
+		case ^parser.For_Stmt:
+			if has_gil_releasing_call(s.body, ctx) { return true }
+		case ^parser.While_Stmt:
+			if has_gil_releasing_call(s.body, ctx) { return true }
+		case ^parser.With_Stmt:
+			if has_gil_releasing_call(s.body, ctx) { return true }
+		case ^parser.Try_Stmt:
+			if has_gil_releasing_call(s.body, ctx) { return true }
+			for h in s.handlers { if has_gil_releasing_call(h.body, ctx) { return true } }
+		}
+	}
+	return false
+}
+
+// Check if an expression is a call to a known GIL-releasing function
+_is_gil_releasing_expr :: proc(expr: parser.Expr, ctx: ^Concurrency_Context) -> bool {
+	if expr == nil { return false }
+	#partial switch e in expr {
+	case ^parser.Call_Expr:
+		// Check direct name calls: sleep(), open(), read()
+		if name, ok := e.func.(^parser.Name_Expr); ok {
+			for f in GIL_RELEASING_FUNCS {
+				if name.id == f { return true }
+			}
+			// Check if name maps to a GIL-releasing module via import_map
+			if mod, has := ctx.import_map[name.id]; has {
+				for m in GIL_RELEASING_MODULES {
+					if mod == m { return true }
+				}
+			}
+		}
+		// Check attribute calls: time.sleep(), requests.get(), conn.read()
+		if attr, ok := e.func.(^parser.Attribute_Expr); ok {
+			// Check method name against GIL-releasing funcs
+			for f in GIL_RELEASING_FUNCS {
+				if attr.attr == f { return true }
+			}
+			// Check if receiver is a GIL-releasing module
+			if recv_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
+				if mod, has := ctx.import_map[recv_name.id]; has {
+					for m in GIL_RELEASING_MODULES {
+						if mod == m { return true }
+					}
+				}
+			}
+		}
+		// Recurse into args
+		for arg in e.args {
+			if _is_gil_releasing_expr(arg, ctx) { return true }
+		}
+	case ^parser.Await_Expr:
+		return true // await always releases GIL
+	}
+	return false
 }
 
 // Check if a call is threading.Thread(...) or Thread(...)

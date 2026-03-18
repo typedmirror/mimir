@@ -2,6 +2,7 @@ package checker
 
 import "core:fmt"
 import "core:mem"
+import "core:strings"
 
 import parser "mimir:parser"
 import binder "mimir:binder"
@@ -57,6 +58,9 @@ check :: proc(
 	collect_func_return_types(module.body, bind_result, &result.registry, &builtins, &return_type_map)
 	collect_func_args(module.body, bind_result, &func_args_map)
 
+	// §31.2: Collect pytest fixture return types for injection into test params
+	fixture_types := collect_fixture_types(module.body, bind_result, &return_type_map)
+
 	// Use virtual imports if present
 	virtual_import_ptr: ^map[binder.Symbol_ID]Type_ID = nil
 	if len(virtual_imports) > 0 {
@@ -80,6 +84,8 @@ check :: proc(
 		if scope_cm, ok := &flow_result.const_maps[cfg.scope_id]; ok {
 			cm = scope_cm
 		}
+		fixture_ptr: ^map[string]Type_ID = nil
+		if len(fixture_types) > 0 { fixture_ptr = &fixture_types }
 		check_scope(
 			&cfg,
 			bind_result,
@@ -93,6 +99,7 @@ check :: proc(
 			method_table = &mt,
 			shape_reg = shape_reg_ptr,
 			const_map = cm,
+			fixture_types = fixture_ptr,
 		)
 	}
 
@@ -178,6 +185,19 @@ check :: proc(
 		prev_caller_hash = new_caller_hash
 	}
 
+	// §3.4: Per-call-site specialization for unannotated generic functions
+	{
+		call_sites := collect_call_sites(
+			&result, bind_result, flow_result, &sym_to_scope, &func_args_map, &result.registry, allocator)
+		if len(call_sites) > 0 {
+			specialize_call_sites(
+				&result, bind_result, flow_result, call_sites[:], &func_args_map,
+				&builtins, &mt, file_path, shape_reg_ptr, allocator)
+			// Backfill widened return types into Callable_Types
+			backfill_inferred_returns(&result, bind_result)
+		}
+	}
+
 	// Re-validate module-level assignments against updated return types
 	if len(result.inferred_returns) > 0 {
 		revalidate_module_calls(module.body, &result, bind_result, &builtins, file_path)
@@ -235,7 +255,65 @@ check :: proc(
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
+	// §31.2: Mock spec + fixture type checking
+	analyze_test_patterns(module, bind_result, &result.registry, &result.expr_types, file_path, &result.diagnostics, allocator)
+
+	// Suppress F002 for functions that contain Never-returning calls
+	suppress_f002_for_never(flow_result, &result, bind_result)
+
 	return result
+}
+
+// F002 suppression: if a function body contains a call to a Never-returning function,
+// the function is guaranteed to terminate on that path. Remove the F002 diagnostic.
+suppress_f002_for_never :: proc(flow_result: ^flow.Flow_Result, result: ^Check_Result, bind_result: ^binder.Bind_Result) {
+	// Collect scope_ids that have Never-returning calls in their bodies
+	never_scopes := make(map[binder.Scope_ID]bool, 4, result.registry.allocator)
+	for &cfg in flow_result.cfgs {
+		scope := binder.result_get_scope(bind_result, cfg.scope_id)
+		if scope == nil || scope.kind != .Function { continue }
+		for &block in cfg.blocks {
+			if !block.is_reachable { continue }
+			for stmt in block.stmts {
+				if es, ok := stmt.(^parser.Expr_Stmt); ok {
+					if call, c_ok := es.value.(^parser.Call_Expr); c_ok {
+						call_type := TYPE_UNKNOWN
+						if t, found := result.expr_types[rawptr(call)]; found {
+							call_type = t
+						}
+						if call_type == TYPE_NEVER {
+							never_scopes[cfg.scope_id] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(never_scopes) == 0 { return }
+
+	// Remove F002 diagnostics for functions with Never-returning calls
+	i := 0
+	for i < len(flow_result.diagnostics) {
+		d := flow_result.diagnostics[i]
+		if d.code == "F002" {
+			// Match by location — find the scope at this line
+			suppressed := false
+			for &cfg in flow_result.cfgs {
+				if cfg.scope_id in never_scopes {
+					scope := binder.result_get_scope(bind_result, cfg.scope_id)
+					if scope != nil && int(scope.loc.line) == d.location.line {
+						suppressed = true
+						break
+					}
+				}
+			}
+			if suppressed {
+				ordered_remove(&flow_result.diagnostics, i)
+				continue
+			}
+		}
+		i += 1
+	}
 }
 
 // ==================== Multi-Module Entry Point ====================
@@ -384,6 +462,18 @@ check_with_imports :: proc(
 		prev_caller_hash_multi = new_caller_hash_multi
 	}
 
+	// §3.4: Per-call-site specialization (multi-module)
+	{
+		call_sites_multi := collect_call_sites(
+			&result, bind_result, flow_result, &sym_to_scope_multi, &func_args_map, registry, allocator)
+		if len(call_sites_multi) > 0 {
+			specialize_call_sites(
+				&result, bind_result, flow_result, call_sites_multi[:], &func_args_map,
+				builtins, &mt, file_path, shape_reg_ptr, allocator, registry)
+			backfill_inferred_returns(&result, bind_result, registry)
+		}
+	}
+
 	if len(result.inferred_returns) > 0 {
 		revalidate_module_calls(module.body, &result, bind_result, builtins, file_path, registry)
 	}
@@ -463,6 +553,7 @@ check_scope :: proc(
 	shape_reg: ^Shape_Registry = nil,
 	const_map: ^flow.Const_Map = nil,
 	caller_param_types: map[int]Type_ID = nil,
+	fixture_types: ^map[string]Type_ID = nil,
 ) {
 	// Use shared registry if provided, otherwise use result's own
 	reg := reg_override if reg_override != nil else &result.registry
@@ -508,6 +599,9 @@ check_scope :: proc(
 
 	// Track declared annotation types across blocks (for reassignment checking)
 	declared_types := make(map[binder.Symbol_ID]Type_ID, 16, reg.allocator)
+
+	// Track Final[T] variables (cannot be reassigned)
+	final_vars := make(map[binder.Symbol_ID]bool, 4, reg.allocator)
 
 	// Track groupby source DataFrames for column-aware aggregation
 	groupby_sources := make(map[binder.Symbol_ID]GroupBy_Info, 4, reg.allocator)
@@ -558,6 +652,10 @@ check_scope :: proc(
 		// Initialize parameter types for the entry block (after merge to avoid overwrite)
 		if block_id == cfg.entry && scope != nil && (scope.kind == .Function || scope.kind == .Lambda) {
 			init_param_types(scope, bind_result, &env, reg, builtins, func_args, current_class)
+			// §31.2: Inject fixture types for test function params
+			if fixture_types != nil && strings.has_prefix(scope.name, "test_") {
+				inject_fixture_types(scope, bind_result, &env, fixture_types)
+			}
 		}
 
 		// Apply narrowing guards
@@ -590,6 +688,7 @@ check_scope :: proc(
 			match_case_envs  = &match_case_envs,
 			groupby_sources  = &groupby_sources,
 			closed_vars      = &closed_vars,
+			final_vars       = &final_vars,
 		}
 
 		// Process each statement in the block
@@ -612,13 +711,13 @@ check_scope :: proc(
 	// Return type checking is done inline in check_stmt for Return_Stmt
 
 	// --- Constraint-based backward inference ---
-	// Find parameters that forward inference left as TYPE_UNKNOWN
-	unknown_params := find_unknown_params(cfg, scope, envs[:], bind_result, reg)
+	// Find symbols that forward inference left as TYPE_UNKNOWN (params + locals)
+	unknown_syms_list := find_unknown_symbols(cfg, scope, envs[:], bind_result, reg, visited[:])
 
-	if len(unknown_params) > 0 || len(caller_param_types) > 0 {
+	if len(unknown_syms_list) > 0 || len(caller_param_types) > 0 {
 		// Collect usage constraints from the function body
 		cs := collect_scope_constraints(cfg, bind_result, reg, envs[:],
-			&result.expr_types, &result.symbol_types, unknown_params[:], reg.allocator)
+			&result.expr_types, &result.symbol_types, unknown_syms_list[:], reg.allocator)
 
 		// Resolve constraints → param types (method table passed from check())
 		mt_local: Builtin_Method_Table
@@ -717,6 +816,8 @@ check_scope :: proc(
 					current_block    = block_id,
 					match_case_envs  = &match_case_envs,
 					groupby_sources  = &groupby_sources,
+					final_vars       = &final_vars,
+					resolved_types   = &resolved,
 				}
 
 				for stmt in block.stmts {
@@ -856,6 +957,21 @@ check_stmt :: proc(
 			}
 		}
 		rhs_type := infer_expr(s.value, ctx, target_expected)
+
+		// Check Final reassignment
+		for target in s.targets {
+			if name, ok := target.(^parser.Name_Expr); ok {
+				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+					if ctx.final_vars != nil && sym_id in ctx.final_vars {
+						emit_diagnostic(ctx, s.loc, "T012", .Error,
+							"Cannot assign to final variable",
+							fmt.tprintf("'%s' is declared as Final and cannot be reassigned", name.id),
+							"Remove the reassignment or remove the Final annotation")
+					}
+				}
+			}
+		}
+
 		// Check reassignment against declared annotation type
 		if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY {
 			for target in s.targets {
@@ -953,7 +1069,7 @@ check_stmt :: proc(
 										if key_name, str_ok := key.value.(string); str_ok {
 											new_fields := make(map[string]Type_ID, 4, ctx.reg.allocator)
 											new_fields[key_name] = rhs_type
-											ctx.env.types[sym_id] = make_typeddict_type(ctx.reg, "", new_fields, true)
+											ctx.env.types[sym_id] = make_typeddict_type(ctx.reg, name.id, new_fields, true)
 										}
 									}
 								case TypedDict_Type:
@@ -984,6 +1100,15 @@ check_stmt :: proc(
 			if name, ok := s.target.(^parser.Name_Expr); ok {
 				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
 					ctx.declared_types[sym_id] = declared
+				}
+			}
+		}
+
+		// Detect Final[T] annotation — mark variable as immutable
+		if is_final_annotation(s.annotation, ctx.bind_result) {
+			if name, ok := s.target.(^parser.Name_Expr); ok {
+				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+					ctx.final_vars[sym_id] = true
 				}
 			}
 		}
@@ -1077,6 +1202,8 @@ check_stmt :: proc(
 		if s.msg != nil {
 			infer_expr(s.msg, ctx)
 		}
+		// assert isinstance(x, T) → narrow x to T in subsequent code
+		apply_assert_narrowing(s.test, ctx)
 
 	case ^parser.Raise_Stmt:
 		if s.exc != nil {
@@ -1255,6 +1382,44 @@ resolve_isinstance_type :: proc(
 	return resolve_annotation(type_expr, reg, bind_result, builtins)
 }
 
+// ==================== Assert Narrowing ====================
+
+// assert isinstance(x, T) → narrow x to T; assert x is not None → remove None
+apply_assert_narrowing :: proc(test: parser.Expr, ctx: ^Infer_Context) {
+	if test == nil { return }
+	#partial switch e in test {
+	case ^parser.Call_Expr:
+		// assert isinstance(x, T)
+		if name, ok := e.func.(^parser.Name_Expr); ok && name.id == "isinstance" {
+			if len(e.args) >= 2 {
+				if var_name, vok := e.args[0].(^parser.Name_Expr); vok {
+					if sym_id, rok := binder.get_ref(ctx.bind_result, rawptr(var_name)); rok {
+						narrow_type := resolve_isinstance_type(e.args[1], ctx.reg, ctx.bind_result, ctx.builtins)
+						if narrow_type != TYPE_UNKNOWN {
+							ctx.env.types[sym_id] = narrow_type
+						}
+					}
+				}
+			}
+		}
+	case ^parser.Compare_Expr:
+		// assert x is not None
+		if len(e.ops) == 1 && e.ops[0] == .Is_Not && len(e.comparators) == 1 {
+			if c, cok := e.comparators[0].(^parser.Constant_Expr); cok {
+				if _, is_none := c.value.(parser.Const_None); is_none {
+					if var_name, vok := e.left.(^parser.Name_Expr); vok {
+						if sym_id, rok := binder.get_ref(ctx.bind_result, rawptr(var_name)); rok {
+							if cur, has := ctx.env.types[sym_id]; has {
+								ctx.env.types[sym_id] = remove_none(ctx.reg, cur)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // ==================== Function/Class Type Building ====================
 
 has_overload_decorator :: proc(decorators: []parser.Expr, bind_result: ^binder.Bind_Result) -> bool {
@@ -1289,12 +1454,47 @@ build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 	}
 
 	// Skip 'self'/'cls' parameter for methods (but not @staticmethod)
+	// 'self' is always stripped (only appears in methods by convention).
+	// 'cls' is only stripped inside class scope — standalone functions with 'cls' param keep it.
 	actual_params := params
-	if !is_static && len(params) > 0 && (params[0].name == "self" || params[0].name == "cls") {
-		actual_params = params[1:]
+	if !is_static && len(params) > 0 {
+		if params[0].name == "self" {
+			actual_params = params[1:]
+		} else if params[0].name == "cls" {
+			// Only strip 'cls' when inside a class scope or method context
+			is_in_class := ctx.current_class != INVALID_TYPE
+			if !is_in_class {
+				scope := binder.result_get_scope(ctx.bind_result, ctx.scope_id)
+				if scope != nil && scope.kind == .Class { is_in_class = true }
+			}
+			if is_in_class {
+				actual_params = params[1:]
+			}
+		}
 	}
 
+	// Set class context for Self resolution in return annotation
+	saved_resolve_class := ctx.reg.current_resolve_class
+	if ctx.current_class != INVALID_TYPE {
+		ctx.reg.current_resolve_class = ctx.current_class
+	} else {
+		// Check if we're inside a class scope (Func_Def processed during class body)
+		scope := binder.result_get_scope(ctx.bind_result, ctx.scope_id)
+		if scope != nil && scope.kind == .Class {
+			for _, ct_id in ctx.reg.class_types {
+				ct := get_type(ctx.reg, ct_id)
+				#partial switch cls in ct.info {
+				case Class_Type:
+					if cls.scope_id == scope.id {
+						ctx.reg.current_resolve_class = ct_id
+					}
+				}
+				if ctx.reg.current_resolve_class != saved_resolve_class { break }
+			}
+		}
+	}
 	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+	ctx.reg.current_resolve_class = saved_resolve_class
 
 	// Detect TypeGuard[T] return annotation → store target for guard narrowing
 	if fd.returns != nil {
@@ -1452,7 +1652,14 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	attrs := make(map[string]Type_ID, 16, ctx.reg.allocator)
 
 	// Scan class body for method and attribute definitions
+	// Set class context for Self resolution + cls stripping in method return annotations
+	saved_resolve := ctx.reg.current_resolve_class
+	saved_class := ctx.current_class
+	ctx.reg.current_resolve_class = class_type_id
+	ctx.current_class = class_type_id
 	scan_class_body_attrs(cd.body, ctx, &attrs)
+	ctx.reg.current_resolve_class = saved_resolve
+	ctx.current_class = saved_class
 
 	// Inherit attributes from base classes (own attrs take precedence)
 	for base_type_id in bases {
@@ -1534,6 +1741,19 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 // TypedDict class syntax: class Movie(TypedDict): name: str; year: int
 build_typeddict_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_id: binder.Scope_ID) -> Type_ID {
 	fields := make(map[string]Type_ID, 16, ctx.reg.allocator)
+	required_fields := make(map[string]bool, 16, ctx.reg.allocator)
+
+	// Determine base total= value from class keywords
+	total := true
+	for kw in cd.keywords {
+		if kw.arg == "total" {
+			if c, ok := kw.value.(^parser.Constant_Expr); ok {
+				if bval, bok := c.value.(bool); bok {
+					total = bval
+				}
+			}
+		}
+	}
 
 	for stmt in cd.body {
 		#partial switch s in stmt {
@@ -1541,15 +1761,27 @@ build_typeddict_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_
 			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
 				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 				fields[name_expr.id] = field_type
+				// Detect Required[T] / NotRequired[T] wrappers
+				is_required_override := is_required_annotation(s.annotation, ctx.bind_result)
+				is_notrequired_override := is_notrequired_annotation(s.annotation, ctx.bind_result)
+				if is_required_override {
+					required_fields[name_expr.id] = true
+				} else if is_notrequired_override {
+					required_fields[name_expr.id] = false
+				} else {
+					// Default based on total
+					required_fields[name_expr.id] = total
+				}
 			}
 		}
 	}
 
 	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
 	td_type_id := register_type(ctx.reg, TypedDict_Type{
-		name   = cd.name,
-		fields = fields,
-		total  = true,
+		name            = cd.name,
+		fields          = fields,
+		total           = total,
+		required_fields = required_fields,
 	})
 
 	if sym_id != binder.INVALID_SYMBOL {
@@ -1597,7 +1829,32 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 		#partial switch s in stmt {
 		case ^parser.Func_Def:
 			ft := build_func_type(s, ctx)
-			attrs[s.name] = ft
+			// @property: store return type instead of callable (attribute access, not call)
+			// @name.setter / @name.deleter: skip — keep the getter's return type
+			is_property := false
+			is_setter_or_deleter := false
+			for dec in s.decorator_list {
+				#partial switch d in dec {
+				case ^parser.Name_Expr:
+					if d.id == "property" { is_property = true }
+				case ^parser.Attribute_Expr:
+					if d.attr == "property" { is_property = true }
+					if d.attr == "setter" || d.attr == "deleter" { is_setter_or_deleter = true }
+				}
+			}
+			if is_setter_or_deleter {
+				// Don't overwrite the property attr — getter's return type is correct
+			} else if is_property {
+				ft_info := get_type(ctx.reg, ft)
+				#partial switch callable in ft_info.info {
+				case Callable_Type:
+					attrs[s.name] = callable.return_type
+				case:
+					attrs[s.name] = ft
+				}
+			} else {
+				attrs[s.name] = ft
+			}
 			if s.name == "__init__" {
 				scan_init_attrs(s, ctx, attrs)
 			}
@@ -1739,7 +1996,14 @@ assign_target :: proc(target: parser.Expr, type_id: Type_ID, ctx: ^Infer_Context
 	#partial switch e in target {
 	case ^parser.Name_Expr:
 		if sym_id, ok := binder.get_ref(ctx.bind_result, rawptr(e)); ok {
-			ctx.env.types[sym_id] = type_id
+			// During re-inference: if RHS is UNKNOWN but constraints resolved a type, use it
+			actual_type := type_id
+			if actual_type == TYPE_UNKNOWN && ctx.resolved_types != nil {
+				if rt, has_rt := ctx.resolved_types[sym_id]; has_rt {
+					actual_type = rt
+				}
+			}
+			ctx.env.types[sym_id] = actual_type
 		}
 	case ^parser.Tuple_Expr:
 		// Tuple unpacking
@@ -1903,7 +2167,24 @@ collect_func_return_types :: proc(
 			collect_func_return_types(s.body, bind_result, reg, builtins, out)
 
 		case ^parser.Class_Def:
+			// Set class context for Self resolution in method return annotations
+			saved_class := reg.current_resolve_class
+			class_scope_id := find_scope_for_def(s.name, s.loc, bind_result, .Class)
+			if class_scope_id != binder.INVALID_SCOPE {
+				for _, ct_id in reg.class_types {
+					ct := get_type(reg, ct_id)
+					#partial switch cls in ct.info {
+					case Class_Type:
+						if cls.scope_id == class_scope_id {
+							reg.current_resolve_class = ct_id
+							break
+						}
+					}
+					if reg.current_resolve_class != saved_class { break }
+				}
+			}
 			collect_func_return_types(s.body, bind_result, reg, builtins, out)
+			reg.current_resolve_class = saved_class
 
 		case ^parser.If_Stmt:
 			collect_func_return_types(s.body, bind_result, reg, builtins, out)
@@ -2039,7 +2320,16 @@ revalidate_module_calls :: proc(
 			declared := resolve_annotation(s.annotation, reg, bind_result, builtins)
 			if declared == TYPE_UNKNOWN || declared == TYPE_ANY { continue }
 
-			call_type := reinfer_call_return(s.value, result, bind_result, reg, builtins)
+			// §3.4: Check expr_types first (may have specialized return type)
+			call_type := TYPE_UNKNOWN
+			if spec_type, ok := result.expr_types[expr_to_rawptr(s.value)]; ok {
+				if spec_type != TYPE_UNKNOWN && spec_type != TYPE_ANY {
+					call_type = spec_type
+				}
+			}
+			if call_type == TYPE_UNKNOWN {
+				call_type = reinfer_call_return(s.value, result, bind_result, reg, builtins)
+			}
 			if call_type == TYPE_UNKNOWN || call_type == TYPE_ANY { continue }
 
 			if !is_assignable(reg, call_type, declared) {
@@ -2062,7 +2352,16 @@ revalidate_module_calls :: proc(
 				declared, has_declared := result.symbol_types[sym_id]
 				if !has_declared || declared == TYPE_UNKNOWN || declared == TYPE_ANY { continue }
 
-				call_type := reinfer_call_return(s.value, result, bind_result, reg, builtins)
+				// §3.4: Check expr_types first (may have specialized return type)
+				call_type := TYPE_UNKNOWN
+				if spec_type, ok := result.expr_types[expr_to_rawptr(s.value)]; ok {
+					if spec_type != TYPE_UNKNOWN && spec_type != TYPE_ANY {
+						call_type = spec_type
+					}
+				}
+				if call_type == TYPE_UNKNOWN {
+					call_type = reinfer_call_return(s.value, result, bind_result, reg, builtins)
+				}
 				if call_type == TYPE_UNKNOWN || call_type == TYPE_ANY { continue }
 
 				if !is_assignable(reg, call_type, declared) {
@@ -2131,6 +2430,161 @@ reinfer_call_return :: proc(
 	}
 
 	return TYPE_UNKNOWN
+}
+
+// ==================== §3.4 Call-Site Specialization ====================
+
+// Per-call-site return type specialization for unannotated generic functions.
+// After convergence establishes merged types, re-check each distinct arg pattern
+// to get specialized return types. Overrides expr_types at each call site.
+specialize_call_sites :: proc(
+	result: ^Check_Result,
+	bind_result: ^binder.Bind_Result,
+	flow_result: ^flow.Flow_Result,
+	call_sites: []Call_Site_Info,
+	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
+	builtins: ^Builtin_Names,
+	mt: ^Builtin_Method_Table,
+	file_path: string,
+	shape_reg: ^Shape_Registry = nil,
+	allocator: mem.Allocator = context.allocator,
+	reg_override: ^Type_Registry = nil,
+) {
+	if len(call_sites) == 0 { return }
+
+	// Group call sites by callee scope
+	groups := make(map[binder.Scope_ID][dynamic]int, 8, allocator)
+	for _, i in call_sites {
+		scope := call_sites[i].callee_scope
+		if scope not_in groups {
+			groups[scope] = make([dynamic]int, 0, 4, allocator)
+		}
+		append(&groups[scope], i)
+	}
+
+	// Specialization cache: hash(scope, arg_types) → return type
+	spec_cache := make(map[u64]Type_ID, 16, allocator)
+
+	MAX_SPECIALIZATIONS :: 8
+
+	for scope_id, indices in groups {
+		if len(indices) < 2 { continue }
+
+		// Collect distinct type patterns
+		pattern_hashes := make(map[u64]bool, 8, allocator)
+		for idx in indices {
+			h := hash_type_pattern(call_sites[idx].callee_scope, call_sites[idx].arg_types)
+			pattern_hashes[h] = true
+		}
+		if len(pattern_hashes) < 2 { continue }
+		if len(pattern_hashes) > MAX_SPECIALIZATIONS { continue }
+
+		// Find the CFG for this scope
+		target_cfg: ^flow.CFG = nil
+		for &cfg in flow_result.cfgs {
+			if cfg.scope_id == scope_id {
+				target_cfg = &cfg
+				break
+			}
+		}
+		if target_cfg == nil { continue }
+
+		// Save state before specialization re-checks
+		saved_return, had_return := result.inferred_returns[scope_id]
+		diag_count := len(result.diagnostics)
+
+		// Track which patterns we've already checked
+		checked := make(map[u64]bool, 8, allocator)
+
+		for idx in indices {
+			h := hash_type_pattern(call_sites[idx].callee_scope, call_sites[idx].arg_types)
+			if h in spec_cache || h in checked { continue }
+			checked[h] = true
+
+			// Build caller_param_types from this call's arg types
+			cpt := make(map[int]Type_ID, 4, allocator)
+			for t, param_idx in call_sites[idx].arg_types {
+				if t != TYPE_UNKNOWN && t != TYPE_ANY {
+					cpt[param_idx] = t
+				}
+			}
+			if len(cpt) == 0 { continue }
+
+			// Clear inferred_returns for this scope so re-check can set it
+			delete_key(&result.inferred_returns, scope_id)
+
+			// Look up const_map for this scope
+			spec_cm: ^flow.Const_Map = nil
+			if scope_cm, ok := &flow_result.const_maps[target_cfg.scope_id]; ok {
+				spec_cm = scope_cm
+			}
+
+			// Re-check with this specific arg pattern
+			check_scope(
+				target_cfg,
+				bind_result,
+				flow_result,
+				result           = result,
+				builtins         = builtins,
+				file_path        = file_path,
+				declared_return  = TYPE_UNKNOWN,
+				func_args_map    = func_args_map,
+				reg_override     = reg_override,
+				method_table     = mt,
+				shape_reg        = shape_reg,
+				const_map        = spec_cm,
+				caller_param_types = cpt,
+			)
+
+			// Extract specialized return type
+			if ret, ok := result.inferred_returns[scope_id]; ok {
+				spec_cache[h] = ret
+			}
+
+			// Suppress duplicate diagnostics from re-check
+			resize(&result.diagnostics, diag_count)
+		}
+
+		// Restore merged return type
+		if had_return {
+			result.inferred_returns[scope_id] = saved_return
+		} else {
+			delete_key(&result.inferred_returns, scope_id)
+		}
+	}
+
+	// Apply specialized return types to call sites
+	for &cs in call_sites {
+		h := hash_type_pattern(cs.callee_scope, cs.arg_types)
+		if ret, ok := spec_cache[h]; ok {
+			result.expr_types[cs.call_expr] = ret
+		}
+	}
+
+	// Set widened return type for each specialized function
+	// (union of all specialized returns — for hover/reveal_type on the function itself)
+	reg := reg_override if reg_override != nil else &result.registry
+	scope_returns := make(map[binder.Scope_ID][dynamic]Type_ID, 4, allocator)
+	for h, ret in spec_cache {
+		// Find which scope this hash belongs to by checking call sites
+		for &cs in call_sites {
+			ch := hash_type_pattern(cs.callee_scope, cs.arg_types)
+			if ch == h {
+				if cs.callee_scope not_in scope_returns {
+					scope_returns[cs.callee_scope] = make([dynamic]Type_ID, 0, 4, allocator)
+				}
+				append(&scope_returns[cs.callee_scope], ret)
+				break
+			}
+		}
+	}
+	for scope_id, returns in scope_returns {
+		if len(returns) == 1 {
+			result.inferred_returns[scope_id] = returns[0]
+		} else if len(returns) > 1 {
+			result.inferred_returns[scope_id] = make_union_type(reg, returns[:])
+		}
+	}
 }
 
 // Emit a diagnostic without requiring an Infer_Context

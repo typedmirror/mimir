@@ -32,6 +32,8 @@ Infer_Context :: struct {
 	match_case_envs:  ^map[flow.Block_ID]Match_Case_Env, // Pattern bindings per case block
 	groupby_sources:  ^map[binder.Symbol_ID]GroupBy_Info, // symbol → groupby source info for column tracking
 	closed_vars:      ^map[binder.Symbol_ID]parser.Src_Loc, // §4.2: variables closed after with-block exit
+	final_vars:       ^map[binder.Symbol_ID]bool,              // Final[T]: variables that cannot be reassigned
+	resolved_types:   ^map[binder.Symbol_ID]Type_ID,           // Constraint-resolved types for unknown symbols (re-inference pass)
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -48,7 +50,7 @@ infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = T
 infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID) -> Type_ID {
 	switch e in expr {
 	case ^parser.Constant_Expr:
-		return infer_constant(e)
+		return infer_constant(e, ctx.reg, expected)
 
 	case ^parser.Name_Expr:
 		return infer_name(e, ctx)
@@ -174,11 +176,27 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 					if field_type, found := td.fields[key_str]; found {
 						return field_type
 					}
+					// "Did you mean?" suggestion via edit distance
+					fix_msg := "Use a valid key"
+					best_name := ""
+					best_dist := 3
+					for field_name in td.fields {
+						d := _edit_distance(key_str, field_name)
+						if d < best_dist {
+							best_dist = d
+							best_name = field_name
+						}
+					}
+					if len(best_name) > 0 {
+						fix_msg = fmt.aprintf("Did you mean '%s'?", best_name,
+							allocator = ctx.reg.allocator)
+					}
+					td_display := td.name if len(td.name) > 0 else "inferred"
 					emit_diagnostic(ctx, e.loc, "T001", .Error,
 						"Invalid TypedDict key",
-						fmt.aprintf("TypedDict '%s' has no key '%s'", td.name, key_str,
+						fmt.aprintf("TypedDict '%s' has no key '%s'", td_display, key_str,
 							allocator = ctx.reg.allocator),
-						"Use a valid key")
+						fix_msg)
 					return TYPE_UNKNOWN
 				}
 			}
@@ -388,7 +406,17 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 
 // ==================== Constant Inference ====================
 
-infer_constant :: proc(e: ^parser.Constant_Expr) -> Type_ID {
+infer_constant :: proc(e: ^parser.Constant_Expr, reg: ^Type_Registry = nil, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
+	// When expected type contains Literal types, produce Literal type for exact match
+	if reg != nil && expected != TYPE_UNKNOWN && expected != TYPE_ANY {
+		if _expected_has_literal(reg, expected) {
+			#partial switch v in e.value {
+			case i64:    return register_type(reg, Literal_Int_Type{value = v})
+			case string: return register_type(reg, Literal_Str_Type{value = v})
+			case bool:   return register_type(reg, Literal_Bool_Type{value = v})
+			}
+		}
+	}
 	switch v in e.value {
 	case parser.Const_None:     return TYPE_NONE
 	case parser.Const_Ellipsis: return TYPE_ANY
@@ -400,6 +428,20 @@ infer_constant :: proc(e: ^parser.Constant_Expr) -> Type_ID {
 	case parser.Const_Bytes:    return TYPE_BYTES
 	}
 	return TYPE_UNKNOWN
+}
+
+// Check if a type contains Literal types (directly or as union members)
+_expected_has_literal :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
+	ti := get_type(reg, t)
+	#partial switch info in ti.info {
+	case Literal_Int_Type, Literal_Str_Type, Literal_Bool_Type:
+		return true
+	case Union_Type:
+		for m in info.members {
+			if _expected_has_literal(reg, m) { return true }
+		}
+	}
+	return false
 }
 
 // ==================== Name Inference ====================
@@ -486,6 +528,13 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 	case .Bit_Or:
 		if left_intlike && right_intlike { return TYPE_INT }
 		if is_set_type(reg, left) && is_set_type(reg, right) { return left }
+		// PEP 604: int | str → Union[int, str] (type objects use | for unions)
+		left_as_type := callable_to_primitive(left, reg)
+		right_as_type := callable_to_primitive(right, reg)
+		if left_as_type != TYPE_UNKNOWN && right_as_type != TYPE_UNKNOWN {
+			members := [2]Type_ID{left_as_type, right_as_type}
+			return make_union_type(reg, members[:])
+		}
 
 	case .Mat_Mult:
 		// Tensor @ Tensor → Tensor (shape validated in shape pass)
@@ -510,6 +559,28 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 	}
 
 	return TYPE_UNKNOWN // signals unsupported
+}
+
+// PEP 604: Map builtin constructor Callable_Types back to their primitive types.
+// int() → TYPE_INT, str() → TYPE_STR, etc. Also handles Class_Type references.
+callable_to_primitive :: proc(type_id: Type_ID, reg: ^Type_Registry) -> Type_ID {
+	// None is a valid union member: None | int = Optional[int]
+	if type_id == TYPE_NONE { return TYPE_NONE }
+	t := get_type(reg, type_id)
+	#partial switch info in t.info {
+	case Callable_Type:
+		// Builtin constructors: return_type IS the primitive
+		if info.return_type != TYPE_UNKNOWN && info.return_type != TYPE_ANY {
+			return info.return_type
+		}
+	case Class_Type:
+		// Direct class reference: int | str where operand resolved to class
+		return make_instance_type(reg, type_id)
+	case Union_Type:
+		// Chained PEP 604: (int | str) | None — left is already a union
+		return type_id
+	}
+	return TYPE_UNKNOWN
 }
 
 // ==================== Unary Operator Inference ====================
@@ -868,14 +939,20 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 				}
 			}
 		}
-		// Check for missing required fields (total=True by default)
-		if info.total {
+		// Check for missing required fields (per-field Required/NotRequired)
+		{
 			provided := make(map[string]bool, len(e.keywords), ctx.reg.allocator)
 			for kw in e.keywords {
 				provided[kw.arg] = true
 			}
 			for field_name in info.fields {
-				if !(field_name in provided) {
+				if field_name in provided { continue }
+				// Determine if field is required
+				is_required := info.total // default based on total=
+				if req_val, has_req := info.required_fields[field_name]; has_req {
+					is_required = req_val
+				}
+				if is_required {
 					emit_diagnostic(ctx, e.loc, "T004", .Error,
 						"Missing required TypedDict field",
 						fmt.aprintf("Missing required field '%s'", field_name,
@@ -1519,7 +1596,41 @@ check_match_stmt :: proc(s: ^parser.Match_Stmt, ctx: ^Infer_Context) {
 	}
 
 	// MATCH001: Non-exhaustive match
-	if !has_wildcard && len(s.cases) > 0 {
+	// Check if class patterns cover all union members before flagging
+	is_exhaustive := has_wildcard
+	if !is_exhaustive && len(consumed_class_types) > 0 {
+		st := get_type(ctx.reg, subject_type)
+		#partial switch union_info in st.info {
+		case Union_Type:
+			all_covered := true
+			for member in union_info.members {
+				covered := false
+				for consumed in consumed_class_types {
+					// Direct assignability check
+					if is_assignable(ctx.reg, member, consumed) || is_assignable(ctx.reg, consumed, member) {
+						covered = true
+						break
+					}
+					// Builtin class pattern: Instance_Type wrapping a Callable that returns the primitive
+					ct := get_type(ctx.reg, consumed)
+					#partial switch inst in ct.info {
+					case Instance_Type:
+						inner := get_type(ctx.reg, inst.class_type)
+						#partial switch callable in inner.info {
+						case Callable_Type:
+							if callable.return_type == member {
+								covered = true
+							}
+						}
+					}
+					if covered { break }
+				}
+				if !covered { all_covered = false; break }
+			}
+			if all_covered { is_exhaustive = true }
+		}
+	}
+	if !is_exhaustive && len(s.cases) > 0 {
 		emit_diagnostic(ctx, s.loc, "MATCH001", .Warning,
 			"Non-exhaustive match statement",
 			"Match may not handle all possible values of the subject",
@@ -1749,6 +1860,8 @@ try_typing_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> (Type_ID, 
 			return TYPE_ANY, true
 		case "TypedDict":
 			return handle_typeddict_call(e, ctx), true
+		case "NamedTuple":
+			return handle_namedtuple_call(e, ctx), true
 		case:
 			// Unknown typing form — infer args, don't error
 			for arg in e.args { infer_expr(arg, ctx) }
@@ -2012,6 +2125,73 @@ handle_typeddict_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type
 	}
 
 	return register_type(ctx.reg, TypedDict_Type{name = name, fields = fields, total = total})
+}
+
+// ==================== NamedTuple Functional Syntax ====================
+
+handle_namedtuple_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	name := ""
+	// First arg: name string
+	if len(e.args) >= 1 {
+		#partial switch arg in e.args[0] {
+		case ^parser.Constant_Expr:
+			if s, ok := arg.value.(string); ok {
+				name = s
+			}
+		}
+	}
+
+	attrs := make(map[string]Type_ID, 8, ctx.reg.allocator)
+	params := make([dynamic]Param_Type, 0, 8, ctx.reg.allocator)
+
+	// Keyword args: NamedTuple('Point', x=int, y=int)
+	for &kw in e.keywords {
+		if kw.arg == "" { continue }
+		field_type := resolve_annotation(kw.value, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		attrs[kw.arg] = field_type
+		append(&params, Param_Type{name = kw.arg, type_id = field_type})
+	}
+
+	// Second arg list form: NamedTuple('Point', [('x', int), ('y', int)])
+	if len(e.args) >= 2 && len(attrs) == 0 {
+		#partial switch arg in e.args[1] {
+		case ^parser.List_Expr:
+			for elt in arg.elts {
+				#partial switch tup in elt {
+				case ^parser.Tuple_Expr:
+					if len(tup.elts) >= 2 {
+						field_name := ""
+						#partial switch n in tup.elts[0] {
+						case ^parser.Constant_Expr:
+							if s, ok := n.value.(string); ok {
+								field_name = s
+							}
+						}
+						if len(field_name) > 0 {
+							field_type := resolve_annotation(tup.elts[1], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+							attrs[field_name] = field_type
+							append(&params, Param_Type{name = field_name, type_id = field_type})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Build __init__ method
+	init_type := make_callable_type(ctx.reg, params[:], TYPE_NONE)
+	attrs["__init__"] = init_type
+
+	// Register as Class_Type
+	scope_id := binder.INVALID_SCOPE
+	class_type_id := register_type(ctx.reg, Class_Type{
+		name      = name,
+		symbol_id = binder.INVALID_SYMBOL,
+		scope_id  = scope_id,
+		attrs     = attrs,
+	})
+
+	return class_type_id
 }
 
 // ==================== Generic Call Inference ====================

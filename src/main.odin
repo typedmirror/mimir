@@ -741,19 +741,87 @@ cmd_format :: proc(args: []string) {
 	}
 }
 
+// §28.4: Gradual adoption levels — filter diagnostics by analysis depth
+Analysis_Level :: enum {
+	Basic,      // Type errors mypy would catch. Minimal noise.
+	Inference,  // Deep inference, unannotated code analysis.
+	Security,   // Taint analysis, crypto, secrets, supply chain.
+	Strict,     // Everything including performance, style, safety.
+}
+
+// Check if a diagnostic should be emitted at the given level
+should_emit_at_level :: proc(code: string, level: Analysis_Level) -> bool {
+	if level == .Strict { return true }
+
+	// Basic: core type errors (T0xx) + flow errors (F0xx)
+	if strings.has_prefix(code, "T") || strings.has_prefix(code, "F") {
+		return true
+	}
+
+	if level == .Basic { return false }
+
+	// Inference: basic + dead code (D0xx) + constraint diagnostics
+	if strings.has_prefix(code, "D") {
+		return true
+	}
+
+	if level == .Inference { return false }
+
+	// Security: inference + security (SEC) + concurrency (CONC) + taint
+	if strings.has_prefix(code, "SEC") || strings.has_prefix(code, "CONC") {
+		return true
+	}
+
+	return false
+}
+
+// §28.3: Check if a diagnostic code is suppressed by an inline comment on the given line.
+// Supports: # mimir: ignore (suppress all) and # mimir: ignore[T001] or # mimir: ignore[T001, T002]
+is_line_suppressed :: proc(code: string, line_num: int, source_lines: []string) -> bool {
+	idx := line_num - 1
+	if idx < 0 || idx >= len(source_lines) { return false }
+	line := source_lines[idx]
+	marker_pos := strings.index(line, "# mimir: ignore")
+	if marker_pos < 0 { return false }
+	rest := line[marker_pos + len("# mimir: ignore"):]
+	if len(rest) == 0 { return true } // blanket suppress
+	if rest[0] == '[' {
+		end := strings.index(rest, "]")
+		if end > 0 {
+			codes_str := rest[1:end]
+			for part in strings.split(codes_str, ",") {
+				if strings.trim_space(part) == code { return true }
+			}
+		}
+	}
+	return false
+}
+
 cmd_check :: proc(args: []string) {
 	if len(args) == 0 {
 		fmt.eprintln("mimir check: no input path specified")
-		fmt.eprintln("Usage: mimir check <path>")
+		fmt.eprintln("Usage: mimir check [--level basic|inference|security|strict] <path>")
 		os.exit(1)
 	}
 
 	// Parse flags
 	sarif_mode := false
+	level := Analysis_Level.Strict  // default: everything
 	target := args[0]
 	for i := 0; i < len(args); i += 1 {
 		if args[i] == "--format" && i + 1 < len(args) {
 			if args[i + 1] == "sarif" { sarif_mode = true }
+			i += 1
+		} else if args[i] == "--level" && i + 1 < len(args) {
+			switch args[i + 1] {
+			case "basic":     level = .Basic
+			case "inference": level = .Inference
+			case "security":  level = .Security
+			case "strict":    level = .Strict
+			case:
+				fmt.eprintfln("mimir check: unknown level '%s' (use basic, inference, security, or strict)", args[i + 1])
+				os.exit(1)
+			}
 			i += 1
 		} else if !strings.has_prefix(args[i], "-") {
 			target = args[i]
@@ -764,6 +832,20 @@ cmd_check :: proc(args: []string) {
 	if !ok { return }
 	defer pipeline_stop(&p)
 
+	// Read level from mimir.toml if not set by CLI flag
+	if level == .Strict {
+		// .Strict is the default — check if mimir.toml overrides it
+		config, config_err := platform.read_config("mimir.toml", p.arena.allocator)
+		if config_err == nil && len(config.analysis_level) > 0 {
+			switch config.analysis_level {
+			case "basic":     level = .Basic
+			case "inference": level = .Inference
+			case "security":  level = .Security
+			case "strict":    // already default
+			}
+		}
+	}
+
 	// SARIF mode: collect all diagnostics, emit JSON at end
 	sarif_diags: [dynamic]core.Diagnostic
 	if sarif_mode { sarif_diags = make([dynamic]core.Diagnostic, 0, 32, p.arena.allocator) }
@@ -771,10 +853,10 @@ cmd_check :: proc(args: []string) {
 	// Single file: fast path (existing behavior)
 	errors := 0
 	if len(p.files) == 1 {
-		errors = cmd_check_single(p.files[0], &p.bridge, &p.arena, sarif_mode ? &sarif_diags : nil)
+		errors = cmd_check_single(p.files[0], &p.bridge, &p.arena, sarif_mode ? &sarif_diags : nil, level)
 	} else {
 		// Multi-module: shared registry + module graph
-		errors = cmd_check_multi(target, p.files, &p.bridge, &p.arena)
+		errors = cmd_check_multi(target, p.files, &p.bridge, &p.arena, level)
 	}
 
 	if sarif_mode {
@@ -790,6 +872,7 @@ cmd_check_single :: proc(
 	bridge: ^parser.Bridge,
 	arena: ^core.Analysis_Arena,
 	sarif_diags: ^[dynamic]core.Diagnostic = nil,
+	level: Analysis_Level = .Strict,
 ) -> int {
 	error_count := 0
 
@@ -806,7 +889,13 @@ cmd_check_single :: proc(
 		return 1
 	}
 
-	_emit_diag :: proc(d: core.Diagnostic, error_count: ^int, sarif_diags: ^[dynamic]core.Diagnostic) {
+	// Read source for §28.3 inline suppression
+	source_data, _ := os.read_entire_file(file, arena.allocator)
+	source_lines := strings.split(string(source_data), "\n")
+
+	_emit_diag :: proc(d: core.Diagnostic, error_count: ^int, sarif_diags: ^[dynamic]core.Diagnostic, level: Analysis_Level, source_lines: []string) {
+		if !should_emit_at_level(d.code, level) { return }
+		if is_line_suppressed(d.code, d.location.line, source_lines) { return }
 		if sarif_diags != nil {
 			append(sarif_diags, d)
 		} else {
@@ -817,25 +906,25 @@ cmd_check_single :: proc(
 
 	bind_result := binder.bind(module, file, arena.allocator)
 	for d in bind_result.diagnostics {
-		_emit_diag(d, &error_count, sarif_diags)
+		_emit_diag(d, &error_count, sarif_diags, level, source_lines)
 	}
 
 	flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
-	for d in flow_result.diagnostics {
-		_emit_diag(d, &error_count, sarif_diags)
-	}
 
 	check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+
+	// Emit flow diagnostics AFTER checker (checker may suppress F002 for Never-returning calls)
+	for d in flow_result.diagnostics {
+		_emit_diag(d, &error_count, sarif_diags, level, source_lines)
+	}
 	for d in check_result.diagnostics {
-		_emit_diag(d, &error_count, sarif_diags)
+		_emit_diag(d, &error_count, sarif_diags, level, source_lines)
 	}
 
-	// Concurrency analysis
-	source_data, src_err := os.read_entire_file(file, arena.allocator)
-	source_str := string(source_data) if src_err == nil else ""
-	conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, source_str, file, arena.allocator)
+	// Concurrency analysis (reuse already-read source)
+	conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, string(source_data), file, arena.allocator)
 	for d in conc_diagnostics {
-		_emit_diag(d, &error_count, sarif_diags)
+		_emit_diag(d, &error_count, sarif_diags, level, source_lines)
 	}
 
 	if sarif_diags == nil {
@@ -861,6 +950,7 @@ cmd_check_multi :: proc(
 	files: []string,
 	bridge: ^parser.Bridge,
 	arena: ^core.Analysis_Arena,
+	level: Analysis_Level = .Strict,
 ) -> int {
 	// 1. Init shared registry + builtins
 	registry := checker.init_registry(arena.allocator)
@@ -912,8 +1002,14 @@ cmd_check_multi :: proc(
 		info, ok := graph.modules[name]
 		if !ok || info.parse_result == nil { continue }
 
+		// Read source for inline suppression
+		mod_source, _ := os.read_entire_file(info.file_path, arena.allocator)
+		mod_lines := strings.split(string(mod_source), "\n")
+
 		// Report binder diagnostics
 		for d in info.bind_result.diagnostics {
+			if !should_emit_at_level(d.code, level) { continue }
+			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
 			core.diagnostic_print(d)
 			if d.severity == .Error { error_count += 1 }
 		}
@@ -924,6 +1020,8 @@ cmd_check_multi :: proc(
 		// b. Flow analysis
 		flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, arena.allocator)
 		for d in flow_result.diagnostics {
+			if !should_emit_at_level(d.code, level) { continue }
+			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
 			core.diagnostic_print(d)
 			if d.severity == .Error { error_count += 1 }
 		}
@@ -933,16 +1031,19 @@ cmd_check_multi :: proc(
 			info.parse_result, &info.bind_result, &flow_result,
 			info.file_path, &registry, &builtins, import_types, arena.allocator)
 		for d in check_result.diagnostics {
+			if !should_emit_at_level(d.code, level) { continue }
+			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
 			core.diagnostic_print(d)
 			if d.severity == .Error { error_count += 1 }
 		}
 
-		// d. Concurrency analysis
-		conc_source_data, conc_src_err := os.read_entire_file(info.file_path, arena.allocator)
-		conc_source := string(conc_source_data) if conc_src_err == nil else ""
+		// d. Concurrency analysis (reuse already-read source)
+		conc_source := string(mod_source)
 		conc_diagnostics := concurrency.analyze_concurrency(
 			info.parse_result, &info.bind_result, conc_source, info.file_path, arena.allocator)
 		for d in conc_diagnostics {
+			if !should_emit_at_level(d.code, level) { continue }
+			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
 			core.diagnostic_print(d)
 			if d.severity == .Error { error_count += 1 }
 		}

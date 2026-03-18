@@ -123,9 +123,10 @@ TypeVar_Type :: struct {
 }
 
 TypedDict_Type :: struct {
-	name:   string,
-	fields: map[string]Type_ID,
-	total:  bool,
+	name:            string,
+	fields:          map[string]Type_ID,
+	total:           bool,
+	required_fields: map[string]bool,  // per-field override: Required[T] = true, NotRequired[T] = false
 }
 
 Protocol_Type :: struct {
@@ -196,6 +197,7 @@ Type_Registry :: struct {
 	actor_ref_class:         Type_ID,  // ActorRef Class_Type (for specialization)
 	actor_ref_cache:         map[[2]Type_ID]Type_ID,  // [msg_type, ret_type] → specialized ActorRef Instance_Type
 	typeguard_targets:       map[binder.Symbol_ID]Type_ID,  // func sym → TypeGuard[T] target type
+	current_resolve_class:   Type_ID,  // Set during class scope processing for Self resolution
 	allocator:      mem.Allocator,
 }
 
@@ -424,14 +426,23 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	if _, src_is_tv := src_type.info.(TypeVar_Type); src_is_tv { return true }
 	if _, tgt_is_tv := tgt_type.info.(TypeVar_Type); tgt_is_tv { return true }
 
-	// Literal <: base type
-	#partial switch _ in src_type.info {
+	// Literal <: base type, Literal <: matching Literal
+	#partial switch src_lit in src_type.info {
 	case Literal_Int_Type:
 		if target == TYPE_INT || target == TYPE_FLOAT { return true }
+		#partial switch tgt_lit in tgt_type.info {
+		case Literal_Int_Type: return src_lit.value == tgt_lit.value
+		}
 	case Literal_Str_Type:
 		if target == TYPE_STR { return true }
+		#partial switch tgt_lit in tgt_type.info {
+		case Literal_Str_Type: return src_lit.value == tgt_lit.value
+		}
 	case Literal_Bool_Type:
 		if target == TYPE_BOOL || target == TYPE_INT || target == TYPE_FLOAT { return true }
+		#partial switch tgt_lit in tgt_type.info {
+		case Literal_Bool_Type: return src_lit.value == tgt_lit.value
+		}
 	}
 
 	// Source union: all members must be assignable to target
@@ -513,6 +524,15 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		#partial switch tgt in tgt_type.info {
 		case Instance_Type:
 			return is_class_subtype(reg, src.class_type, tgt.class_type)
+		}
+	}
+
+	// Class object subtyping: type[Dog] <: type[Animal] when Dog inherits Animal
+	#partial switch _ in src_type.info {
+	case Class_Type:
+		#partial switch _ in tgt_type.info {
+		case Class_Type:
+			return is_class_subtype(reg, source, target)
 		}
 	}
 

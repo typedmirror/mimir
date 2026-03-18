@@ -291,14 +291,14 @@ collect_scope_constraints :: proc(
 	envs: []Type_Env,
 	expr_types: ^map[rawptr]Type_ID,
 	symbol_types: ^map[binder.Symbol_ID]Type_ID,
-	unknown_params: []binder.Symbol_ID,
+	unknown_symbols: []binder.Symbol_ID,
 	allocator: mem.Allocator,
 ) -> Constraint_Set {
 	cs := init_constraint_set(allocator)
 
-	// Build lookup set for unknown params
-	unknown_syms := make(map[binder.Symbol_ID]bool, len(unknown_params), allocator)
-	for sym_id in unknown_params {
+	// Build lookup set for unknown symbols (params + locals)
+	unknown_syms := make(map[binder.Symbol_ID]bool, len(unknown_symbols), allocator)
+	for sym_id in unknown_symbols {
 		unknown_syms[sym_id] = true
 		get_or_create_var(&cs, sym_id, cfg.scope_id, TYPE_UNKNOWN)
 	}

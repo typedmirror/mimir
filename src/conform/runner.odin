@@ -86,14 +86,16 @@ run_conform_file :: proc(
 
 		// Flow
 		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
+
+		// Check (may suppress F002 in flow_result for Never-returning calls)
+		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+
+		// Collect flow diagnostics AFTER checker (F002 suppression applies)
 		for d in flow_result.diagnostics {
 			if d.severity == .Error {
 				error_lines[d.location.line] = true
 			}
 		}
-
-		// Check
-		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
 		for d in check_result.diagnostics {
 			if d.severity == .Error {
 				error_lines[d.location.line] = true

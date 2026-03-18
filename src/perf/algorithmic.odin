@@ -195,3 +195,76 @@ check_expr_list_comp :: proc(ctx: ^Perf_Context, expr: parser.Expr) {
 		})
 	}
 }
+
+// PERF009 — sorted(sorted(x)) or sorted(list.sort()) — redundant double sort
+check_redundant_sorted :: proc(ctx: ^Perf_Context) {
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			pctx := cast(^Perf_Context)raw_ctx
+			call, ok := expr.(^parser.Call_Expr)
+			if !ok { return }
+			// Check: sorted(sorted(x)) or sorted(x.sort())
+			name, name_ok := call.func.(^parser.Name_Expr)
+			if !name_ok || name.id != "sorted" { return }
+			if len(call.args) < 1 { return }
+			// Inner is sorted(...)
+			if inner_call, ic_ok := call.args[0].(^parser.Call_Expr); ic_ok {
+				if inner_name, in_ok := inner_call.func.(^parser.Name_Expr); in_ok {
+					if inner_name.id == "sorted" {
+						append(&pctx.diagnostics, core.Diagnostic{
+							severity = .Warning,
+							location = core.Location{
+								file   = pctx.file_path,
+								line   = int(call.loc.line),
+								column = int(call.loc.col),
+							},
+							what = "redundant double sort: sorted(sorted(x))",
+							why  = "the inner sorted() already produces a sorted list — the outer sorted() is wasteful",
+							fix  = "remove the outer sorted() call",
+							code = "PERF009",
+						})
+					}
+				}
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
+}
+
+// PERF010 — list([x for x in ...]) wrapping a list comprehension
+check_list_wrap_comp :: proc(ctx: ^Perf_Context) {
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			pctx := cast(^Perf_Context)raw_ctx
+			call, ok := expr.(^parser.Call_Expr)
+			if !ok { return }
+			name, name_ok := call.func.(^parser.Name_Expr)
+			if !name_ok { return }
+			if name.id != "list" && name.id != "set" && name.id != "tuple" { return }
+			if len(call.args) != 1 { return }
+			// Check if arg is a list/set comprehension
+			is_comp := false
+			#partial switch _ in call.args[0] {
+			case ^parser.List_Comp: is_comp = true
+			case ^parser.Set_Comp:  is_comp = true
+			}
+			if is_comp {
+				append(&pctx.diagnostics, core.Diagnostic{
+					severity = .Warning,
+					location = core.Location{
+						file   = pctx.file_path,
+						line   = int(call.loc.line),
+						column = int(call.loc.col),
+					},
+					what = fmt.tprintf("%s() wrapping a comprehension is redundant", name.id),
+					why  = "the comprehension already produces the target type — wrapping in list()/set() copies unnecessarily",
+					fix  = "use the comprehension directly without the wrapper call",
+					code = "PERF010",
+				})
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
+}

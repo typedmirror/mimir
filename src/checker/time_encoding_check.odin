@@ -53,6 +53,9 @@ analyze_time_encoding :: proc(
 
 	if !has_datetime && !has_hashlib && !has_hmac { return }
 
+	// Analyze module-level body
+	analyze_te_in_body(module.body, file_path, diagnostics, expr_types, has_datetime, has_hashlib, has_hmac, allocator)
+
 	// Analyze each function body independently
 	for stmt in module.body {
 		#partial switch s in stmt {
@@ -60,6 +63,15 @@ analyze_time_encoding :: proc(
 			analyze_te_in_body(s.body, file_path, diagnostics, expr_types, has_datetime, has_hashlib, has_hmac, allocator)
 		case ^parser.Async_Func_Def:
 			analyze_te_in_body(s.body, file_path, diagnostics, expr_types, has_datetime, has_hashlib, has_hmac, allocator)
+		case ^parser.Class_Def:
+			for ms in s.body {
+				#partial switch m in ms {
+				case ^parser.Func_Def:
+					analyze_te_in_body(m.body, file_path, diagnostics, expr_types, has_datetime, has_hashlib, has_hmac, allocator)
+				case ^parser.Async_Func_Def:
+					analyze_te_in_body(m.body, file_path, diagnostics, expr_types, has_datetime, has_hashlib, has_hmac, allocator)
+				}
+			}
 		}
 	}
 }
@@ -172,11 +184,14 @@ classify_datetime_call :: proc(call: ^parser.Call_Expr) -> Datetime_Kind {
 	return .Unknown
 }
 
-// Check if call base is "datetime" (either datetime.now or datetime.datetime.now)
+// Check if call base is datetime-like (datetime.now, dt.now, datetime.datetime.now)
 get_datetime_base :: proc(attr: ^parser.Attribute_Expr) -> string {
-	// datetime.now() — base is Name_Expr "datetime"
+	// datetime.now() or dt.now() — base is Name_Expr
 	if name, ok := attr.value.(^parser.Name_Expr); ok {
-		if name.id == "datetime" { return "datetime" }
+		// Accept "datetime" and common aliases (dt, DT)
+		if name.id == "datetime" || name.id == "dt" || name.id == "DT" {
+			return "datetime"
+		}
 	}
 
 	// datetime.datetime.now() — base is Attribute_Expr(datetime, "datetime")

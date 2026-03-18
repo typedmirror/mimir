@@ -13,6 +13,8 @@ import core   "mimir:core"
 //
 // Diagnostics:
 //   PROC001 — Shared mutable state in multiprocessing: module-level mutable
+//   PROC002 — Unpicklable target in multiprocessing: lambda, nested function,
+//             or generator used as Pool.map/apply target (§22.3)
 //             (dict, list, set) modified in a function that's used as a
 //             multiprocessing target. Each process gets a copy — mutations
 //             are not shared.
@@ -35,6 +37,9 @@ analyze_crossproc :: proc(
 		}
 	}
 	if !has_mp { return }
+
+	// §22.3: Check for unpicklable targets (lambda, nested functions)
+	check_unpicklable_targets(module, bind_result, file_path, diagnostics, allocator)
 
 	// Phase 1: collect module-level mutable variables (dict, list, set literals)
 	module_mutables := make(map[string]parser.Src_Loc, 8, allocator)
@@ -78,6 +83,7 @@ analyze_crossproc :: proc(
 			}
 		}
 	}
+
 }
 
 _is_mutable_literal :: proc(expr: parser.Expr) -> bool {
@@ -186,5 +192,132 @@ _check_mp_call :: proc(
 			why  = "each worker process gets its own copy of module-level data — mutations are not shared between processes",
 			fix  = "use multiprocessing.Manager().dict() or multiprocessing.Queue for shared state",
 		})
+	}
+}
+
+// §22.3: PROC002 — detect unpicklable objects as multiprocessing targets
+check_unpicklable_targets :: proc(
+	module: ^parser.Module,
+	bind_result: ^binder.Bind_Result,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	allocator: mem.Allocator,
+) {
+	// Check for multiprocessing import
+	has_mp := false
+	for &imp in bind_result.imports {
+		if imp.module_name == "multiprocessing" || imp.module_name == "concurrent.futures" {
+			has_mp = true
+			break
+		}
+	}
+	if !has_mp { return }
+
+	// Collect nested function names (defined inside other functions)
+	nested_funcs := make(map[string]bool, 8, allocator)
+	_find_nested_funcs(module.body, &nested_funcs, false)
+
+	// Scan for Pool.map/apply calls with lambda or nested function targets
+	_scan_for_unpicklable(module.body, nested_funcs, file_path, diagnostics, allocator)
+}
+
+_find_nested_funcs :: proc(stmts: []parser.Stmt, nested: ^map[string]bool, in_func: bool) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			if in_func {
+				nested[s.name] = true
+			}
+			_find_nested_funcs(s.body, nested, true)
+		case ^parser.Class_Def:
+			_find_nested_funcs(s.body, nested, in_func)
+		case ^parser.If_Stmt:
+			_find_nested_funcs(s.body, nested, in_func)
+			_find_nested_funcs(s.orelse, nested, in_func)
+		case ^parser.For_Stmt:
+			_find_nested_funcs(s.body, nested, in_func)
+		}
+	}
+}
+
+_scan_for_unpicklable :: proc(
+	stmts: []parser.Stmt,
+	nested_funcs: map[string]bool,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	allocator: mem.Allocator,
+) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			_check_unpicklable_call(s.value, nested_funcs, file_path, diagnostics)
+		case ^parser.Assign:
+			if s.value != nil {
+				_check_unpicklable_call(s.value, nested_funcs, file_path, diagnostics)
+			}
+		case ^parser.Func_Def:
+			_scan_for_unpicklable(s.body, nested_funcs, file_path, diagnostics, allocator)
+		case ^parser.If_Stmt:
+			_scan_for_unpicklable(s.body, nested_funcs, file_path, diagnostics, allocator)
+			_scan_for_unpicklable(s.orelse, nested_funcs, file_path, diagnostics, allocator)
+		case ^parser.For_Stmt:
+			_scan_for_unpicklable(s.body, nested_funcs, file_path, diagnostics, allocator)
+		}
+	}
+}
+
+_check_unpicklable_call :: proc(
+	expr: parser.Expr,
+	nested_funcs: map[string]bool,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+) {
+	if expr == nil { return }
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return }
+
+	attr, attr_ok := call.func.(^parser.Attribute_Expr)
+	if !attr_ok { return }
+
+	is_pool_method := false
+	for m in PROC_TARGET_METHODS {
+		if attr.attr == m { is_pool_method = true; break }
+	}
+	if !is_pool_method { return }
+	if len(call.args) < 1 { return }
+
+	// Check if first arg is a lambda
+	if _, is_lambda := call.args[0].(^parser.Lambda_Expr); is_lambda {
+		append(diagnostics, core.Diagnostic{
+			severity = .Error,
+			location = core.Location{
+				file   = file_path,
+				line   = int(call.loc.line),
+				column = int(call.loc.col),
+			},
+			code = "PROC002",
+			what = "lambda used as multiprocessing target — cannot be pickled",
+			why  = "multiprocessing sends functions to worker processes via pickle, but lambda functions are not picklable",
+			fix  = "define a top-level named function instead of a lambda",
+		})
+		return
+	}
+
+	// Check if first arg is a nested function
+	if name, is_name := call.args[0].(^parser.Name_Expr); is_name {
+		if name.id in nested_funcs {
+			append(diagnostics, core.Diagnostic{
+				severity = .Error,
+				location = core.Location{
+					file   = file_path,
+					line   = int(call.loc.line),
+					column = int(call.loc.col),
+				},
+				code = "PROC002",
+				what = fmt.tprintf("nested function '%s' used as multiprocessing target — cannot be pickled", name.id),
+				why  = "multiprocessing sends functions to worker processes via pickle, but locally-defined functions are not picklable",
+				fix  = "move the function to module level",
+			})
+		}
 	}
 }

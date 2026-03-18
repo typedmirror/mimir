@@ -271,3 +271,131 @@ is_sensitive_name :: proc(name: string) -> bool {
 	}
 	return false
 }
+
+// ==================== SAF011: Mutable Class Variable ====================
+// Class-level mutable assignments (list, dict, set) are shared across all instances.
+
+check_mutable_class_var :: proc(ctx: ^Safety_Context) {
+	visitor := core.AST_Visitor{
+		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+			sctx := cast(^Safety_Context)raw_ctx
+			#partial switch s in stmt {
+			case ^parser.Class_Def:
+				for body_stmt in s.body {
+					#partial switch bs in body_stmt {
+					case ^parser.Assign:
+						if len(bs.targets) == 1 {
+							if name, ok := bs.targets[0].(^parser.Name_Expr); ok {
+								if _is_mutable_value(bs.value) {
+									append(&sctx.diagnostics, core.Diagnostic{
+										severity = .Warning,
+										location = core.Location{
+											file   = sctx.file_path,
+											line   = int(bs.loc.line),
+											column = int(bs.loc.col),
+										},
+										what = fmt.tprintf("mutable class variable '%s' is shared across all instances", name.id),
+										why  = "list, dict, and set class variables are shared — mutations in one instance affect all others",
+										fix  = fmt.tprintf("initialize in __init__: self.%s = %s", name.id, _mutable_type_hint(bs.value)),
+										code = "SAF011",
+									})
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
+}
+
+_is_mutable_value :: proc(expr: parser.Expr) -> bool {
+	if expr == nil { return false }
+	#partial switch _ in expr {
+	case ^parser.List_Expr: return true
+	case ^parser.Dict_Expr: return true
+	case ^parser.Set_Expr:  return true
+	}
+	if call, ok := expr.(^parser.Call_Expr); ok {
+		if name, nok := call.func.(^parser.Name_Expr); nok {
+			return name.id == "list" || name.id == "dict" || name.id == "set"
+		}
+	}
+	return false
+}
+
+_mutable_type_hint :: proc(expr: parser.Expr) -> string {
+	if expr == nil { return "[]" }
+	#partial switch _ in expr {
+	case ^parser.List_Expr: return "[]"
+	case ^parser.Dict_Expr: return "{}"
+	case ^parser.Set_Expr:  return "set()"
+	}
+	return "[]"
+}
+
+// ==================== SAF012: open() Without Context Manager ====================
+// open() at module level or in function body without 'with' statement.
+
+check_open_without_with :: proc(ctx: ^Safety_Context) {
+	// Scan function bodies for open() calls not inside with blocks
+	for stmt in ctx.module.body {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			_check_open_in_body(s.body, ctx, false)
+		case ^parser.Async_Func_Def:
+			_check_open_in_body(s.body, ctx, false)
+		// Module level open() is already caught by SAF003 (import side effect)
+		}
+	}
+}
+
+_check_open_in_body :: proc(stmts: []parser.Stmt, ctx: ^Safety_Context, in_with: bool) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			if !in_with && s.value != nil && _is_open_call(s.value) {
+				append(&ctx.diagnostics, core.Diagnostic{
+					severity = .Warning,
+					location = core.Location{
+						file   = ctx.file_path,
+						line   = int(s.loc.line),
+						column = int(s.loc.col),
+					},
+					what = "open() without context manager",
+					why  = "file handles opened without 'with' may not be closed on exceptions, causing resource leaks",
+					fix  = "use 'with open(...) as f:' to ensure the file is closed",
+					code = "SAF012",
+				})
+			}
+		case ^parser.With_Stmt:
+			_check_open_in_body(s.body, ctx, true)
+		case ^parser.Async_With:
+			_check_open_in_body(s.body, ctx, true)
+		case ^parser.If_Stmt:
+			_check_open_in_body(s.body, ctx, in_with)
+			_check_open_in_body(s.orelse, ctx, in_with)
+		case ^parser.For_Stmt:
+			_check_open_in_body(s.body, ctx, in_with)
+		case ^parser.While_Stmt:
+			_check_open_in_body(s.body, ctx, in_with)
+		case ^parser.Try_Stmt:
+			// open() inside try is tolerated — exception handling serves as cleanup
+			_check_open_in_body(s.body, ctx, true)
+			for h in s.handlers { _check_open_in_body(h.body, ctx, in_with) }
+			_check_open_in_body(s.orelse, ctx, in_with)
+			_check_open_in_body(s.finalbody, ctx, in_with)
+		}
+	}
+}
+
+_is_open_call :: proc(expr: parser.Expr) -> bool {
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return false }
+	if name, nok := call.func.(^parser.Name_Expr); nok {
+		return name.id == "open"
+	}
+	return false
+}

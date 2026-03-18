@@ -17,6 +17,8 @@ ALL_RULES := [?]Perf_Rule{
 	{code = "PERF006", name = "unbounded-cache",             check = check_unbounded_cache},
 	{code = "PERF007", name = "heavy-import",                check = check_heavy_import},
 	{code = "PERF008", name = "stale-cache",                 check = check_stale_cache},
+	{code = "PERF009", name = "redundant-sorted",            check = check_redundant_sorted},
+	{code = "PERF010", name = "list-wrapping-comprehension", check = check_list_wrap_comp},
 }
 
 is_rule_enabled :: proc(code: string, config: ^Perf_Config) -> bool {

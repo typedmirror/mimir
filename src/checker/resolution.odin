@@ -779,9 +779,24 @@ resolve_constraints_with_callers :: proc(
 				// Body intersection was empty — use caller type
 				result[var_info.symbol_id] = caller_type
 				continue
+			} else {
+				// Caller type not literally in candidates — check compatibility.
+				// Caller provides a SPECIFIC type (e.g., list[str]) while body
+				// constraints produce GENERIC candidates (e.g., list[Any]).
+				// If caller is assignable to any candidate, it's a valid specialization.
+				caller_compatible := false
+				for t in candidates {
+					if is_assignable(reg, caller_type, t) || is_assignable(reg, t, caller_type) {
+						caller_compatible = true
+						break
+					}
+				}
+				if caller_compatible {
+					result[var_info.symbol_id] = caller_type
+					continue
+				}
 			}
-			// Caller type not in body candidates — conflict detected
-			// Body usage is authoritative, but record the conflict
+			// True conflict — caller type is incompatible with all body candidates
 			if conflicts != nil {
 				body_types := make([dynamic]Type_ID, 0, len(candidates), allocator)
 				for t in candidates { append(&body_types, t) }
@@ -833,36 +848,249 @@ resolve_constraints_with_callers :: proc(
 	return result
 }
 
+// ==================== §3.4 Call-Site Specialization ====================
+
+// Per-call-site information for usage-based generic specialization.
+// Records the actual arg types at each call to an unannotated function.
+Call_Site_Info :: struct {
+	call_expr:    rawptr,           // ptr to Call_Expr (key into expr_types)
+	callee_scope: binder.Scope_ID,  // function scope being called
+	arg_types:    []Type_ID,        // actual arg types (indexed by param position)
+}
+
+// Hash (scope_id, arg_types) for specialization cache key.
+hash_type_pattern :: proc(scope_id: binder.Scope_ID, arg_types: []Type_ID) -> u64 {
+	h: u64 = u64(scope_id) * 2654435761
+	for t, i in arg_types {
+		h ~= u64(t) * (u64(i) * 31 + 7)
+	}
+	return h
+}
+
+// Collect per-call-site info for functions with body-inferred returns.
+// Runs AFTER convergence loop to use final expr_types (most accurate arg types).
+collect_call_sites :: proc(
+	result: ^Check_Result,
+	bind_result: ^binder.Bind_Result,
+	flow_result: ^flow.Flow_Result,
+	sym_to_scope: ^map[binder.Symbol_ID]binder.Scope_ID,
+	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
+	reg: ^Type_Registry,
+	allocator: mem.Allocator,
+) -> [dynamic]Call_Site_Info {
+	sites := make([dynamic]Call_Site_Info, 0, 16, allocator)
+
+	ctx := Call_Site_Collect_Ctx{
+		result        = result,
+		bind_result   = bind_result,
+		sym_to_scope  = sym_to_scope,
+		func_args_map = func_args_map,
+		reg           = reg,
+		sites         = &sites,
+		allocator     = allocator,
+	}
+
+	visitor := core.AST_Visitor{
+		visit_expr = collect_call_site_visitor,
+		ctx        = rawptr(&ctx),
+	}
+
+	for &cfg in flow_result.cfgs {
+		for &block in cfg.blocks {
+			if !block.is_reachable { continue }
+			for stmt in block.stmts {
+				core.walk_stmt(&visitor, stmt)
+			}
+		}
+	}
+
+	return sites
+}
+
+collect_call_site_visitor :: proc(expr: parser.Expr, raw_ctx: rawptr) {
+	if expr == nil { return }
+	ctx := cast(^Call_Site_Collect_Ctx)raw_ctx
+	call, is_call := expr.(^parser.Call_Expr)
+	if !is_call { return }
+
+	callee_scope: binder.Scope_ID
+	callee_args: ^parser.Arguments
+	self_offset := 0
+
+	// Resolve callee — Name_Expr direct call
+	if name, is_name := call.func.(^parser.Name_Expr); is_name {
+		func_sym, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name))
+		if !ref_ok { return }
+		// Skip overloaded functions — they use overload resolution, not specialization
+		if func_sym in ctx.reg.overload_sigs { return }
+		scope, has_scope := ctx.sym_to_scope[func_sym]
+		if !has_scope { return }
+		args, has_args := ctx.func_args_map[scope]
+		if !has_args || args == nil { return }
+		callee_scope = scope
+		callee_args = args
+	} else if attr, is_attr := call.func.(^parser.Attribute_Expr); is_attr {
+		// Attribute_Expr method call
+		obj_type, has_obj := ctx.result.expr_types[expr_to_rawptr(attr.value)]
+		if !has_obj { return }
+		class_type_id := TYPE_UNKNOWN
+		t := get_type(ctx.reg, obj_type)
+		#partial switch info in t.info {
+		case Instance_Type: class_type_id = info.class_type
+		case Class_Type:    class_type_id = obj_type
+		}
+		if class_type_id == TYPE_UNKNOWN { return }
+		ct := get_type(ctx.reg, class_type_id)
+		#partial switch cls in ct.info {
+		case Class_Type:
+			if cls.scope_id == binder.INVALID_SCOPE { return }
+			class_scope := binder.result_get_scope(ctx.bind_result, cls.scope_id)
+			if class_scope == nil { return }
+			method_sym, has_method := class_scope.symbols[attr.attr]
+			if !has_method { return }
+			method_scope, has_scope := ctx.sym_to_scope[method_sym]
+			if !has_scope { return }
+			args, has_args := ctx.func_args_map[method_scope]
+			if !has_args || args == nil { return }
+			callee_scope = method_scope
+			callee_args = args
+			self_offset = 1
+		}
+		if callee_scope == binder.INVALID_SCOPE { return }
+	} else {
+		return
+	}
+
+	// Only care about functions with body-inferred returns (not annotated).
+	// Two signals: (1) scope in inferred_returns (convergence produced a return), or
+	// (2) callable return type is still TYPE_UNKNOWN (convergence didn't run/failed).
+	// Skip functions with annotated return types — TypeVar machinery handles those.
+	if callee_scope not_in ctx.result.inferred_returns {
+		// Not in inferred_returns — check if return is still unknown
+		func_type_id := TYPE_UNKNOWN
+		if name, is_name := call.func.(^parser.Name_Expr); is_name {
+			if sym, ok := binder.get_ref(ctx.bind_result, rawptr(name)); ok {
+				if ft, has := ctx.result.symbol_types[sym]; has {
+					func_type_id = ft
+				}
+			}
+		}
+		if func_type_id != TYPE_UNKNOWN {
+			ft := get_type(ctx.reg, func_type_id)
+			#partial switch info in ft.info {
+			case Callable_Type:
+				if info.return_type != TYPE_UNKNOWN { return }
+			}
+		}
+	}
+
+	// Build arg type array for this specific call
+	n_posonly := len(callee_args.posonlyargs)
+	n_params := n_posonly + len(callee_args.args)
+	arg_types := make([]Type_ID, n_params, ctx.allocator)
+
+	// Positional args
+	for arg, i in call.args {
+		param_idx := i + self_offset
+		if param_idx >= n_params { break }
+		if arg_type, has_type := ctx.result.expr_types[expr_to_rawptr(arg)]; has_type {
+			arg_types[param_idx] = arg_type
+		}
+	}
+
+	// Keyword args
+	for &kw in call.keywords {
+		if kw.arg == "" { continue }
+		kw_type, has_kw := ctx.result.expr_types[expr_to_rawptr(kw.value)]
+		if !has_kw { continue }
+		found_idx := -1
+		idx := 0
+		for &param in callee_args.posonlyargs {
+			if param.arg == kw.arg { found_idx = idx; break }
+			idx += 1
+		}
+		if found_idx == -1 {
+			for &param in callee_args.args {
+				if param.arg == kw.arg { found_idx = idx; break }
+				idx += 1
+			}
+		}
+		if found_idx != -1 && found_idx < n_params {
+			arg_types[found_idx] = kw_type
+		}
+	}
+
+	append(ctx.sites, Call_Site_Info{
+		call_expr    = rawptr(call),
+		callee_scope = callee_scope,
+		arg_types    = arg_types,
+	})
+}
+
+Call_Site_Collect_Ctx :: struct {
+	result:        ^Check_Result,
+	bind_result:   ^binder.Bind_Result,
+	sym_to_scope:  ^map[binder.Symbol_ID]binder.Scope_ID,
+	func_args_map: ^map[binder.Scope_ID]^parser.Arguments,
+	reg:           ^Type_Registry,
+	sites:         ^[dynamic]Call_Site_Info,
+	allocator:     mem.Allocator,
+}
+
 // ==================== Integration Helpers ====================
 
-// Find parameters that forward inference left as TYPE_UNKNOWN
-find_unknown_params :: proc(
+// Find symbols that forward inference left as TYPE_UNKNOWN.
+// Includes params (checked at entry block) and locals (checked across all visited blocks).
+// §3.1-3.2: constraints should be collected for every expression, not just params.
+find_unknown_symbols :: proc(
 	cfg: ^flow.CFG,
 	scope: ^binder.Scope,
 	envs: []Type_Env,
 	bind_result: ^binder.Bind_Result,
 	reg: ^Type_Registry,
+	visited: []bool,
 ) -> [dynamic]binder.Symbol_ID {
 	result := make([dynamic]binder.Symbol_ID, 0, 8, reg.allocator)
 	if scope == nil { return result }
 	if scope.kind != .Function && scope.kind != .Lambda { return result }
 
+	n_blocks := len(envs)
+	entry_idx := int(cfg.entry) - 1
+
 	for name, sym_id in scope.symbols {
 		sym := binder.result_get_symbol(bind_result, sym_id)
 		if sym == nil { continue }
-		if .Is_Param not_in sym.flags { continue }
 		if name == "self" || name == "cls" { continue }
+		// Skip functions, classes, imports — they get types from definitions
+		if sym.kind == .Function || sym.kind == .Class || sym.kind == .Import { continue }
 
-		// Check if param type is UNKNOWN in the entry block env
-		entry_idx := int(cfg.entry) - 1
-		if entry_idx < 0 || entry_idx >= len(envs) { continue }
-
-		entry_type := TYPE_UNKNOWN
-		if t, ok := envs[entry_idx].types[sym_id]; ok {
-			entry_type = t
-		}
-		if entry_type == TYPE_UNKNOWN {
-			append(&result, sym_id)
+		if .Is_Param in sym.flags {
+			// Params: check entry block env (original behavior)
+			if entry_idx < 0 || entry_idx >= n_blocks { continue }
+			entry_type := TYPE_UNKNOWN
+			if t, ok := envs[entry_idx].types[sym_id]; ok {
+				entry_type = t
+			}
+			if entry_type == TYPE_UNKNOWN {
+				append(&result, sym_id)
+			}
+		} else {
+			// Locals: unknown if TYPE_UNKNOWN in ALL visited blocks where they appear
+			has_known_type := false
+			appears_anywhere := false
+			for i in 0..<n_blocks {
+				if !visited[i] { continue }
+				if t, ok := envs[i].types[sym_id]; ok {
+					appears_anywhere = true
+					if t != TYPE_UNKNOWN {
+						has_known_type = true
+						break
+					}
+				}
+			}
+			if appears_anywhere && !has_known_type {
+				append(&result, sym_id)
+			}
 		}
 	}
 
