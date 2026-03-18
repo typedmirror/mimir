@@ -127,9 +127,22 @@ resolve_single_constraint :: proc(
 				elem = cv.return_type
 			}
 			append(&result, make_list_type(reg, elem))
-		case "sort", "reverse", "copy", "extend":
-			// List methods with no element type evidence
+		case "sort", "reverse":
+			// List-exclusive methods (dict/set don't have these)
 			append(&result, make_list_type(reg, TYPE_ANY))
+		case "extend":
+			// List-exclusive (set uses update, dict uses update)
+			append(&result, make_list_type(reg, TYPE_ANY))
+		case "copy":
+			// Shared: list, dict, and set all have copy()
+			append(&result, make_list_type(reg, TYPE_ANY))
+			append(&result, make_dict_type(reg, TYPE_ANY, TYPE_ANY))
+			append(&result, make_set_type(reg, TYPE_ANY))
+		case "clear":
+			// Shared: list, dict, and set all have clear()
+			append(&result, make_list_type(reg, TYPE_ANY))
+			append(&result, make_dict_type(reg, TYPE_ANY, TYPE_ANY))
+			append(&result, make_set_type(reg, TYPE_ANY))
 		case "keys", "values", "items":
 			// Dict methods
 			append(&result, make_dict_type(reg, TYPE_ANY, TYPE_ANY))
