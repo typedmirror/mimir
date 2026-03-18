@@ -186,6 +186,9 @@ check :: proc(
 	// §4.2: Context manager typestate — use-after-close
 	analyze_typestate(module, bind_result, file_path, &result.diagnostics, allocator)
 
+	// §22: Cross-process analysis — shared mutable state in multiprocessing
+	analyze_crossproc(module, bind_result, file_path, &result.diagnostics, allocator)
+
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
@@ -351,6 +354,9 @@ check_with_imports :: proc(
 
 	// §4.2: Context manager typestate — use-after-close
 	analyze_typestate(module, bind_result, file_path, &result.diagnostics, allocator)
+
+	// §22: Cross-process analysis — shared mutable state in multiprocessing
+	analyze_crossproc(module, bind_result, file_path, &result.diagnostics, allocator)
 
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)

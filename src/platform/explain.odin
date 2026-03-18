@@ -372,6 +372,15 @@ ALL_EXPLANATIONS := [?]Explanation{
 		note = "Move the operation inside the 'with' block, or re-open the resource.",
 	},
 
+	// ── Cross-Process ──
+
+	{
+		code = "PROC001", name = "Shared mutable state in multiprocessing", category = "Cross-Process", severity = "Error",
+		description = "A function used as a multiprocessing target modifies a module-level\nmutable variable (dict, list, set). Each process gets its own copy —\nmutations are not shared between processes.",
+		example = "    shared = {}\n    def worker(k, v):\n        shared[k] = v  # not actually shared!\n    pool.map(worker, data)  # PROC001",
+		note = "Use multiprocessing.Manager().dict() for shared state,\nor multiprocessing.Queue for inter-process communication.",
+	},
+
 	// ── Concurrency ──
 
 	{
