@@ -1921,6 +1921,32 @@ reinfer_call_return :: proc(
 		case Callable_Type:
 			return info.return_type
 		}
+	} else if attr, attr_ok := call.func.(^parser.Attribute_Expr); attr_ok {
+		// Method call: obj.method() — resolve via object type → class → method callable
+		obj_type, has_obj := result.expr_types[expr_to_rawptr(attr.value)]
+		if !has_obj { return TYPE_UNKNOWN }
+
+		// Unwrap Instance_Type → Class_Type
+		class_type_id := TYPE_UNKNOWN
+		t := get_type(reg, obj_type)
+		#partial switch info in t.info {
+		case Instance_Type:
+			class_type_id = info.class_type
+		}
+		if class_type_id == TYPE_UNKNOWN { return TYPE_UNKNOWN }
+
+		// Look up method in class attrs
+		ct := get_type(reg, class_type_id)
+		#partial switch cls in ct.info {
+		case Class_Type:
+			method_type_id, has_method := cls.attrs[attr.attr]
+			if !has_method { return TYPE_UNKNOWN }
+			mt := get_type(reg, method_type_id)
+			#partial switch method_info in mt.info {
+			case Callable_Type:
+				return method_info.return_type
+			}
+		}
 	}
 
 	return TYPE_UNKNOWN
