@@ -1431,6 +1431,8 @@ check_match_stmt :: proc(s: ^parser.Match_Stmt, ctx: ^Infer_Context) {
 
 	case_idx := 0
 	has_wildcard := false
+	// MATCH002: track consumed class types for dead pattern detection
+	consumed_class_types := make([dynamic]Type_ID, 0, 4, ctx.reg.allocator)
 
 	for i in 0..<len(block.succs) {
 		kind := block.edge_kinds[i]
@@ -1442,9 +1444,40 @@ check_match_stmt :: proc(s: ^parser.Match_Stmt, ctx: ^Infer_Context) {
 		mc := s.cases[case_idx]
 		case_idx += 1
 
+		// MATCH002: case after wildcard is dead
+		if has_wildcard && mc.guard == nil {
+			pattern_loc := _match_pattern_loc(mc.pattern, s.loc)
+			emit_diagnostic(ctx, pattern_loc, "MATCH002", .Warning,
+				"Unreachable match case — wildcard case above matches everything",
+				"A wildcard pattern (case _:) matches all values, making subsequent cases unreachable",
+				"Move this case before the wildcard, or remove it")
+		}
+
 		// Build pattern bindings for this case block
 		bindings := make(map[binder.Symbol_ID]Type_ID, 4, ctx.reg.allocator)
-		bind_match_pattern(mc.pattern, subject_type, &bindings, ctx)
+		pattern_type := bind_match_pattern(mc.pattern, subject_type, &bindings, ctx)
+
+		// MATCH002: check if this value pattern is subsumed by an earlier class pattern
+		if mc.guard == nil {
+			if _, is_value := mc.pattern.(^parser.Match_Value); is_value {
+				for consumed in consumed_class_types {
+					if is_assignable(ctx.reg, pattern_type, consumed) {
+						pattern_loc := _match_pattern_loc(mc.pattern, s.loc)
+						emit_diagnostic(ctx, pattern_loc, "MATCH002", .Warning,
+							"Unreachable match case — broader pattern above already matches",
+							"A class pattern above matches all values of this type, making this case unreachable",
+							"Move specific value cases before class/type patterns")
+						break
+					}
+				}
+			}
+			// Track class patterns
+			if _, is_class := mc.pattern.(^parser.Match_Class); is_class {
+				if pattern_type != TYPE_UNKNOWN {
+					append(&consumed_class_types, pattern_type)
+				}
+			}
+		}
 
 		// Check guard expression (with pattern bindings temporarily injected)
 		if mc.guard != nil {
@@ -1471,6 +1504,22 @@ check_match_stmt :: proc(s: ^parser.Match_Stmt, ctx: ^Infer_Context) {
 			"Match may not handle all possible values of the subject",
 			"Add a wildcard case: case _: ...")
 	}
+}
+
+// Get the source location of a match pattern for diagnostic reporting.
+_match_pattern_loc :: proc(pattern: parser.Pattern, fallback: parser.Src_Loc) -> parser.Src_Loc {
+	if pattern == nil { return fallback }
+	#partial switch p in pattern {
+	case ^parser.Match_Value:  return p.loc
+	case ^parser.Match_Class:  return p.loc
+	case ^parser.Match_As:     return p.loc
+	case ^parser.Match_Or:     return p.loc
+	case ^parser.Match_Star:   return p.loc
+	case ^parser.Match_Sequence: return p.loc
+	case ^parser.Match_Mapping:  return p.loc
+	case ^parser.Match_Singleton: return p.loc
+	}
+	return fallback
 }
 
 // bind_match_pattern: recursively bind pattern variables into the env map.

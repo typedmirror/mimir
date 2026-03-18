@@ -80,6 +80,9 @@ is_sanitizer :: proc(ctx: ^Taint_Context, call: ^parser.Call_Expr) -> bool {
 		if mod, ok := ctx.import_map[f.id]; ok {
 			if mod == "os.path" && f.id == "basename" { return true }
 		}
+		// Custom sanitizer: validate_*, sanitize_*, clean_*, verify_*
+		if _is_sanitizer_name(f.id) { return true }
+
 	case ^parser.Attribute_Expr:
 		// os.path.basename(x)
 		if inner, ok := f.value.(^parser.Attribute_Expr); ok {
@@ -90,6 +93,22 @@ is_sanitizer :: proc(ctx: ^Taint_Context, call: ^parser.Call_Expr) -> bool {
 					}
 				}
 			}
+		}
+		// Custom sanitizer: obj.validate_*, obj.sanitize_*, etc.
+		if _is_sanitizer_name(f.attr) { return true }
+	}
+	return false
+}
+
+// Recognize sanitizer functions by naming convention.
+// Functions named validate_*, sanitize_*, clean_*, verify_*, check_*
+// are treated as taint sanitizers (§5.4 custom sanitizer recognition).
+_is_sanitizer_name :: proc(name: string) -> bool {
+	if len(name) < 6 { return false }
+	PREFIXES :: [?]string{"validate_", "sanitize_", "clean_", "verify_", "check_"}
+	for prefix in PREFIXES {
+		if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
+			return true
 		}
 	}
 	return false

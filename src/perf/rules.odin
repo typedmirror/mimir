@@ -16,6 +16,7 @@ ALL_RULES := [?]Perf_Rule{
 	{code = "PERF005", name = "nplus1-query",                check = check_nplus1_query},
 	{code = "PERF006", name = "unbounded-cache",             check = check_unbounded_cache},
 	{code = "PERF007", name = "heavy-import",                check = check_heavy_import},
+	{code = "PERF008", name = "stale-cache",                 check = check_stale_cache},
 }
 
 is_rule_enabled :: proc(code: string, config: ^Perf_Config) -> bool {

@@ -448,6 +448,22 @@ ALL_EXPLANATIONS := [?]Explanation{
 		note = "Move the import inside the function that uses it (lazy import)\nif not needed at module level.",
 	},
 
+	{
+		code = "PERF008", name = "Stale cache", category = "Performance", severity = "Warning",
+		description = "A database mutation occurs in a function but a module-level cache dict\nis not updated or cleared, leaving potentially stale data.",
+		example = "    _cache = {}\n    def update_user(id, data):\n        db.update(id, data)  # PERF008\n        # _cache[id] not invalidated",
+		note = "Delete or update the cache entry after the mutation:\n    del _cache[id]  # or _cache[id] = new_data",
+	},
+
+	// ── Match ──
+
+	{
+		code = "MATCH002", name = "Dead match pattern", category = "Match", severity = "Warning",
+		description = "A match/case pattern is unreachable because a broader pattern above\nalready matches all values of this type.",
+		example = "    match value:\n        case int():  # matches all ints\n            ...\n        case 42:     # MATCH002: unreachable",
+		note = "Move specific value patterns before class/type patterns.\nAlso: any case after a wildcard (case _:) is unreachable.",
+	},
+
 	// ── Migration ──
 
 	{

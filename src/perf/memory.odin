@@ -244,6 +244,135 @@ check_heavy_import :: proc(ctx: ^Perf_Context) {
 	}
 }
 
+// PERF008 — Stale cache: db mutation without cache invalidation
+check_stale_cache :: proc(ctx: ^Perf_Context) {
+	// Phase 1: find module-level dicts (potential caches)
+	cache_names := make(map[string]bool, 8, ctx.allocator)
+	for stmt in ctx.module.body {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			if len(s.targets) == 1 {
+				if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+					if is_empty_dict(s.value) {
+						cache_names[name.id] = true
+					}
+				}
+			}
+		}
+	}
+	if len(cache_names) == 0 { return }
+
+	// Phase 2: check function bodies for db mutation without cache reference
+	DB_MUTATION_METHODS :: [?]string{"update", "save", "delete", "insert", "commit", "execute"}
+
+	for stmt in ctx.module.body {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			check_stale_in_body(ctx, s.body, cache_names, s.loc)
+		case ^parser.Async_Func_Def:
+			check_stale_in_body(ctx, s.body, cache_names, s.loc)
+		}
+	}
+}
+
+check_stale_in_body :: proc(ctx: ^Perf_Context, stmts: []parser.Stmt, cache_names: map[string]bool, func_loc: parser.Src_Loc) {
+	DB_MUTATION_METHODS :: [?]string{"update", "save", "delete", "insert", "commit", "execute"}
+
+	has_db_mutation := false
+	mutation_loc := parser.Src_Loc{}
+	has_cache_access := false
+
+	// Scan for db mutations and cache accesses
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			ctx := cast(^Perf_Context)raw_ctx
+			#partial switch e in expr {
+			case ^parser.Call_Expr:
+				#partial switch f in e.func {
+				case ^parser.Attribute_Expr:
+					for m in DB_MUTATION_METHODS {
+						if f.attr == m {
+							// Found a db mutation call
+							// Store in current_scope as signal (reuse field)
+							ctx.current_scope = nil // mark: has mutation
+						}
+					}
+				}
+			case ^parser.Name_Expr:
+				// Check if any cache name is referenced
+				for cn in ctx.import_map {
+					// import_map is reused to pass cache_names — see below
+				}
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+
+	// Simpler approach: manual statement walk
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			if call, ok := s.value.(^parser.Call_Expr); ok {
+				if attr, aok := call.func.(^parser.Attribute_Expr); aok {
+					for m in DB_MUTATION_METHODS {
+						if attr.attr == m {
+							has_db_mutation = true
+							mutation_loc = s.loc
+						}
+					}
+				}
+			}
+		case ^parser.Assign:
+			// Check for cache access in assignment (cache[key] = ... or ... = cache[key])
+			if len(s.targets) == 1 {
+				if sub, ok := s.targets[0].(^parser.Subscript_Expr); ok {
+					if name, nok := sub.value.(^parser.Name_Expr); nok {
+						if name.id in cache_names { has_cache_access = true }
+					}
+				}
+			}
+			// Also check RHS for cache reference
+			check_expr_for_cache_ref(s.value, cache_names, &has_cache_access)
+		case ^parser.Delete_Stmt:
+			// del cache[key]
+			for target in s.targets {
+				if sub, ok := target.(^parser.Subscript_Expr); ok {
+					if name, nok := sub.value.(^parser.Name_Expr); nok {
+						if name.id in cache_names { has_cache_access = true }
+					}
+				}
+			}
+		}
+	}
+
+	if has_db_mutation && !has_cache_access {
+		append(&ctx.diagnostics, core.Diagnostic{
+			severity = .Performance,
+			location = core.Location{
+				file   = ctx.file_path,
+				line   = int(mutation_loc.line),
+				column = int(mutation_loc.col),
+			},
+			what = "database mutation without cache invalidation",
+			why  = "a module-level cache dict exists but is not updated or cleared after this mutation; data may be stale",
+			fix  = "update or delete the relevant cache entry after the database mutation",
+			code = "PERF008",
+		})
+	}
+}
+
+check_expr_for_cache_ref :: proc(expr: parser.Expr, cache_names: map[string]bool, found: ^bool) {
+	if expr == nil { return }
+	#partial switch e in expr {
+	case ^parser.Name_Expr:
+		if e.id in cache_names { found^ = true }
+	case ^parser.Subscript_Expr:
+		if name, ok := e.value.(^parser.Name_Expr); ok {
+			if name.id in cache_names { found^ = true }
+		}
+	}
+}
+
 UNHASHABLE_TYPES := [?]string{"list", "dict", "set", "bytearray"}
 
 check_func_lru_cache :: proc(ctx: ^Perf_Context, decorators: []parser.Expr, args: ^parser.Arguments, func_loc: parser.Src_Loc) {
