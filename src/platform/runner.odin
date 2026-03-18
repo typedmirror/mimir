@@ -189,14 +189,17 @@ run :: proc(config: Run_Config, allocator: mem.Allocator) -> int {
 		}
 	}
 
-	// 8. Generate bootstrap with virtual module shims (mimir.db, mimir.crypt, mimir.json)
+	// 8. Pre-flight: check runtime deps for mimir.* virtual modules
+	check_mimir_runtime_deps(python, config.script, allocator)
+
+	// 9. Generate bootstrap with virtual module shims
 	bootstrap := generate_run_bootstrap(config.script, config.script_args, allocator)
 	bootstrap_path, boot_ok := write_run_bootstrap(bootstrap, allocator)
 	if !boot_ok {
 		return 1
 	}
 
-	// 9. Spawn Python with bootstrap (script args embedded via sys.argv in bootstrap)
+	// 10. Spawn Python with bootstrap (script args embedded via sys.argv in bootstrap)
 	return spawn_python(python, bootstrap_path, {})
 }
 
@@ -289,6 +292,48 @@ _extract_version :: proc(constraint: string) -> string {
 		s = s[1:]
 	}
 	return strings.trim_space(s)
+}
+
+// Pre-flight check: scan script for mimir.* imports and verify their backing pip packages are available.
+// Emits helpful warnings (not errors) so the user knows what to install.
+check_mimir_runtime_deps :: proc(python: string, script: string, allocator: mem.Allocator) {
+	data, err := os.read_entire_file(script, allocator)
+	if err != nil { return }
+	source := string(data)
+
+	// Mapping: mimir module → pip package required
+	Dep :: struct { module: string, pip_pkg: string, display: string }
+	DEPS :: [?]Dep{
+		{"mimir.array", "numpy",      "numpy"},
+		{"mimir.ml",    "numpy",      "numpy"},
+		{"mimir.stats", "scipy",      "scipy"},
+		{"mimir.plot",  "matplotlib", "matplotlib"},
+	}
+
+	// Scan for mimir.* imports (simple substring match — good enough for pre-flight)
+	needed := make(map[string]string, 4, allocator) // pip_pkg → mimir module
+	for dep in DEPS {
+		if strings.contains(source, dep.module) {
+			if !(dep.pip_pkg in needed) {
+				needed[dep.pip_pkg] = dep.module
+			}
+		}
+	}
+	if len(needed) == 0 { return }
+
+	// Check each needed package via python -c "import pkg"
+	for pkg, mod in needed {
+		check_cmd := [?]string{python, "-c", fmt.tprintf("import %s", pkg)}
+		p, p_err := os.process_start({
+			command = check_cmd[:],
+		})
+		if p_err != nil { continue }
+		state, _ := os.process_wait(p)
+		if state.exit_code != 0 {
+			fmt.eprintfln("mimir run: warning — '%s' requires '%s' (pip package '%s')", mod, pkg, pkg)
+			fmt.eprintfln("  install with: %s -m pip install %s", python, pkg)
+		}
+	}
 }
 
 // Get parent directory of a file path.
