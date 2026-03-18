@@ -53,7 +53,14 @@ resolve_constraints :: proc(
 			}
 		}
 
-		if len(candidates) == 0 { continue }
+		if len(candidates) == 0 {
+			// No concrete type matches — try protocol synthesis as fallback
+			proto := synthesize_protocol(cs, var_info.id, reg, allocator)
+			if proto != TYPE_UNKNOWN {
+				result[var_info.symbol_id] = proto
+			}
+			continue
+		}
 
 		// Pick the resolved type
 		if len(candidates) == 1 {
@@ -567,6 +574,53 @@ Caller_Call_Ctx :: struct {
 	allocator:     mem.Allocator,
 }
 
+// ==================== Protocol Inference (§3.6) ====================
+
+// Synthesize a Protocol_Type from accumulated constraints on a variable.
+// Fallback when no concrete type matches all constraints — the constraints
+// themselves define a structural protocol.
+synthesize_protocol :: proc(
+	cs: ^Constraint_Set,
+	var_id: Constraint_Var,
+	reg: ^Type_Registry,
+	allocator: mem.Allocator,
+) -> Type_ID {
+	constraint_indices, ok := cs.var_constraints[var_id]
+	if !ok || len(constraint_indices) == 0 { return TYPE_UNKNOWN }
+
+	methods := make(map[string]Type_ID, 4, allocator)
+	attrs   := make(map[string]Type_ID, 4, allocator)
+
+	for ci in constraint_indices {
+		c := cs.constraints[ci]
+		#partial switch cv in c {
+		case Has_Method:
+			// Build Callable_Type for the method signature
+			params := make([]Param_Type, len(cv.arg_types), allocator)
+			for a, i in cv.arg_types {
+				params[i] = Param_Type{
+					name    = "",
+					type_id = a if a != TYPE_UNKNOWN else TYPE_ANY,
+				}
+			}
+			ret := cv.return_type if cv.return_type != TYPE_UNKNOWN else TYPE_ANY
+			methods[cv.method_name] = make_callable_type(reg, params, ret)
+		case Has_Attr:
+			attr_type := cv.attr_type if cv.attr_type != TYPE_UNKNOWN else TYPE_ANY
+			attrs[cv.attr_name] = attr_type
+		}
+	}
+
+	// Only synthesize if we have meaningful structural evidence
+	if len(methods) == 0 && len(attrs) == 0 { return TYPE_UNKNOWN }
+
+	return register_type(reg, Protocol_Type{
+		name    = "",
+		methods = methods,
+		attrs   = attrs,
+	})
+}
+
 // ==================== Enhanced Resolution with Caller Types ====================
 
 // Resolve constraints with additional evidence from callers.
@@ -664,7 +718,14 @@ resolve_constraints_with_callers :: proc(
 			// (caller may be wrong, body usage is authoritative)
 		}
 
-		if len(candidates) == 0 { continue }
+		if len(candidates) == 0 {
+			// No concrete type — try protocol synthesis
+			proto := synthesize_protocol(cs, var_info.id, reg, allocator)
+			if proto != TYPE_UNKNOWN {
+				result[var_info.symbol_id] = proto
+			}
+			continue
+		}
 
 		if len(candidates) == 1 {
 			for t in candidates {
