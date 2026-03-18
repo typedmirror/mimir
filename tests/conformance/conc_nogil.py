@@ -5,5 +5,4 @@ counter = 0
 
 def increment():
     global counter
-    counter = counter + 1
-    # CONC006: assignment to global not thread-safe without GIL
+    counter = counter + 1  # E

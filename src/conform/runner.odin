@@ -100,13 +100,11 @@ run_conform_file :: proc(
 			}
 		}
 
-		// Concurrency
+		// Concurrency (all severities — CONC004/006 are Warning)
 		source_str := string(source)
 		conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, source_str, file, arena.allocator)
 		for d in conc_diagnostics {
-			if d.severity == .Error {
-				error_lines[d.location.line] = true
-			}
+			error_lines[d.location.line] = true
 		}
 
 		// Analysis passes — only run on matching test files to avoid noise

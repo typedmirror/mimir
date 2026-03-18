@@ -183,6 +183,9 @@ check :: proc(
 	// ML pipeline analysis — data leakage, pipeline ordering
 	analyze_ml(module, bind_result, file_path, &result.diagnostics, allocator)
 
+	// §4.2: Context manager typestate — use-after-close
+	analyze_typestate(module, bind_result, file_path, &result.diagnostics, allocator)
+
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
@@ -346,6 +349,9 @@ check_with_imports :: proc(
 	// ML pipeline analysis — data leakage, pipeline ordering
 	analyze_ml(module, bind_result, file_path, &result.diagnostics, allocator)
 
+	// §4.2: Context manager typestate — use-after-close
+	analyze_typestate(module, bind_result, file_path, &result.diagnostics, allocator)
+
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
@@ -419,6 +425,9 @@ check_scope :: proc(
 
 	// Track groupby source DataFrames for column-aware aggregation
 	groupby_sources := make(map[binder.Symbol_ID]GroupBy_Info, 4, reg.allocator)
+
+	// §4.2: Track variables closed after with-block exit
+	closed_vars := make(map[binder.Symbol_ID]parser.Src_Loc, 4, reg.allocator)
 
 	// Set global_types for non-module scopes (LEGB "G" fallback)
 	global_types_ptr: ^map[binder.Symbol_ID]Type_ID = nil
@@ -494,6 +503,7 @@ check_scope :: proc(
 			current_block    = block_id,
 			match_case_envs  = &match_case_envs,
 			groupby_sources  = &groupby_sources,
+			closed_vars      = &closed_vars,
 		}
 
 		// Process each statement in the block
@@ -902,7 +912,6 @@ check_stmt :: proc(
 		for item in s.items {
 			cm_type := infer_expr(item.context_expr, ctx)
 			if item.optional_vars != nil {
-				// __enter__ return type approximated as the context manager type itself
 				assign_target(item.optional_vars, cm_type, ctx)
 			}
 		}

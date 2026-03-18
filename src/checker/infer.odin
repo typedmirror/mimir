@@ -31,6 +31,7 @@ Infer_Context :: struct {
 	current_block:    flow.Block_ID,                     // Current block being processed
 	match_case_envs:  ^map[flow.Block_ID]Match_Case_Env, // Pattern bindings per case block
 	groupby_sources:  ^map[binder.Symbol_ID]GroupBy_Info, // symbol → groupby source info for column tracking
+	closed_vars:      ^map[binder.Symbol_ID]parser.Src_Loc, // §4.2: variables closed after with-block exit
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -116,6 +117,26 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		return infer_call(e, ctx, expected)
 
 	case ^parser.Attribute_Expr:
+		// SAF010: use-after-close check (§4.2 context manager typestate)
+		if ctx.closed_vars != nil {
+			if name, is_name := e.value.(^parser.Name_Expr); is_name {
+				if sym_id := _match_lookup_sym(name.id, ctx); sym_id != 0 {
+					if _, is_closed := ctx.closed_vars[sym_id]; is_closed {
+						RESOURCE_METHODS :: [?]string{"read", "write", "readline", "readlines", "writelines", "seek", "tell", "flush", "fileno", "truncate", "send", "recv", "sendall"}
+						for m in RESOURCE_METHODS {
+							if e.attr == m {
+								emit_diagnostic(ctx, e.loc, "SAF010", .Error,
+									fmt.aprintf("use after close: '%s.%s()' called after 'with' block exited",
+										name.id, e.attr, allocator = ctx.reg.allocator),
+									"the resource was closed when the 'with' block ended — accessing it is an error",
+									fmt.aprintf("move '%s.%s()' inside the 'with' block", name.id, e.attr, allocator = ctx.reg.allocator))
+								break
+							}
+						}
+					}
+				}
+			}
+		}
 		receiver := infer_expr(e.value, ctx)
 		result := lookup_attribute(receiver, e.attr, ctx.reg)
 		// T007: flag undefined attributes on user-defined types

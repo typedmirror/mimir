@@ -6,7 +6,7 @@ counter = 0
 
 def increment():
     global counter
-    counter += 1     # CONC004: not atomic (load → add → store)
+    counter += 1     # E
 
 def no_global():
     local = 0

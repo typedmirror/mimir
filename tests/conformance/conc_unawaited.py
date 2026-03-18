@@ -9,7 +9,7 @@ async def process():
     return "done"
 
 async def main():
-    fetch_data()                         # CONC002: coroutine never awaited
-    process()                            # CONC002: coroutine never awaited
+    fetch_data()                         # E
+    process()                            # E
     result = await fetch_data()          # OK — awaited
     task = asyncio.create_task(fetch_data())  # OK — wrapped in task

@@ -101,6 +101,8 @@ main :: proc() {
 		cmd_task(args[2:])
 	case "deps":
 		cmd_deps(args[2:])
+	case "report":
+		cmd_report(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -243,6 +245,104 @@ cmd_deps :: proc(args: []string) {
 	}
 }
 
+cmd_report :: proc(args: []string) {
+	target := "."
+	if len(args) > 0 { target = args[0] }
+
+	p: Pipeline; ok := pipeline_start("report", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
+
+	// Aggregate diagnostics across all passes
+	counts := make(map[string]int, 16, p.arena.allocator) // code → count
+	category_counts := make(map[string]int, 8, p.arena.allocator) // category → count
+	files_with_issues := make(map[string]bool, 16, p.arena.allocator)
+	total := 0
+
+	_count :: proc(d: core.Diagnostic, counts: ^map[string]int, cat_counts: ^map[string]int, file_set: ^map[string]bool, total: ^int) {
+		counts[d.code] = (counts[d.code] if d.code in counts^ else 0) + 1
+		cat := _diag_category(d)
+		cat_counts[cat] = (cat_counts[cat] if cat in cat_counts^ else 0) + 1
+		file_set[d.location.file] = true
+		total^ += 1
+	}
+
+	for file in p.files {
+		module := pipeline_parse_file(&p, "report", file)
+		if module == nil { continue }
+
+		bind_result := binder.bind(module, file, p.arena.allocator)
+		for d in bind_result.diagnostics { _count(d, &counts, &category_counts, &files_with_issues, &total) }
+
+		flow_result := flow.analyze(module, &bind_result, file, p.arena.allocator)
+		for d in flow_result.diagnostics { _count(d, &counts, &category_counts, &files_with_issues, &total) }
+
+		check_result := checker.check(module, &bind_result, &flow_result, file, p.arena.allocator)
+		for d in check_result.diagnostics { _count(d, &counts, &category_counts, &files_with_issues, &total) }
+
+		source_data, _ := os.read_entire_file(file, p.arena.allocator)
+		source_str := string(source_data) if source_data != nil else ""
+
+		conc_diags := concurrency.analyze_concurrency(module, &bind_result, source_str, file, p.arena.allocator)
+		for d in conc_diags { _count(d, &counts, &category_counts, &files_with_issues, &total) }
+
+		perf_config := perf.default_config()
+		perf_diags := perf.analyze_performance(module, &bind_result, source_str, file, &perf_config, p.arena.allocator)
+		for d in perf_diags { _count(d, &counts, &category_counts, &files_with_issues, &total) }
+
+		safety_config := safety.default_config()
+		safety_diags := safety.analyze_safety(module, &bind_result, file, &safety_config, p.arena.allocator)
+		for d in safety_diags { _count(d, &counts, &category_counts, &files_with_issues, &total) }
+	}
+
+	// Print summary
+	fmt.printfln("\nmimir report: %d file(s) analyzed\n", len(p.files))
+	CATEGORIES :: [?]string{"Type", "Security", "Performance", "Concurrency", "Safety", "Binding", "Flow", "Other"}
+	for cat in CATEGORIES {
+		n := category_counts[cat] if cat in category_counts else 0
+		if n > 0 {
+			fmt.printfln("  %-15s %d", cat, n)
+		}
+	}
+	fmt.printfln("\n  Total:          %d issues in %d file(s)", total, len(files_with_issues))
+}
+
+_diag_category :: proc(d: core.Diagnostic) -> string {
+	if len(d.code) >= 1 {
+		if d.code[0] == 'T' { return "Type" }
+		if d.code[0] == 'B' { return "Binding" }
+		if d.code[0] == 'F' { return "Flow" }
+	}
+	if len(d.code) >= 3 {
+		prefix := d.code[:3]
+		if prefix == "SEC" { return "Security" }
+		if prefix == "CON" { return "Concurrency" }
+		if prefix == "PER" { return "Performance" }
+		if prefix == "SAF" { return "Safety" }
+		if prefix == "ML0" { return "Type" }
+		if prefix == "MAT" { return "Type" }
+		if prefix == "DAT" { return "Type" }
+		if prefix == "HTT" { return "Type" }
+		if prefix == "JSO" { return "Type" }
+		if prefix == "SER" { return "Security" }
+		if prefix == "REG" { return "Type" }
+		if prefix == "TIM" { return "Type" }
+		if prefix == "ENC" { return "Type" }
+		if prefix == "API" { return "Type" }
+		if prefix == "COM" { return "Type" }
+		if prefix == "DEP" { return "Type" }
+		if prefix == "MIG" { return "Other" }
+		if prefix == "CRY" { return "Security" }
+		if prefix == "GPU" { return "Other" }
+		if prefix == "SHA" { return "Type" }
+	}
+	if len(d.code) >= 1 && d.code[0] == 'D' { return "Flow" }
+	if len(d.code) >= 1 && d.code[0] == 'L' { return "Other" }
+	if len(d.code) >= 1 && d.code[0] == 'C' { return "Other" }
+	if len(d.code) >= 1 && d.code[0] == 'S' { return "Other" }
+	return "Other"
+}
+
 cmd_format :: proc(args: []string) {
 	config := platform.default_format_config()
 	target := "."
@@ -353,28 +453,40 @@ cmd_check :: proc(args: []string) {
 		os.exit(1)
 	}
 
-	// Warn on unrecognized flags
-	for i := 1; i < len(args); i += 1 {
-		if strings.has_prefix(args[i], "-") {
-			fmt.eprintfln("mimir check: unknown flag '%s'", args[i])
+	// Parse flags
+	sarif_mode := false
+	target := args[0]
+	for i := 0; i < len(args); i += 1 {
+		if args[i] == "--format" && i + 1 < len(args) {
+			if args[i + 1] == "sarif" { sarif_mode = true }
+			i += 1
+		} else if !strings.has_prefix(args[i], "-") {
+			target = args[i]
 		}
 	}
-
-	target := args[0]
 
 	p: Pipeline; ok := pipeline_start("check", target, &p)
 	if !ok { return }
 	defer pipeline_stop(&p)
 
+	// SARIF mode: collect all diagnostics, emit JSON at end
+	sarif_diags: [dynamic]core.Diagnostic
+	if sarif_mode { sarif_diags = make([dynamic]core.Diagnostic, 0, 32, p.arena.allocator) }
+
 	// Single file: fast path (existing behavior)
 	errors := 0
 	if len(p.files) == 1 {
-		errors = cmd_check_single(p.files[0], &p.bridge, &p.arena)
+		errors = cmd_check_single(p.files[0], &p.bridge, &p.arena, sarif_mode ? &sarif_diags : nil)
 	} else {
 		// Multi-module: shared registry + module graph
 		errors = cmd_check_multi(target, p.files, &p.bridge, &p.arena)
 	}
-	if errors > 0 { os.exit(1) }
+
+	if sarif_mode {
+		fmt.println(core.diagnostics_to_sarif(sarif_diags[:], MIMIR_VERSION))
+	} else {
+		if errors > 0 { os.exit(1) }
+	}
 }
 
 // Single-file check — original behavior, unchanged
@@ -382,6 +494,7 @@ cmd_check_single :: proc(
 	file: string,
 	bridge: ^parser.Bridge,
 	arena: ^core.Analysis_Arena,
+	sarif_diags: ^[dynamic]core.Diagnostic = nil,
 ) -> int {
 	error_count := 0
 
@@ -398,22 +511,28 @@ cmd_check_single :: proc(
 		return 1
 	}
 
+	_emit_diag :: proc(d: core.Diagnostic, error_count: ^int, sarif_diags: ^[dynamic]core.Diagnostic) {
+		if sarif_diags != nil {
+			append(sarif_diags, d)
+		} else {
+			core.diagnostic_print(d)
+		}
+		if d.severity == .Error { error_count^ += 1 }
+	}
+
 	bind_result := binder.bind(module, file, arena.allocator)
 	for d in bind_result.diagnostics {
-		core.diagnostic_print(d)
-		if d.severity == .Error { error_count += 1 }
+		_emit_diag(d, &error_count, sarif_diags)
 	}
 
 	flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
 	for d in flow_result.diagnostics {
-		core.diagnostic_print(d)
-		if d.severity == .Error { error_count += 1 }
+		_emit_diag(d, &error_count, sarif_diags)
 	}
 
 	check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
 	for d in check_result.diagnostics {
-		core.diagnostic_print(d)
-		if d.severity == .Error { error_count += 1 }
+		_emit_diag(d, &error_count, sarif_diags)
 	}
 
 	// Concurrency analysis
@@ -421,20 +540,21 @@ cmd_check_single :: proc(
 	source_str := string(source_data) if src_err == nil else ""
 	conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, source_str, file, arena.allocator)
 	for d in conc_diagnostics {
-		core.diagnostic_print(d)
-		if d.severity == .Error { error_count += 1 }
+		_emit_diag(d, &error_count, sarif_diags)
 	}
 
-	fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards, %d types)",
-		file, len(module.body),
-		len(bind_result.symbols), len(bind_result.scopes),
-		flow.total_blocks(&flow_result), len(flow_result.guards),
-		len(check_result.registry.types))
+	if sarif_diags == nil {
+		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards, %d types)",
+			file, len(module.body),
+			len(bind_result.symbols), len(bind_result.scopes),
+			flow.total_blocks(&flow_result), len(flow_result.guards),
+			len(check_result.registry.types))
 
-	if error_count > 0 {
-		fmt.eprintfln("mimir: 1 file(s) had errors")
-	} else {
-		fmt.printfln("mimir: successfully checked 1 file(s)")
+		if error_count > 0 {
+			fmt.eprintfln("mimir: 1 file(s) had errors")
+		} else {
+			fmt.printfln("mimir: successfully checked 1 file(s)")
+		}
 	}
 
 	return error_count

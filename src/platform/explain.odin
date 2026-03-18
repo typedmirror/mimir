@@ -365,6 +365,13 @@ ALL_EXPLANATIONS := [?]Explanation{
 		note = "Use None as default and create inside the function:\n    def append_to(item, target=None):\n        if target is None:\n            target = []\n        target.append(item)\n        return target",
 	},
 
+	{
+		code = "SAF010", name = "Use after close", category = "Safety", severity = "Error",
+		description = "A resource method (read, write, etc.) is called on a variable that was\nbound in a 'with' block after the block has exited. The resource is closed.",
+		example = "    with open('f.txt') as f:\n        data = f.read()  # OK\n    f.read()  # SAF010: f is closed",
+		note = "Move the operation inside the 'with' block, or re-open the resource.",
+	},
+
 	// ── Concurrency ──
 
 	{
