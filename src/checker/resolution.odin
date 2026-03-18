@@ -103,6 +103,63 @@ resolve_single_constraint :: proc(
 			}
 		}
 
+		// Container type inference from method names
+		// List methods: append, extend, insert, pop, sort, reverse, copy, remove
+		switch cv.method_name {
+		case "append", "remove":
+			// x.append(val) → x is list[typeof(val)]
+			elem := TYPE_ANY
+			if len(cv.arg_types) > 0 && cv.arg_types[0] != TYPE_UNKNOWN {
+				elem = cv.arg_types[0]
+			}
+			append(&result, make_list_type(reg, elem))
+		case "insert":
+			// x.insert(i, val) → x is list[typeof(val)]
+			elem := TYPE_ANY
+			if len(cv.arg_types) > 1 && cv.arg_types[1] != TYPE_UNKNOWN {
+				elem = cv.arg_types[1]
+			}
+			append(&result, make_list_type(reg, elem))
+		case "pop":
+			// x.pop() → x is list[typeof(return)]
+			elem := TYPE_ANY
+			if cv.return_type != TYPE_UNKNOWN && cv.return_type != TYPE_ANY {
+				elem = cv.return_type
+			}
+			append(&result, make_list_type(reg, elem))
+		case "sort", "reverse", "copy", "extend":
+			// List methods with no element type evidence
+			append(&result, make_list_type(reg, TYPE_ANY))
+		case "keys", "values", "items":
+			// Dict methods
+			append(&result, make_dict_type(reg, TYPE_ANY, TYPE_ANY))
+		case "get":
+			// x.get(key) → x is dict[typeof(key), Any]
+			key := TYPE_ANY
+			if len(cv.arg_types) > 0 && cv.arg_types[0] != TYPE_UNKNOWN {
+				key = cv.arg_types[0]
+			}
+			append(&result, make_dict_type(reg, key, TYPE_ANY))
+		case "setdefault":
+			// x.setdefault(key, val) → x is dict[typeof(key), typeof(val)]
+			key, val := TYPE_ANY, TYPE_ANY
+			if len(cv.arg_types) > 0 && cv.arg_types[0] != TYPE_UNKNOWN { key = cv.arg_types[0] }
+			if len(cv.arg_types) > 1 && cv.arg_types[1] != TYPE_UNKNOWN { val = cv.arg_types[1] }
+			append(&result, make_dict_type(reg, key, val))
+		case "add", "discard":
+			// x.add(val) → x is set[typeof(val)]
+			elem := TYPE_ANY
+			if len(cv.arg_types) > 0 && cv.arg_types[0] != TYPE_UNKNOWN {
+				elem = cv.arg_types[0]
+			}
+			append(&result, make_set_type(reg, elem))
+		case "union", "intersection", "difference":
+			// Set operations
+			append(&result, make_set_type(reg, TYPE_ANY))
+		case "issubset", "issuperset":
+			append(&result, make_set_type(reg, TYPE_ANY))
+		}
+
 		// Also check user-defined classes
 		for _, ct_id in reg.class_types {
 			t := get_type(reg, ct_id)
@@ -142,15 +199,32 @@ resolve_single_constraint :: proc(
 		// Known iterable types
 		append(&result, TYPE_STR)
 		append(&result, TYPE_BYTES)
-		// list, dict, set, tuple are all iterable but their Type_IDs
-		// vary by element type. For Phase I, we can't resolve this
-		// without knowing the element type.
+		// Container types — construct with element type evidence
+		if cv.element_type != TYPE_UNKNOWN && cv.element_type != TYPE_ANY {
+			append(&result, make_list_type(reg, cv.element_type))
+			append(&result, make_set_type(reg, cv.element_type))
+		} else {
+			append(&result, make_list_type(reg, TYPE_ANY))
+		}
 
 	case Subscriptable:
 		// Known subscriptable types
 		append(&result, TYPE_STR)   // str[int] → str
 		append(&result, TYPE_BYTES) // bytes[int] → int
-		// list, dict, tuple are subscriptable but Type_IDs vary
+		// Container types — construct with key/value evidence
+		val := cv.value_type if cv.value_type != TYPE_UNKNOWN else TYPE_ANY
+		if cv.key_type == TYPE_INT || cv.key_type == TYPE_UNKNOWN {
+			// x[int] → could be list
+			append(&result, make_list_type(reg, val))
+		}
+		if cv.key_type == TYPE_STR {
+			// x[str] → dict[str, V]
+			append(&result, make_dict_type(reg, TYPE_STR, val))
+		}
+		if cv.key_type != TYPE_INT && cv.key_type != TYPE_STR && cv.key_type != TYPE_UNKNOWN {
+			// x[other_key_type] → dict[K, V]
+			append(&result, make_dict_type(reg, cv.key_type, val))
+		}
 
 	case Type_Subtype:
 		// Direct type constraint: var must be assignable to cv.type_id
