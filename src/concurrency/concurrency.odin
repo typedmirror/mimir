@@ -89,21 +89,24 @@ collect_context :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt) {
 	core.walk_all_stmts(&visitor, stmts)
 }
 
-// Collect global declarations recursively
+// Collect global declarations at THIS scope level only (no recursion into nested functions)
 collect_globals :: proc(stmts: []parser.Stmt, globals: ^[dynamic]string) {
-	visitor := core.AST_Visitor{
-		visit_stmt = proc(stmt: parser.Stmt, raw_ctx: rawptr) {
-			globals := cast(^[dynamic]string)raw_ctx
-			#partial switch s in stmt {
-			case ^parser.Global_Stmt:
-				for name in s.names {
-					append(globals, name)
-				}
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Global_Stmt:
+			for name in s.names {
+				append(globals, name)
 			}
-		},
-		ctx = rawptr(globals),
+		case ^parser.If_Stmt:
+			collect_globals(s.body, globals)
+			collect_globals(s.orelse, globals)
+		case ^parser.For_Stmt:
+			collect_globals(s.body, globals)
+		case ^parser.While_Stmt:
+			collect_globals(s.body, globals)
+		// Do NOT recurse into Func_Def/Class_Def — different scope
+		}
 	}
-	core.walk_all_stmts(&visitor, stmts)
 }
 
 // Pass 2: walk statements applying all rules.
@@ -115,8 +118,8 @@ check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: b
 
 	// Temporary storage only when we are the function-level caller (func_globals is nil)
 	own_globals: [dynamic]string
+	defer delete(own_globals)
 	if ctx.has_threading && globals == nil {
-		defer delete(own_globals)
 		collect_globals(stmts, &own_globals)
 		globals = own_globals[:]
 	}

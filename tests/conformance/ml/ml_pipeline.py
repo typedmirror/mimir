@@ -4,7 +4,13 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 
 # BAD: model before scaler
-_pipe = Pipeline([  # E
+_bad = Pipeline([  # E
     ("model", LogisticRegression()),
     ("scaler", StandardScaler()),
+])
+
+# GOOD: scaler before model (no error)
+_good = Pipeline([
+    ("scaler", StandardScaler()),
+    ("model", LogisticRegression()),
 ])
