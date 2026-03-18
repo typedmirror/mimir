@@ -400,8 +400,23 @@ build_sym_to_scope :: proc(bind_result: ^binder.Bind_Result, allocator: mem.Allo
 		if scope.kind != .Function && scope.kind != .Lambda { continue }
 		parent := binder.result_get_scope(bind_result, scope.parent_id)
 		if parent == nil { continue }
-		if func_sym, ok := parent.symbols[scope.name]; ok {
-			sym_to_scope[func_sym] = scope.id
+
+		if scope.kind == .Function {
+			if func_sym, ok := parent.symbols[scope.name]; ok {
+				sym_to_scope[func_sym] = scope.id
+			}
+		} else if scope.kind == .Lambda {
+			// Lambda scopes have name "<lambda>" — not in parent.symbols.
+			// Find the variable assigned the lambda by matching def location.
+			for _, sym_id in parent.symbols {
+				sym := binder.result_get_symbol(bind_result, sym_id)
+				if sym == nil { continue }
+				// Match: variable defined at same line as lambda scope
+				if sym.def_loc.line == scope.loc.line {
+					sym_to_scope[sym_id] = scope.id
+					break
+				}
+			}
 		}
 	}
 	return sym_to_scope

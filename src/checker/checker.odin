@@ -1927,7 +1927,52 @@ collect_func_args :: proc(
 			collect_func_args(s.finalbody, bind_result, out)
 		case ^parser.With_Stmt:
 			collect_func_args(s.body, bind_result, out)
+		case ^parser.Assign:
+			// Scan RHS for lambda expressions
+			if s.value != nil {
+				collect_lambda_args(s.value, bind_result, out)
+			}
+		case ^parser.Ann_Assign:
+			if s.value != nil {
+				collect_lambda_args(s.value, bind_result, out)
+			}
+		case ^parser.Expr_Stmt:
+			if s.value != nil {
+				collect_lambda_args(s.value, bind_result, out)
+			}
+		case ^parser.Return_Stmt:
+			if s.value != nil {
+				collect_lambda_args(s.value, bind_result, out)
+			}
 		}
+	}
+}
+
+// Find lambda expressions in expression trees and register their args
+collect_lambda_args :: proc(expr: parser.Expr, bind_result: ^binder.Bind_Result, out: ^map[binder.Scope_ID]^parser.Arguments) {
+	if expr == nil { return }
+	#partial switch e in expr {
+	case ^parser.Lambda_Expr:
+		// Find lambda scope by matching location
+		for &scope in bind_result.scopes {
+			if scope.kind == .Lambda && scope.loc.line == e.loc.line && scope.loc.col == e.loc.col {
+				out[scope.id] = &e.args
+				break
+			}
+		}
+	case ^parser.Call_Expr:
+		// Recurse into call args (lambda might be an argument)
+		collect_lambda_args(e.func, bind_result, out)
+		for arg in e.args { collect_lambda_args(arg, bind_result, out) }
+		for &kw in e.keywords { collect_lambda_args(kw.value, bind_result, out) }
+	case ^parser.If_Expr:
+		collect_lambda_args(e.body, bind_result, out)
+		collect_lambda_args(e.test, bind_result, out)
+		collect_lambda_args(e.orelse, bind_result, out)
+	case ^parser.Tuple_Expr:
+		for el in e.elts { collect_lambda_args(el, bind_result, out) }
+	case ^parser.List_Expr:
+		for el in e.elts { collect_lambda_args(el, bind_result, out) }
 	}
 }
 
@@ -2090,7 +2135,21 @@ backfill_inferred_returns :: proc(result: ^Check_Result, bind_result: ^binder.Bi
 		if parent == nil { continue }
 
 		// Find function symbol by name in parent scope
-		func_sym_id, found := parent.symbols[scope.name]
+		func_sym_id: binder.Symbol_ID
+		found := false
+		if scope.kind == .Lambda {
+			// Lambda scopes have name "<lambda>" — match by def location
+			for _, sym_id in parent.symbols {
+				sym := binder.result_get_symbol(bind_result, sym_id)
+				if sym != nil && sym.def_loc.line == scope.loc.line {
+					func_sym_id = sym_id
+					found = true
+					break
+				}
+			}
+		} else {
+			func_sym_id, found = parent.symbols[scope.name]
+		}
 		if !found { continue }
 
 		// Skip overloaded functions — callers use overload resolution, not body inference
