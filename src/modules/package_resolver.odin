@@ -140,61 +140,15 @@ extract_package_exports :: proc(
 
 	mod_scope := binder.result_get_scope(&bind_result, bind_result.module_scope)
 
-	// Track already-parsed submodules to avoid loops
-	parsed_subs := make(map[string]bool, 8, allocator)
+	// Track already-parsed submodules to avoid cycles (shared across recursion)
+	parsed_subs := make(map[string]bool, 16, allocator)
+	parsed_subs[file_path] = true // mark self
 
-	for imp in bind_result.imports {
-		if imp.level == 0 { continue } // skip absolute imports
-		if len(imp.module_name) == 0 { continue } // bare "from . import X" without module
-
-		// Resolve relative module to file
-		sub_file := _resolve_relative_import(pkg_root, imp.module_name, allocator)
-		if len(sub_file) == 0 { continue }
-		if sub_file in parsed_subs { continue }
-		parsed_subs[sub_file] = true
-
-		// Parse submodule using SHARED registry so Type_IDs are compatible
-		sub_module, sub_err := parser.bridge_parse(bridge, sub_file, allocator)
-		if sub_err != nil { continue }
-
-		sub_bind := binder.bind(sub_module, sub_file, allocator)
-		sub_flow := flow.analyze(sub_module, &sub_bind, sub_file, allocator)
-
-		// Use check_with_imports with shared registry — empty imports for sub-modules
-		empty_imports := make(map[binder.Symbol_ID]checker.Type_ID, 0, allocator)
-		sub_check := checker.check_with_imports(
-			sub_module, &sub_bind, &sub_flow, sub_file,
-			registry, &sub_builtins, empty_imports, allocator,
-		)
-
-		// Extract sub exports
-		sub_scope := binder.result_get_scope(&sub_bind, sub_bind.module_scope)
-		if sub_scope == nil { continue }
-
-		// Build name→type map from sub scope
-		sub_type_map := make(map[string]checker.Type_ID, 8, allocator)
-		if sub_scope != nil {
-			for name, sub_sym_id in sub_scope.symbols {
-				if type_id, has := sub_check.symbol_types[sub_sym_id]; has {
-					if type_id != checker.TYPE_UNKNOWN {
-						sub_type_map[name] = type_id
-					}
-				}
-			}
-		}
-
-		// Wire "from .app import Flask" → import_types[Flask_sym] = Flask_type
-		if mod_scope != nil && len(imp.names) > 0 {
-			for imp_name in imp.names {
-				local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
-				if sym_id, has_sym := mod_scope.symbols[local]; has_sym {
-					if type_id, has_type := sub_type_map[imp_name.name]; has_type {
-						import_types[sym_id] = type_id
-					}
-				}
-			}
-		}
-	}
+	// Recursively resolve relative imports within the package
+	_resolve_pkg_imports(
+		&bind_result, mod_scope, pkg_root, &import_types,
+		bridge, registry, &sub_builtins, &parsed_subs, allocator, 0,
+	)
 
 	// Flow analysis on main file
 	flow_result := flow.analyze(module, &bind_result, file_path, allocator)
@@ -218,6 +172,86 @@ extract_package_exports :: proc(
 	}
 
 	return exports, true
+}
+
+// Recursively resolve relative imports for a package file.
+// Parses each sub-module, extracts types, wires into import_types.
+// Max depth prevents runaway recursion in deeply nested packages.
+MAX_PKG_DEPTH :: 3
+
+@(private = "file")
+_resolve_pkg_imports :: proc(
+	bind_result: ^binder.Bind_Result,
+	mod_scope: ^binder.Scope,
+	pkg_root: string,
+	import_types: ^map[binder.Symbol_ID]checker.Type_ID,
+	bridge: ^parser.Bridge,
+	registry: ^checker.Type_Registry,
+	builtins: ^checker.Builtin_Names,
+	parsed_subs: ^map[string]bool,
+	allocator: mem.Allocator,
+	depth: int,
+) {
+	if depth >= MAX_PKG_DEPTH { return }
+	if mod_scope == nil { return }
+
+	for imp in bind_result.imports {
+		if imp.level == 0 { continue } // skip absolute imports
+		if len(imp.module_name) == 0 { continue } // bare "from . import X"
+
+		// Resolve relative module to file
+		sub_file := _resolve_relative_import(pkg_root, imp.module_name, allocator)
+		if len(sub_file) == 0 { continue }
+		if sub_file in parsed_subs { continue }
+		parsed_subs[sub_file] = true
+
+		// Parse submodule using SHARED registry
+		sub_module, sub_err := parser.bridge_parse(bridge, sub_file, allocator)
+		if sub_err != nil { continue }
+
+		sub_bind := binder.bind(sub_module, sub_file, allocator)
+
+		// Recursively resolve THIS sub-module's relative imports
+		sub_pkg_root := _parent_dir(sub_file)
+		sub_scope := binder.result_get_scope(&sub_bind, sub_bind.module_scope)
+		sub_import_types := make(map[binder.Symbol_ID]checker.Type_ID, 8, allocator)
+
+		_resolve_pkg_imports(
+			&sub_bind, sub_scope, sub_pkg_root, &sub_import_types,
+			bridge, registry, builtins, parsed_subs, allocator, depth + 1,
+		)
+
+		// Check sub-module with its resolved imports
+		sub_flow := flow.analyze(sub_module, &sub_bind, sub_file, allocator)
+		sub_check := checker.check_with_imports(
+			sub_module, &sub_bind, &sub_flow, sub_file,
+			registry, builtins, sub_import_types, allocator,
+		)
+
+		// Build name→type map from sub scope
+		sub_type_map := make(map[string]checker.Type_ID, 8, allocator)
+		if sub_scope != nil {
+			for name, sub_sym_id in sub_scope.symbols {
+				if type_id, has := sub_check.symbol_types[sub_sym_id]; has {
+					if type_id != checker.TYPE_UNKNOWN {
+						sub_type_map[name] = type_id
+					}
+				}
+			}
+		}
+
+		// Wire imported names into caller's import_types
+		if len(imp.names) > 0 {
+			for imp_name in imp.names {
+				local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
+				if sym_id, has_sym := mod_scope.symbols[local]; has_sym {
+					if type_id, has_type := sub_type_map[imp_name.name]; has_type {
+						import_types[sym_id] = type_id
+					}
+				}
+			}
+		}
+	}
 }
 
 // Get parent directory of a file path.

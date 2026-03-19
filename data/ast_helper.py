@@ -22,7 +22,7 @@ def serialize(node):
         if hasattr(node, "lineno"):
             result["_loc"] = [
                 node.lineno,
-                node.col_offset,
+                getattr(node, "col_offset", 0) or 0,
                 getattr(node, "end_lineno", None) or 0,
                 getattr(node, "end_col_offset", None) or 0,
             ]
