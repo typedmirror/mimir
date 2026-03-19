@@ -1428,7 +1428,76 @@ cmd_check_single :: proc(
 
 	flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
 
-	check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
+	// Resolve third-party imports from package cache
+	import_types := make(map[binder.Symbol_ID]checker.Type_ID, 8, arena.allocator)
+	registry := checker.init_registry(arena.allocator)
+	builtins := checker.init_builtins(&registry)
+
+	pkg_cache, cache_ok := platform.init_cache(arena.allocator)
+	if cache_ok == nil {
+		// Resolve virtual modules
+		vreg := checker.init_virtual_registry(&registry)
+		virtual := checker.resolve_virtual_imports(&vreg, &bind_result, &registry)
+		for sym_id, type_id in virtual {
+			import_types[sym_id] = type_id
+		}
+
+		// Resolve third-party imports from cache
+		mod_scope := binder.result_get_scope(&bind_result, bind_result.module_scope)
+		if mod_scope != nil {
+			parsed_pkgs := make(map[string]modules.Module_Exports, 8, arena.allocator)
+			for imp in bind_result.imports {
+				if imp.level > 0 { continue } // skip relative
+				if checker.is_virtual_module(&vreg, imp.module_name) { continue }
+
+				// Check if already parsed
+				top := imp.module_name
+				for k := 0; k < len(top); k += 1 {
+					if top[k] == '.' { top = top[:k]; break }
+				}
+
+				if _, already := parsed_pkgs[imp.module_name]; !already {
+					pkg_file, found := modules.resolve_package_file(imp.module_name, &pkg_cache, arena.allocator)
+					if found {
+						pkg_exports, extract_ok := modules.extract_package_exports(
+							pkg_file, imp.module_name, bridge, &registry, arena.allocator,
+						)
+						if extract_ok {
+							parsed_pkgs[imp.module_name] = pkg_exports
+
+							// Wire into import_types
+							if len(imp.names) == 0 && !imp.is_star {
+								// "import X" → Module_Type
+								local_name := top
+								if sym_id, ok := mod_scope.symbols[local_name]; ok {
+									mod_type_id := checker.register_type(&registry, checker.Module_Type{
+										name    = imp.module_name,
+										exports = pkg_exports.types,
+									})
+									import_types[sym_id] = mod_type_id
+								}
+							} else if !imp.is_star {
+								// "from X import Y" → look up each name
+								for imp_name in imp.names {
+									local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
+									if sym_id, ok := mod_scope.symbols[local]; ok {
+										if type_id, found2 := pkg_exports.types[imp_name.name]; found2 {
+											import_types[sym_id] = type_id
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	check_result := checker.check_with_imports(
+		module, &bind_result, &flow_result, file,
+		&registry, &builtins, import_types, arena.allocator,
+	)
 
 	// Emit flow diagnostics AFTER checker (checker may suppress F002 for Never-returning calls)
 	for d in flow_result.diagnostics {
@@ -1512,6 +1581,14 @@ cmd_check_multi :: proc(
 	// 6. Init resolution context + virtual module registry
 	res_ctx := modules.init_resolution_context(&registry, arena.allocator)
 	vreg := checker.init_virtual_registry(&registry)
+
+	// 6b. Wire package cache for third-party import resolution
+	pkg_cache, cache_err := platform.init_cache(arena.allocator)
+	if cache_err == nil {
+		res_ctx.bridge = bridge
+		res_ctx.cache = &pkg_cache
+		res_ctx.parsed_packages = make(map[string]modules.Module_Exports, 16, arena.allocator)
+	}
 
 	// 7. For each module in topo order: resolve → flow → check → export
 	error_count := parse_errors

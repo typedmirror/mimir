@@ -2,8 +2,10 @@ package modules
 
 import "core:mem"
 
-import binder  "mimir:binder"
-import checker "mimir:checker"
+import parser   "mimir:parser"
+import binder   "mimir:binder"
+import checker  "mimir:checker"
+import platform "mimir:platform"
 
 // ==================== Module Exports ====================
 
@@ -14,9 +16,13 @@ Module_Exports :: struct {
 // ==================== Resolution Context ====================
 
 Resolution_Context :: struct {
-	exports:   map[string]Module_Exports, // qualified_name → exports
-	registry:  ^checker.Type_Registry,
-	allocator: mem.Allocator,
+	exports:          map[string]Module_Exports, // qualified_name → exports
+	registry:         ^checker.Type_Registry,
+	allocator:        mem.Allocator,
+	// Third-party package resolution (optional — nil if no cache)
+	bridge:           ^parser.Bridge,
+	cache:            ^platform.Cache,
+	parsed_packages:  map[string]Module_Exports,  // lazy cache: module_name → exports
 }
 
 init_resolution_context :: proc(
@@ -91,6 +97,18 @@ resolve_imports :: proc(
 
 		// Look up target module's exports
 		target_exports, has_exports := ctx.exports[edge.target_module]
+
+		// Fallback: resolve from package cache if not a project module
+		if !has_exports && ctx.cache != nil && ctx.bridge != nil {
+			pkg_exports, pkg_ok := resolve_from_package_cache(
+				imp.module_name, ctx,
+			)
+			if pkg_ok {
+				target_exports = pkg_exports
+				has_exports = true
+			}
+		}
+
 		if !has_exports { continue }
 
 		if edge.is_whole {
@@ -129,4 +147,37 @@ resolve_imports :: proc(
 	}
 
 	return result
+}
+
+// ==================== Package Cache Resolution ====================
+
+// Resolve a third-party module from the package cache.
+// Lazily parses the package file and caches the result.
+@(private = "file")
+resolve_from_package_cache :: proc(
+	module_name: string,
+	ctx: ^Resolution_Context,
+) -> (exports: Module_Exports, ok: bool) {
+	// Check lazy cache first
+	if cached, has := ctx.parsed_packages[module_name]; has {
+		return cached, true
+	}
+
+	// Find the file in the cache
+	file_path, found := resolve_package_file(module_name, ctx.cache, ctx.allocator)
+	if !found { return {}, false }
+
+	// Parse + extract types
+	pkg_exports, extract_ok := extract_package_exports(
+		file_path, module_name, ctx.bridge, ctx.registry, ctx.allocator,
+	)
+	if !extract_ok { return {}, false }
+
+	// Cache for subsequent lookups
+	ctx.parsed_packages[module_name] = pkg_exports
+
+	// Also store in main exports map so collect_exports-style lookups work
+	ctx.exports[module_name] = pkg_exports
+
+	return pkg_exports, true
 }
