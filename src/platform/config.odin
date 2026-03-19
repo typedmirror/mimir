@@ -12,6 +12,7 @@ Project_Config :: struct {
 	requires_python: string,
 	dependencies:    [dynamic]Dep_Spec,
 	file_path:       string,              // where mimir.toml was found
+	analysis_level:  string,              // §28.4: basic | inference | security | strict (empty = not set)
 }
 
 // Read mimir.toml from a path.
@@ -37,6 +38,11 @@ read_config :: proc(path: string, allocator: mem.Allocator) -> (Project_Config, 
 	}
 	if rp, ok := toml_get_string(&doc, "project", "requires-python"); ok {
 		config.requires_python = rp
+	}
+
+	// Read [analysis] section
+	if level, ok := toml_get_string(&doc, "analysis", "level"); ok {
+		config.analysis_level = level
 	}
 
 	// Read [dependencies] section — keys are package names, values are constraints

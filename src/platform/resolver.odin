@@ -110,9 +110,30 @@ resolve :: proc(python: string, deps: []Dep_Spec, allocator: mem.Allocator) -> (
 		ver_str, ver_ok := ver_val.(json.String)
 		if !name_ok || !ver_ok { continue }
 
+		// Extract SHA256 content hash: download_info.archive_info.hashes.sha256
+		content_hash := ""
+		if dl_val, has_dl := item_obj["download_info"]; has_dl {
+			if dl_obj, dl_ok := dl_val.(json.Object); dl_ok {
+				if ai_val, has_ai := dl_obj["archive_info"]; has_ai {
+					if ai_obj, ai_ok := ai_val.(json.Object); ai_ok {
+						if h_val, has_h := ai_obj["hashes"]; has_h {
+							if h_obj, h_ok := h_val.(json.Object); h_ok {
+								if sha_val, has_sha := h_obj["sha256"]; has_sha {
+									if sha_str, sha_ok := sha_val.(json.String); sha_ok {
+										content_hash = fmt.aprintf("sha256:%s", sha_str, allocator = allocator)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		append(&packages, Locked_Package{
-			name    = strings.to_lower(name_str, allocator),
-			version = strings.clone(ver_str, allocator),
+			name         = strings.to_lower(name_str, allocator),
+			version      = strings.clone(ver_str, allocator),
+			content_hash = content_hash,
 		})
 	}
 

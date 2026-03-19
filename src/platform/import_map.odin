@@ -10,10 +10,11 @@ import "core:strings"
 // and (future) by mimir check for third-party module resolution.
 
 Import_Map_Entry :: struct {
-	name:    string,
-	version: string,
-	path:    string,
-	hash:    string,
+	name:         string,
+	version:      string,
+	path:         string,
+	hash:         string,         // DEPRECATED: FNV-64a (legacy compat)
+	content_hash: string,         // SHA256 from PyPI archive
 }
 
 Import_Map :: struct {
@@ -31,28 +32,26 @@ generate_import_map :: proc(lf: ^Lockfile, cache: ^Cache, allocator: mem.Allocat
 	for pkg in lf.packages {
 		path := ""
 
-		// Try CAS path first
-		if len(pkg.hash) > 0 {
+		// Try versioned dir first (primary layout)
+		ver_path, ver_found := find_package_version(cache, pkg.name, pkg.version)
+		if ver_found {
+			path = ver_path
+		}
+
+		// Fall back to CAS path (legacy)
+		if path == "" && len(pkg.hash) > 0 {
 			cas_path := cas_dir(cache, pkg.hash)
 			if os.is_directory(cas_path) {
 				path = cas_path
 			}
 		}
 
-		// Fall back to legacy versioned dir
-		if path == "" {
-			legacy_path, found := find_package_version(cache, pkg.name, pkg.version)
-			if found {
-				path = legacy_path
-			}
-		}
-
 		if path != "" {
 			append(&im.packages, Import_Map_Entry{
-				name    = pkg.name,
-				version = pkg.version,
-				path    = path,
-				hash    = pkg.hash,
+				name         = pkg.name,
+				version      = pkg.version,
+				path         = path,
+				content_hash = pkg.content_hash,
 			})
 		}
 	}
@@ -79,8 +78,12 @@ write_import_map :: proc(im: ^Import_Map, project_dir: string, allocator: mem.Al
 	for entry, i in im.packages {
 		append_str(&buf, fmt.tprintf("    \"%s\": {\n", json_escape(entry.name)))
 		append_str(&buf, fmt.tprintf("      \"version\": \"%s\",\n", json_escape(entry.version)))
-		append_str(&buf, fmt.tprintf("      \"path\": \"%s\",\n", json_escape(entry.path)))
-		append_str(&buf, fmt.tprintf("      \"hash\": \"%s\"\n", json_escape(entry.hash)))
+		append_str(&buf, fmt.tprintf("      \"path\": \"%s\"", json_escape(entry.path)))
+		if len(entry.content_hash) > 0 {
+			append_str(&buf, fmt.tprintf(",\n      \"content_hash\": \"%s\"\n", json_escape(entry.content_hash)))
+		} else {
+			append_str(&buf, "\n")
+		}
 		if i < len(im.packages) - 1 {
 			append_str(&buf, "    },\n")
 		} else {

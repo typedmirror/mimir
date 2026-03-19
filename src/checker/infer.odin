@@ -1727,6 +1727,17 @@ bind_match_pattern :: proc(
 		}
 		// Narrow subject to the class instance type
 		if class_type != TYPE_UNKNOWN && class_type != TYPE_ANY {
+			// Builtin class patterns (int, str, float, bool): class_type is a Callable_Type
+			// (constructor). Extract return_type for the narrowed type.
+			ct := get_type(ctx.reg, class_type)
+			if ct != nil {
+				#partial switch callable in ct.info {
+				case Callable_Type:
+					if callable.return_type != TYPE_UNKNOWN {
+						return callable.return_type
+					}
+				}
+			}
 			return make_instance_type(ctx.reg, class_type)
 		}
 		return subject_type

@@ -10,9 +10,10 @@ import "core:strings"
 // All packages (direct + transitive) with exact pinned versions.
 
 Locked_Package :: struct {
-	name:    string,
-	version: string,
-	hash:    string, // CAS hash (FNV-64a of "name==version")
+	name:         string,
+	version:      string,
+	hash:         string, // DEPRECATED: FNV-64a of "name==version" (legacy compat)
+	content_hash: string, // SHA256 of package archive from PyPI ("sha256:<hex>")
 }
 
 Lockfile :: struct {
@@ -51,7 +52,18 @@ read_lockfile :: proc(path: string, allocator: mem.Allocator) -> (Lockfile, Plat
 		}
 	}
 
-	// Read [hashes] section (Layer 4)
+	// Read [content_hashes] section (true SHA256 from PyPI)
+	if ch_table, has_ch := doc.tables["content_hashes"]; has_ch {
+		for &pkg in lf.packages {
+			if val, val_ok := ch_table.entries[pkg.name]; val_ok {
+				if s, is_str := val.(string); is_str {
+					pkg.content_hash = s
+				}
+			}
+		}
+	}
+
+	// Read [hashes] section (legacy FNV-64a, for backwards compat)
 	if hash_table, has_hashes := doc.tables["hashes"]; has_hashes {
 		for &pkg in lf.packages {
 			if val, val_ok := hash_table.entries[pkg.name]; val_ok {
@@ -86,18 +98,18 @@ write_lockfile :: proc(lf: ^Lockfile, path: string, allocator: mem.Allocator) ->
 		toml_set(&doc, "packages", pkg.name, pkg.version, allocator)
 	}
 
-	// Build [hashes] section (Layer 4 — CAS integrity)
-	has_hashes := false
+	// Build [content_hashes] section (SHA256 from PyPI)
+	has_content_hashes := false
 	for pkg in lf.packages {
-		if len(pkg.hash) > 0 {
-			has_hashes = true
+		if len(pkg.content_hash) > 0 {
+			has_content_hashes = true
 			break
 		}
 	}
-	if has_hashes {
+	if has_content_hashes {
 		for pkg in lf.packages {
-			if len(pkg.hash) > 0 {
-				toml_set(&doc, "hashes", pkg.name, pkg.hash, allocator)
+			if len(pkg.content_hash) > 0 {
+				toml_set(&doc, "content_hashes", pkg.name, pkg.content_hash, allocator)
 			}
 		}
 	}

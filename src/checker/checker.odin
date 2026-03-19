@@ -992,6 +992,19 @@ check_stmt :: proc(
 		for target in s.targets {
 			assign_target(target, rhs_type, ctx)
 		}
+		// Register functional NamedTuple in class_types for isinstance support
+		if rhs_type != TYPE_UNKNOWN && len(s.targets) == 1 {
+			if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+					rt := get_type(ctx.reg, rhs_type)
+					if rt != nil {
+						if _, is_class := rt.info.(Class_Type); is_class {
+							ctx.reg.class_types[sym_id] = rhs_type
+						}
+					}
+				}
+			}
+		}
 		// GroupBy state recording: result = df.groupby("key")
 		// Record source DataFrame + group key for column-aware aggregation
 		if len(s.targets) == 1 {

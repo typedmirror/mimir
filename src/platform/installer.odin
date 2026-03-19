@@ -89,11 +89,13 @@ ensure_dependencies :: proc(
 
 // Install a single package at an exact version with --no-deps.
 // Used by lockfile install — all transitive deps are already resolved.
+// content_hash is written as .mimir-hash marker after install (optional).
 install_package_pinned :: proc(
 	python: string,
 	name, version: string,
 	target_dir: string,
 	allocator: mem.Allocator,
+	content_hash: string = "",
 ) -> Platform_Error {
 	// Validate name/version to prevent pip flag injection via crafted lockfiles
 	if len(name) > 0 && name[0] == '-' {
@@ -140,6 +142,15 @@ install_package_pinned :: proc(
 		return Platform_Error_Data{msg = fmt.tprintf("failed to move installed packages for '%s': %v", name, rename_err)}
 	}
 
+	// Write content hash marker for integrity verification
+	if len(content_hash) > 0 {
+		marker_err := write_hash_marker(target_dir, content_hash, allocator)
+		if marker_err != nil {
+			// Non-fatal — package is installed, just unverified
+			fmt.printfln("  warning: could not write hash marker for %s: %v", name, marker_err)
+		}
+	}
+
 	return nil
 }
 
@@ -151,36 +162,56 @@ install_from_lockfile :: proc(
 	lf: ^Lockfile,
 	cache: ^Cache,
 	allocator: mem.Allocator,
+	force: bool = false,
 ) -> Platform_Error {
 	installed := 0
 	skipped := 0
 
 	for &pkg in lf.packages {
-		// Try CAS path first (Layer 4)
-		cas_path, cas_key, cas_found := find_cas_package(cache, pkg.name, pkg.version)
+		// Check versioned dir first (primary layout)
+		ver_path, ver_found, ver_verified := find_verified_package(
+			cache, pkg.name, pkg.version, pkg.content_hash,
+		)
+		if ver_found {
+			if len(pkg.content_hash) > 0 && !ver_verified {
+				// Has hash but verification failed — check if marker exists
+				_, marker_exists := verify_hash_marker(ver_path, pkg.content_hash, allocator)
+				if marker_exists {
+					// Marker exists but doesn't match — integrity issue
+					if !force {
+						fmt.printfln("  warning: hash mismatch for %s==%s, use --force to reinstall", pkg.name, pkg.version)
+					} else {
+						// Force reinstall
+						target := package_version_dir(cache, pkg.name, pkg.version)
+						fmt.printfln("  reinstalling %s==%s (hash mismatch)...", pkg.name, pkg.version)
+						inst_err := install_package_pinned(python, pkg.name, pkg.version, target, allocator, pkg.content_hash)
+						if inst_err != nil { return inst_err }
+						installed += 1
+						continue
+					}
+				}
+			}
+			skipped += 1
+			continue
+		}
+
+		// Fall back to CAS dir (legacy)
+		cas_path, _, cas_found := find_cas_package(cache, pkg.name, pkg.version)
 		if cas_found {
-			pkg.hash = cas_key
+			_ = cas_path
 			skipped += 1
 			continue
 		}
 
-		// Fall back to legacy versioned dir
-		_, legacy_found := find_package_version(cache, pkg.name, pkg.version)
-		if legacy_found {
-			// Compute hash for legacy package (for import map generation)
-			pkg.hash = cas_hash(pkg.name, pkg.version, allocator)
-			skipped += 1
-			continue
-		}
-
-		// Install to CAS dir
-		target, key := cas_target_dir(cache, pkg.name, pkg.version)
+		// Install to versioned dir (new primary layout)
+		target := package_version_dir(cache, pkg.name, pkg.version)
+		parent := parent_dir(target)
+		os.make_directory_all(parent)
 		fmt.printfln("  installing %s==%s...", pkg.name, pkg.version)
-		install_err := install_package_pinned(python, pkg.name, pkg.version, target, allocator)
+		install_err := install_package_pinned(python, pkg.name, pkg.version, target, allocator, pkg.content_hash)
 		if install_err != nil {
 			return install_err
 		}
-		pkg.hash = key
 		installed += 1
 	}
 

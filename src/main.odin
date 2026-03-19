@@ -101,6 +101,10 @@ main :: proc() {
 		cmd_task(args[2:])
 	case "deps":
 		cmd_deps(args[2:])
+	case "query":
+		cmd_query(args[2:])
+	case "cache":
+		cmd_cache(args[2:])
 	case "report":
 		cmd_report(args[2:])
 	case "generate-schema":
@@ -185,73 +189,586 @@ cmd_task :: proc(args: []string) {
 
 cmd_deps :: proc(args: []string) {
 	target := "."
-	if len(args) > 0 { target = args[0] }
+	if len(args) > 0 && args[0] != "usage" { target = args[0] }
+
+	// Check for "mimir deps usage [.]" subcommand
+	is_usage := false
+	for arg in args {
+		if arg == "usage" { is_usage = true }
+	}
 
 	p: Pipeline; ok := pipeline_start("deps", target, &p)
 	if !ok { return }
 	defer pipeline_stop(&p)
 
+	alloc := p.arena.allocator
+
+	// Load project config and lockfile
 	config := platform.load_project_config()
-	declared := make(map[string]bool, 16, p.arena.allocator)
+	declared := make(map[string]bool, 16, alloc)
 	if config != nil {
 		deps := platform.get_dependencies(config)
 		for name in deps {
-			declared[name] = true
+			declared[platform.normalize_pkg_name(name)] = true
 		}
 	}
 
-	imported := make(map[string]bool, 32, p.arena.allocator)
-	stdlib := make(map[string]bool, 32, p.arena.allocator)
-	STDLIB_MODULES :: [?]string{
-		"os", "sys", "io", "re", "json", "math", "time", "datetime",
-		"collections", "itertools", "functools", "typing", "pathlib",
-		"logging", "unittest", "hashlib", "hmac", "secrets", "random",
-		"threading", "multiprocessing", "asyncio", "subprocess", "socket",
-		"http", "urllib", "email", "csv", "sqlite3", "pickle", "shelve",
-		"abc", "dataclasses", "enum", "copy", "pprint", "textwrap",
-		"string", "struct", "array", "queue", "shutil", "tempfile",
-		"glob", "fnmatch", "argparse", "configparser", "traceback",
-		"inspect", "importlib", "contextlib", "warnings",
+	// Load lockfile for ghost dep detection
+	transitive := make(map[string]bool, 32, alloc)
+	if config != nil {
+		lock_path := platform.lockfile_path(config.file_path, alloc)
+		lf, lf_err := platform.read_lockfile(lock_path, alloc)
+		if lf_err == nil {
+			for pkg in lf.packages {
+				transitive[platform.normalize_pkg_name(pkg.name)] = true
+			}
+		}
 	}
-	for s in STDLIB_MODULES { stdlib[s] = true }
+
+	// Collect imports from all project files
+	imported := make(map[string]bool, 32, alloc)
+	// For usage mode: track import counts per package
+	import_counts := make(map[string]int, 32, alloc)
 
 	for file in p.files {
 		module := pipeline_parse_file(&p, "deps", file)
 		if module == nil { continue }
-		bind_result := binder.bind(module, file, p.arena.allocator)
+		bind_result := binder.bind(module, file, alloc)
 		for &imp in bind_result.imports {
-			// Extract top-level module name
-			top := imp.module_name
-			for i := 0; i < len(top); i += 1 {
-				if top[i] == '.' { top = top[:i]; break }
-			}
-			if !(top in stdlib) && top != "mimir" {
-				imported[top] = true
+			if imp.level > 0 { continue } // skip relative imports
+			top := platform.top_level_module(imp.module_name)
+			if len(top) == 0 { continue }
+			if platform.is_stdlib_module(top) { continue }
+			if strings.has_prefix(top, "mimir") { continue }
+			imported[top] = true
+			if is_usage {
+				// Count imported symbols
+				n := len(imp.names) if len(imp.names) > 0 else 1
+				import_counts[top] = (import_counts[top] or_else 0) + n
 			}
 		}
 	}
 
-	// Report
+	if is_usage {
+		// Usage report: imported symbols per package
+		fmt.printfln("Package usage:")
+		for name in imported {
+			count := import_counts[name] or_else 0
+			status := "declared"
+			norm := platform.normalize_pkg_name(name)
+			if !(norm in declared) {
+				if norm in transitive {
+					status = "ghost (transitive)"
+				} else {
+					status = "undeclared"
+				}
+			}
+			fmt.printfln("  %-20s %3d symbols imported  [%s]", name, count, status)
+		}
+		return
+	}
+
+	// Standard deps report
+	ghost_count := 0
 	unused_count := 0
+	missing_count := 0
+
+	// Ghost deps: imported, in transitive but not direct
+	for name in imported {
+		norm := platform.normalize_pkg_name(name)
+		if norm in declared { continue }
+		if norm in transitive {
+			if ghost_count == 0 { fmt.printfln("Ghost dependencies (transitive deps used directly — add to mimir.toml):") }
+			fmt.printfln("  %s  [DEP001]", name)
+			ghost_count += 1
+		}
+	}
+
+	// Unused: declared but not imported
 	for name in declared {
-		if !(name in imported) {
+		found := false
+		for iname in imported {
+			if platform.normalize_pkg_name(iname) == name {
+				found = true
+				break
+			}
+		}
+		if !found {
 			if unused_count == 0 { fmt.printfln("Unused (in mimir.toml but not imported):") }
 			fmt.printfln("  %s", name)
 			unused_count += 1
 		}
 	}
 
-	missing_count := 0
+	// Missing: imported, not in any dep list
 	for name in imported {
-		if !(name in declared) {
-			if missing_count == 0 { fmt.printfln("Missing (imported but not in mimir.toml):") }
-			fmt.printfln("  %s", name)
-			missing_count += 1
+		norm := platform.normalize_pkg_name(name)
+		if norm in declared { continue }
+		if norm in transitive { continue } // already reported as ghost
+		if missing_count == 0 { fmt.printfln("Missing (imported but not declared):") }
+		fmt.printfln("  %s", name)
+		missing_count += 1
+	}
+
+	if ghost_count == 0 && unused_count == 0 && missing_count == 0 {
+		fmt.printfln("mimir deps: all dependencies aligned (%d declared, %d imported)", len(declared), len(imported))
+	}
+}
+
+cmd_cache :: proc(args: []string) {
+	if len(args) == 0 {
+		fmt.eprintln("mimir cache: no subcommand specified")
+		fmt.eprintln("Usage:")
+		fmt.eprintln("  mimir cache list              — show cached packages")
+		fmt.eprintln("  mimir cache gc                — remove packages not in current lockfile")
+		fmt.eprintln("  mimir cache clean             — remove all cached packages")
+		os.exit(1)
+	}
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+	allocator := arena.allocator
+
+	cache, cache_err := platform.init_cache(allocator)
+	if cache_err != nil {
+		fmt.eprintfln("mimir cache: %s", platform.error_msg(cache_err))
+		os.exit(1)
+	}
+
+	switch args[0] {
+	case "list":
+		entries := platform.list_cache(&cache, allocator)
+		if len(entries) == 0 {
+			fmt.printfln("Cache is empty (%s)", cache.root)
+			return
+		}
+		fmt.printfln("Cached packages (%s):", cache.root)
+		versioned := 0
+		cas_count := 0
+		for entry in entries {
+			if entry.is_cas {
+				fmt.printfln("  [cas] %s", entry.name)
+				cas_count += 1
+			} else if len(entry.version) > 0 {
+				fmt.printfln("  %s==%s", entry.name, entry.version)
+				versioned += 1
+			} else {
+				fmt.printfln("  %s (unversioned)", entry.name)
+				versioned += 1
+			}
+		}
+		fmt.printfln("  %d versioned, %d CAS entries", versioned, cas_count)
+
+	case "gc":
+		// Find lockfile
+		cwd, cwd_err := os.get_working_directory(allocator)
+		if cwd_err != nil { cwd = "." }
+		config_path, config_found := platform.find_config(cwd, allocator)
+		if !config_found {
+			fmt.eprintln("mimir cache gc: no mimir.toml found — cannot determine which packages to keep")
+			fmt.eprintln("  use 'mimir cache clean' to remove all cached packages")
+			os.exit(1)
+		}
+
+		lock_path := platform.lockfile_path(config_path, allocator)
+		lf, lf_err := platform.read_lockfile(lock_path, allocator)
+		if lf_err != nil {
+			fmt.eprintln("mimir cache gc: no mimir.lock found — run 'mimir lock' first")
+			os.exit(1)
+		}
+
+		removed, gc_err := platform.gc_cache(&cache, &lf, allocator)
+		if gc_err != nil {
+			fmt.eprintfln("mimir cache gc: %s", platform.error_msg(gc_err))
+			os.exit(1)
+		}
+
+		if removed == 0 {
+			fmt.printfln("mimir cache gc: nothing to remove (all packages in lockfile)")
+		} else {
+			fmt.printfln("mimir cache gc: removed %d package(s)", removed)
+		}
+
+	case "clean":
+		removed, clean_err := platform.clean_cache(&cache, allocator)
+		if clean_err != nil {
+			fmt.eprintfln("mimir cache clean: %s", platform.error_msg(clean_err))
+			os.exit(1)
+		}
+		if removed == 0 {
+			fmt.printfln("mimir cache clean: cache already empty")
+		} else {
+			fmt.printfln("mimir cache clean: removed %d package(s)", removed)
+		}
+
+	case:
+		fmt.eprintfln("mimir cache: unknown subcommand '%s'", args[0])
+		fmt.eprintln("Available: list, gc, clean")
+		os.exit(1)
+	}
+}
+
+cmd_query :: proc(args: []string) {
+	if len(args) == 0 {
+		fmt.eprintln("mimir query: no subcommand specified")
+		fmt.eprintln("Usage:")
+		fmt.eprintln("  mimir query type <name> <file>      — resolve symbol type")
+		fmt.eprintln("  mimir query symbols <file>           — list all symbols with types")
+		fmt.eprintln("  mimir query callers <name> <file>    — find call sites of a function")
+		fmt.eprintln("  mimir query imports <file>           — list all imports")
+		fmt.eprintln("  mimir query exports <file>           — list module-level symbols")
+		os.exit(1)
+	}
+
+	subcmd := args[0]
+	switch subcmd {
+	case "type":
+		if len(args) < 3 {
+			fmt.eprintln("mimir query type: requires <name> <file>")
+			os.exit(1)
+		}
+		query_type(args[1], args[2])
+	case "symbols":
+		if len(args) < 2 {
+			fmt.eprintln("mimir query symbols: requires <file>")
+			os.exit(1)
+		}
+		query_symbols(args[1])
+	case "callers":
+		if len(args) < 3 {
+			fmt.eprintln("mimir query callers: requires <name> <file>")
+			os.exit(1)
+		}
+		query_callers(args[1], args[2])
+	case "imports":
+		if len(args) < 2 {
+			fmt.eprintln("mimir query imports: requires <file>")
+			os.exit(1)
+		}
+		query_imports(args[1])
+	case "exports":
+		if len(args) < 2 {
+			fmt.eprintln("mimir query exports: requires <file>")
+			os.exit(1)
+		}
+		query_exports(args[1])
+	case:
+		fmt.eprintfln("mimir query: unknown subcommand '%s'", subcmd)
+		fmt.eprintln("Available: type, symbols, callers, imports, exports")
+		os.exit(1)
+	}
+}
+
+// Run full analysis pipeline on a single file and return results.
+@(private = "file")
+Query_Result :: struct {
+	module:       ^parser.Module,
+	bind_result:  binder.Bind_Result,
+	flow_result:  flow.Flow_Result,
+	check_result: checker.Check_Result,
+	file:         string,
+}
+
+@(private = "file")
+query_analyze :: proc(file: string, p: ^Pipeline) -> (Query_Result, bool) {
+	module := pipeline_parse_file(p, "query", file)
+	if module == nil { return {}, false }
+
+	alloc := p.arena.allocator
+	bind_result := binder.bind(module, file, alloc)
+	flow_result := flow.analyze(module, &bind_result, file, alloc)
+	check_result := checker.check(module, &bind_result, &flow_result, file, alloc)
+
+	return Query_Result{
+		module       = module,
+		bind_result  = bind_result,
+		flow_result  = flow_result,
+		check_result = check_result,
+		file         = file,
+	}, true
+}
+
+@(private = "file")
+query_type :: proc(name: string, file: string) {
+	p: Pipeline
+	// Single-file pipeline
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		fmt.eprintln("mimir: failed to start parser")
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+	p.bridge = bridge
+
+	arena_err := core.arena_init(&p.arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&p.arena)
+
+	qr, ok := query_analyze(file, &p)
+	if !ok { os.exit(1) }
+
+	// Find the symbol by name (skip builtins — they have line 0)
+	found := false
+	for sym in qr.bind_result.symbols {
+		if sym.name == name && sym.def_loc.line > 0 {
+			type_id, has_type := qr.check_result.symbol_types[sym.id]
+			if has_type && type_id != checker.TYPE_UNKNOWN {
+				type_str := checker.type_to_string(&qr.check_result.registry, type_id)
+				fmt.printfln("%s: %s", name, type_str)
+			} else {
+				fmt.printfln("%s: <unknown>", name)
+			}
+			found = true
+		}
+	}
+	if !found {
+		fmt.eprintfln("mimir query type: symbol '%s' not found in %s", name, file)
+		os.exit(1)
+	}
+}
+
+@(private = "file")
+query_symbols :: proc(file: string) {
+	p: Pipeline
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		fmt.eprintln("mimir: failed to start parser")
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+	p.bridge = bridge
+
+	arena_err := core.arena_init(&p.arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&p.arena)
+
+	qr, ok := query_analyze(file, &p)
+	if !ok { os.exit(1) }
+
+	// List user-defined symbols with types (skip builtins at line 0)
+	fmt.printfln("Symbols in %s:", file)
+	for sym in qr.bind_result.symbols {
+		if len(sym.name) == 0 { continue }
+		if sym.def_loc.line == 0 { continue } // skip builtins
+
+		type_str := "<unknown>"
+		if type_id, has := qr.check_result.symbol_types[sym.id]; has && type_id != checker.TYPE_UNKNOWN {
+			type_str = checker.type_to_string(&qr.check_result.registry, type_id)
+		}
+
+		kind_str := ""
+		#partial switch sym.kind {
+		case .Variable:  kind_str = "var"
+		case .Function:  kind_str = "func"
+		case .Class:     kind_str = "class"
+		case .Parameter: kind_str = "param"
+		case .Import:    kind_str = "import"
+		case:            kind_str = "other"
+		}
+
+		fmt.printfln("  %-8s %-20s : %s", kind_str, sym.name, type_str)
+	}
+}
+
+@(private = "file")
+query_callers :: proc(name: string, file: string) {
+	p: Pipeline
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		fmt.eprintln("mimir: failed to start parser")
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+	p.bridge = bridge
+
+	arena_err := core.arena_init(&p.arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&p.arena)
+
+	qr, ok := query_analyze(file, &p)
+	if !ok { os.exit(1) }
+
+	// Find the target symbol (user-defined, skip builtins)
+	target_id := binder.INVALID_SYMBOL
+	for sym in qr.bind_result.symbols {
+		if sym.name == name && sym.def_loc.line > 0 && (sym.kind == .Function || sym.kind == .Class) {
+			target_id = sym.id
+			break
+		}
+	}
+	if target_id == binder.INVALID_SYMBOL {
+		fmt.eprintfln("mimir query callers: function '%s' not found in %s", name, file)
+		os.exit(1)
+	}
+
+	// Scan all refs — find call sites via binder ref map
+	call_count := 0
+	_check_call_expr :: proc(expr: parser.Expr, target_id: binder.Symbol_ID, br: ^binder.Bind_Result, file: string, count: ^int) {
+		if expr == nil { return }
+		if call, ok := expr.(^parser.Call_Expr); ok {
+			if name_expr, nok := call.func.(^parser.Name_Expr); nok {
+				if ref_id, has := binder.get_ref(br, rawptr(name_expr)); has {
+					if ref_id == target_id {
+						fmt.printfln("  %s:%d:%d", file, name_expr.loc.line, name_expr.loc.col)
+						count^ += 1
+					}
+				}
+			}
+		}
+	}
+	_scan_calls :: proc(stmts: []parser.Stmt, target_id: binder.Symbol_ID, br: ^binder.Bind_Result, file: string, count: ^int) {
+		for stmt in stmts {
+			#partial switch s in stmt {
+			case ^parser.Expr_Stmt:
+				_check_call_expr(s.value, target_id, br, file, count)
+			case ^parser.Assign:
+				_check_call_expr(s.value, target_id, br, file, count)
+			case ^parser.Ann_Assign:
+				if s.value != nil {
+					_check_call_expr(s.value, target_id, br, file, count)
+				}
+			case ^parser.Return_Stmt:
+				if s.value != nil {
+					_check_call_expr(s.value, target_id, br, file, count)
+				}
+			case ^parser.Func_Def:
+				_scan_calls(s.body, target_id, br, file, count)
+			case ^parser.Class_Def:
+				_scan_calls(s.body, target_id, br, file, count)
+			case ^parser.If_Stmt:
+				_scan_calls(s.body, target_id, br, file, count)
+				_scan_calls(s.orelse, target_id, br, file, count)
+			case ^parser.For_Stmt:
+				_scan_calls(s.body, target_id, br, file, count)
+			case ^parser.While_Stmt:
+				_scan_calls(s.body, target_id, br, file, count)
+			case ^parser.Try_Stmt:
+				_scan_calls(s.body, target_id, br, file, count)
+				_scan_calls(s.orelse, target_id, br, file, count)
+				_scan_calls(s.finalbody, target_id, br, file, count)
+			case ^parser.With_Stmt:
+				_scan_calls(s.body, target_id, br, file, count)
+			}
 		}
 	}
 
-	if unused_count == 0 && missing_count == 0 {
-		fmt.printfln("mimir deps: all dependencies aligned (%d declared, %d imported)", len(declared), len(imported))
+	fmt.printfln("Call sites for '%s' in %s:", name, file)
+	_scan_calls(qr.module.body, target_id, &qr.bind_result, file, &call_count)
+	if call_count == 0 {
+		fmt.printfln("  (no call sites found)")
+	} else {
+		fmt.printfln("  %d call site(s)", call_count)
+	}
+}
+
+@(private = "file")
+query_imports :: proc(file: string) {
+	p: Pipeline
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		fmt.eprintln("mimir: failed to start parser")
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+	p.bridge = bridge
+
+	arena_err := core.arena_init(&p.arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&p.arena)
+
+	module := pipeline_parse_file(&p, "query", file)
+	if module == nil { os.exit(1) }
+
+	bind_result := binder.bind(module, file, p.arena.allocator)
+
+	fmt.printfln("Imports in %s:", file)
+	for imp in bind_result.imports {
+		if imp.is_star {
+			fmt.printfln("  from %s import *", imp.module_name)
+		} else if len(imp.names) == 0 {
+			fmt.printfln("  import %s", imp.module_name)
+		} else {
+			for n in imp.names {
+				if len(n.alias) > 0 {
+					fmt.printfln("  from %s import %s as %s", imp.module_name, n.name, n.alias)
+				} else {
+					fmt.printfln("  from %s import %s", imp.module_name, n.name)
+				}
+			}
+		}
+	}
+	if len(bind_result.imports) == 0 {
+		fmt.printfln("  (no imports)")
+	}
+}
+
+@(private = "file")
+query_exports :: proc(file: string) {
+	p: Pipeline
+	bridge, bridge_err := parser.bridge_start()
+	if bridge_err != nil {
+		fmt.eprintln("mimir: failed to start parser")
+		os.exit(1)
+	}
+	defer parser.bridge_stop(&bridge)
+	p.bridge = bridge
+
+	arena_err := core.arena_init(&p.arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir: failed to initialize arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&p.arena)
+
+	qr, ok := query_analyze(file, &p)
+	if !ok { os.exit(1) }
+
+	// Module-level symbols (module scope + user-defined)
+	fmt.printfln("Exports from %s:", file)
+	count := 0
+	module_scope := qr.bind_result.module_scope
+	for sym in qr.bind_result.symbols {
+		if len(sym.name) == 0 { continue }
+		if sym.def_loc.line == 0 { continue } // skip builtins
+		if sym.name[0] == '_' { continue } // private by convention
+		if sym.scope_id != module_scope { continue } // only module-level
+
+		type_str := "<unknown>"
+		if type_id, has := qr.check_result.symbol_types[sym.id]; has && type_id != checker.TYPE_UNKNOWN {
+			type_str = checker.type_to_string(&qr.check_result.registry, type_id)
+		}
+
+		kind_str := ""
+		#partial switch sym.kind {
+		case .Variable:  kind_str = "var"
+		case .Function:  kind_str = "func"
+		case .Class:     kind_str = "class"
+		case .Import:    kind_str = "import"
+		case:            kind_str = "other"
+		}
+
+		fmt.printfln("  %-8s %-20s : %s", kind_str, sym.name, type_str)
+		count += 1
+	}
+	if count == 0 {
+		fmt.printfln("  (no public exports)")
 	}
 }
 
@@ -1441,14 +1958,9 @@ cmd_lock :: proc(args: []string) {
 	}
 	copy(lf.packages[:], locked)
 
-	// Compute CAS hashes for all packages
+	// Generate import map if cache is available
 	cache, cache_err := platform.init_cache(allocator)
 	if cache_err == nil {
-		for &pkg in lf.packages {
-			pkg.hash = platform.cas_hash(pkg.name, pkg.version, allocator)
-		}
-
-		// Generate import map
 		im := platform.generate_import_map(&lf, &cache, allocator)
 		project_dir := platform.parent_dir(config_path)
 		im_err := platform.write_import_map(&im, project_dir, allocator)
@@ -1475,6 +1987,14 @@ cmd_install :: proc(args: []string) {
 	}
 	defer core.arena_destroy(&arena)
 	allocator := arena.allocator
+
+	// Parse flags
+	force := false
+	for arg in args {
+		if arg == "--force" {
+			force = true
+		}
+	}
 
 	// Find mimir.lock
 	cwd, cwd_err := os.get_working_directory(allocator)
@@ -1523,7 +2043,7 @@ cmd_install :: proc(args: []string) {
 		os.exit(1)
 	}
 
-	install_err := platform.install_from_lockfile(python, &lf, &cache, allocator)
+	install_err := platform.install_from_lockfile(python, &lf, &cache, allocator, force)
 	if install_err != nil {
 		fmt.eprintfln("mimir install: %s", platform.error_msg(install_err))
 		os.exit(1)
@@ -1537,7 +2057,7 @@ cmd_install :: proc(args: []string) {
 		fmt.printfln("  wrote .mimir/import_map.json (%d packages)", len(im.packages))
 	}
 
-	// Update lockfile with hashes from install
+	// Update lockfile with content hashes from install
 	platform.write_lockfile(&lf, lock_path, allocator)
 }
 

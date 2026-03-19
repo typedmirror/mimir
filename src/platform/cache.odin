@@ -114,6 +114,201 @@ cas_target_dir :: proc(cache: ^Cache, name, version: string) -> (path: string, c
 	return dir, key
 }
 
+// ==================== Content Hash Integrity ====================
+
+// Write a .mimir-hash marker file alongside installed package content.
+write_hash_marker :: proc(dir: string, content_hash: string, allocator: mem.Allocator) -> Platform_Error {
+	if len(content_hash) == 0 { return nil }
+	marker_path := strings.concatenate({dir, "/.mimir-hash"}, allocator)
+	write_err := os.write_entire_file(marker_path, transmute([]u8)content_hash)
+	if write_err != nil {
+		return Platform_Error_Data{msg = fmt.tprintf("cannot write hash marker: %v", write_err)}
+	}
+	return nil
+}
+
+// Verify a cached package's .mimir-hash against expected content hash.
+// Returns: verified (hash matches), found (marker exists).
+verify_hash_marker :: proc(dir: string, expected_hash: string, allocator: mem.Allocator) -> (verified: bool, found: bool) {
+	if len(expected_hash) == 0 { return false, false }
+	marker_path := strings.concatenate({dir, "/.mimir-hash"}, allocator)
+	data, read_err := os.read_entire_file(marker_path, allocator)
+	if read_err != nil {
+		return false, false
+	}
+	stored := strings.trim_space(string(data))
+	return stored == expected_hash, true
+}
+
+// Find a versioned package with optional integrity verification.
+// Returns path, found, and whether integrity was verified.
+find_verified_package :: proc(
+	cache: ^Cache, name, version, expected_hash: string,
+) -> (path: string, found: bool, verified: bool) {
+	dir := package_version_dir(cache, name, version)
+	if !os.is_directory(dir) {
+		return "", false, false
+	}
+	if len(expected_hash) == 0 {
+		return dir, true, false // found but unverified (no hash to check)
+	}
+	v, marker_found := verify_hash_marker(dir, expected_hash, cache.allocator)
+	if !marker_found {
+		return dir, true, false // found but no marker (legacy)
+	}
+	return dir, true, v
+}
+
+// ==================== Cache GC ====================
+
+Cache_Entry :: struct {
+	name:    string,
+	version: string,
+	path:    string,
+	is_cas:  bool,    // true = legacy CAS layout, false = versioned layout
+}
+
+// List all cached packages. Scans both versioned and CAS directories.
+list_cache :: proc(cache: ^Cache, allocator: mem.Allocator) -> [dynamic]Cache_Entry {
+	entries := make([dynamic]Cache_Entry, 0, 32, allocator)
+
+	// Scan versioned layout: packages/<name>/<version>/
+	pkg_dirs, pkg_err := os.read_all_directory_by_path(cache.packages, allocator)
+	if pkg_err == nil {
+		for pkg_dir in pkg_dirs {
+			if pkg_dir.type != .Directory { continue }
+			pkg_name := pkg_dir.name
+			pkg_path := strings.concatenate({cache.packages, "/", pkg_name}, allocator)
+			ver_dirs, ver_err := os.read_all_directory_by_path(pkg_path, allocator)
+			if ver_err == nil {
+				has_versions := false
+				for ver_dir in ver_dirs {
+					if ver_dir.type != .Directory { continue }
+					has_versions = true
+					append(&entries, Cache_Entry{
+						name    = strings.clone(pkg_name, allocator),
+						version = strings.clone(ver_dir.name, allocator),
+						path    = strings.concatenate({pkg_path, "/", ver_dir.name}, allocator),
+						is_cas  = false,
+					})
+				}
+				// Unversioned package dir (Phase 8 legacy — no version subdirs)
+				if !has_versions {
+					append(&entries, Cache_Entry{
+						name    = strings.clone(pkg_name, allocator),
+						version = "",
+						path    = strings.clone(pkg_path, allocator),
+						is_cas  = false,
+					})
+				}
+			}
+		}
+	}
+
+	// Scan CAS layout: cas/<prefix>/<hash>/
+	cas_prefixes, cas_err := os.read_all_directory_by_path(cache.cas, allocator)
+	if cas_err == nil {
+		for prefix_dir in cas_prefixes {
+			if prefix_dir.type != .Directory { continue }
+			prefix_path := strings.concatenate({cache.cas, "/", prefix_dir.name}, allocator)
+			hash_dirs, hash_err := os.read_all_directory_by_path(prefix_path, allocator)
+			if hash_err == nil {
+				for hash_dir in hash_dirs {
+					if hash_dir.type != .Directory { continue }
+					append(&entries, Cache_Entry{
+						name    = strings.clone(hash_dir.name, allocator),
+						version = "",
+						path    = strings.concatenate({prefix_path, "/", hash_dir.name}, allocator),
+						is_cas  = true,
+					})
+				}
+			}
+		}
+	}
+
+	return entries
+}
+
+// Remove cached packages not in the given lockfile.
+// Returns number of entries removed.
+gc_cache :: proc(cache: ^Cache, lf: ^Lockfile, allocator: mem.Allocator) -> (removed: int, err: Platform_Error) {
+	entries := list_cache(cache, allocator)
+
+	// Build set of locked packages: "name==version"
+	locked := make(map[string]bool, len(lf.packages), allocator)
+	for pkg in lf.packages {
+		key := strings.concatenate({pkg.name, "==", pkg.version}, allocator)
+		locked[key] = true
+	}
+
+	removed = 0
+	for entry in entries {
+		keep := false
+		if entry.is_cas {
+			// CAS entries: keep if any locked package maps to this hash
+			for pkg in lf.packages {
+				if len(pkg.hash) > 0 {
+					cdir := cas_dir(cache, pkg.hash)
+					if cdir == entry.path {
+						keep = true
+						break
+					}
+				}
+			}
+		} else if len(entry.version) > 0 {
+			key := strings.concatenate({entry.name, "==", entry.version}, allocator)
+			keep = key in locked
+		}
+		// Unversioned entries (Phase 8 legacy) are never matched — they get cleaned
+
+		if !keep {
+			rm_err := os.remove_all(entry.path)
+			if rm_err != nil {
+				return removed, Platform_Error_Data{msg = fmt.tprintf("failed to remove '%s': %v", entry.path, rm_err)}
+			}
+			removed += 1
+		}
+	}
+
+	// Clean up empty parent directories in packages/
+	pkg_dirs, _ := os.read_all_directory_by_path(cache.packages, allocator)
+	for pkg_dir in pkg_dirs {
+		if pkg_dir.type != .Directory { continue }
+		pkg_path := strings.concatenate({cache.packages, "/", pkg_dir.name}, allocator)
+		children, _ := os.read_all_directory_by_path(pkg_path, allocator)
+		if len(children) == 0 {
+			os.remove_all(pkg_path)
+		}
+	}
+
+	// Clean up empty prefix directories in cas/
+	cas_prefixes, _ := os.read_all_directory_by_path(cache.cas, allocator)
+	for prefix_dir in cas_prefixes {
+		if prefix_dir.type != .Directory { continue }
+		prefix_path := strings.concatenate({cache.cas, "/", prefix_dir.name}, allocator)
+		children, _ := os.read_all_directory_by_path(prefix_path, allocator)
+		if len(children) == 0 {
+			os.remove_all(prefix_path)
+		}
+	}
+
+	return removed, nil
+}
+
+// Remove all cached packages. Returns number of entries removed.
+clean_cache :: proc(cache: ^Cache, allocator: mem.Allocator) -> (removed: int, err: Platform_Error) {
+	entries := list_cache(cache, allocator)
+	removed = 0
+	for entry in entries {
+		rm_err := os.remove_all(entry.path)
+		if rm_err != nil {
+			return removed, Platform_Error_Data{msg = fmt.tprintf("failed to remove '%s': %v", entry.path, rm_err)}
+		}
+		removed += 1
+	}
+	return removed, nil
+}
+
 // ==================== Helpers ====================
 
 // Sanitize a path component: strip directory separators and ".." to prevent traversal
