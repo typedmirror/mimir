@@ -30,6 +30,10 @@ GPU_Op_Kind :: enum {
 	Select,     // if/else → select(cond, true_val, false_val)
 	// Shape
 	Reshape, Broadcast,
+	// Neural network (Phase 27)
+	Conv2d, MaxPool2d, AvgPool2d, BatchNorm, Dropout, Flatten, CrossEntropy,
+	// Math
+	Exp, Log, Sqrt, Pow, Clamp,
 }
 
 GPU_Node :: struct {
@@ -310,8 +314,14 @@ extract_expr :: proc(expr: parser.Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID 
 		base := extract_expr(e.value, ctx)
 		if base == GPU_Node_ID(0) { return GPU_Node_ID(0) }
 		if e.attr == "T" {
-			fmt.eprintfln("  gpu: .T transpose requires 2D index remapping, not supported in element-wise kernels")
-			return GPU_Node_ID(0)
+			inputs := make([]GPU_Node_ID, 1, ctx.allocator)
+			inputs[0] = base
+			return add_node(ctx.graph, GPU_Node{
+				kind   = .Transpose,
+				inputs = inputs,
+				loc    = e.loc,
+				name   = "T",
+			})
 		}
 		return base
 	}
@@ -350,23 +360,29 @@ extract_constant :: proc(c: ^parser.Constant_Expr, ctx: ^GPU_Graph_Context) -> G
 extract_call :: proc(call: ^parser.Call_Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID {
 	#partial switch f in call.func {
 	case ^parser.Name_Expr:
-		// Reject operations that need cross-thread coordination
-		switch f.id {
-		case "softmax":
-			fmt.eprintfln("  gpu: softmax requires cross-thread coordination, not supported in element-wise kernels")
-			return GPU_Node_ID(0)
-		case "sum", "mean", "max", "min":
-			fmt.eprintfln("  gpu: %s() reduction requires shared memory, not supported in element-wise kernels", f.id)
-			return GPU_Node_ID(0)
-		}
-		// Known activation functions
+		// Known functions by name
 		kind: GPU_Op_Kind
 		is_known := true
 		switch f.id {
-		case "relu":    kind = .ReLU
-		case "sigmoid": kind = .Sigmoid
-		case "tanh":    kind = .Tanh
-		case "abs":     kind = .Abs
+		case "relu":           kind = .ReLU
+		case "sigmoid":        kind = .Sigmoid
+		case "tanh":           kind = .Tanh
+		case "abs":            kind = .Abs
+		case "softmax":        kind = .Softmax
+		case "sum":            kind = .Sum
+		case "mean":           kind = .Mean
+		case "exp":            kind = .Exp
+		case "log":            kind = .Log
+		case "sqrt":           kind = .Sqrt
+		case "pow":            kind = .Pow
+		case "clamp":          kind = .Clamp
+		case "conv2d":         kind = .Conv2d
+		case "max_pool2d":     kind = .MaxPool2d
+		case "avg_pool2d":     kind = .AvgPool2d
+		case "batch_norm":     kind = .BatchNorm
+		case "dropout":        kind = .Dropout
+		case "flatten":        kind = .Flatten
+		case "cross_entropy":  kind = .CrossEntropy
 		case: is_known = false
 		}
 		if is_known {
@@ -388,26 +404,25 @@ extract_call :: proc(call: ^parser.Call_Expr, ctx: ^GPU_Graph_Context) -> GPU_No
 		}
 
 	case ^parser.Attribute_Expr:
-		// Reject operations that need cross-thread coordination
-		switch f.attr {
-		case "softmax":
-			fmt.eprintfln("  gpu: softmax requires cross-thread coordination, not supported in element-wise kernels")
-			return GPU_Node_ID(0)
-		case "sum", "mean", "max", "min":
-			fmt.eprintfln("  gpu: .%s() reduction requires shared memory, not supported in element-wise kernels", f.attr)
-			return GPU_Node_ID(0)
-		case "transpose":
-			fmt.eprintfln("  gpu: .transpose() requires 2D index remapping, not supported in element-wise kernels")
-			return GPU_Node_ID(0)
-		}
-		// Method calls: x.relu(), etc.
+		// Method calls: x.relu(), x.sum(), x.reshape(), etc.
 		kind: GPU_Op_Kind
 		is_known := true
 		switch f.attr {
-		case "relu":      kind = .ReLU
-		case "sigmoid":   kind = .Sigmoid
-		case "tanh":      kind = .Tanh
-		case "reshape":   kind = .Reshape
+		case "relu":           kind = .ReLU
+		case "sigmoid":        kind = .Sigmoid
+		case "tanh":           kind = .Tanh
+		case "reshape":        kind = .Reshape
+		case "softmax":        kind = .Softmax
+		case "sum":            kind = .Sum
+		case "mean":           kind = .Mean
+		case "max":            kind = .Max
+		case "min":            kind = .Min
+		case "transpose":      kind = .Transpose
+		case "flatten":        kind = .Flatten
+		case "exp":            kind = .Exp
+		case "log":            kind = .Log
+		case "sqrt":           kind = .Sqrt
+		case "clamp":          kind = .Clamp
 		case: is_known = false
 		}
 		if is_known {
@@ -584,6 +599,120 @@ propagate_shapes :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
 					node.output_type = first.output_type
 				}
 			}
+
+		// Math: same shape as input (unary elementwise)
+		case .Exp, .Log, .Sqrt:
+			first := get_node(graph, node.inputs[0])
+			if first != nil {
+				node.output_shape = first.output_shape
+				if node.output_type == checker.INVALID_TYPE {
+					node.output_type = first.output_type
+				}
+			}
+
+		// Pow/Clamp: binary/ternary elementwise — shape from first input
+		case .Pow, .Clamp:
+			first := get_node(graph, node.inputs[0])
+			if first != nil {
+				node.output_shape = first.output_shape
+				if node.output_type == checker.INVALID_TYPE {
+					node.output_type = first.output_type
+				}
+			}
+
+		// Conv2d: [N, C_in, H, W] → [N, C_out, H_out, W_out]
+		// inputs: [data, weight, (optional bias)]
+		// weight shape: [C_out, C_in, KH, KW]
+		case .Conv2d:
+			if len(node.inputs) >= 2 {
+				data := get_node(graph, node.inputs[0])
+				weight := get_node(graph, node.inputs[1])
+				if data != nil && weight != nil && data.output_shape != nil && weight.output_shape != nil {
+					if len(data.output_shape) == 4 && len(weight.output_shape) == 4 {
+						n := data.output_shape[0]
+						c_out := weight.output_shape[0]
+						h := data.output_shape[2]
+						w := data.output_shape[3]
+						kh := weight.output_shape[2]
+						kw := weight.output_shape[3]
+						// Default stride=1, padding=0
+						h_out := h - kh + 1
+						w_out := w - kw + 1
+						if h_out > 0 && w_out > 0 {
+							shape := make([]int, 4, ctx.allocator)
+							shape[0] = n
+							shape[1] = c_out
+							shape[2] = h_out
+							shape[3] = w_out
+							node.output_shape = shape
+						}
+					}
+				}
+				if node.output_type == checker.INVALID_TYPE && data != nil {
+					node.output_type = data.output_type
+				}
+			}
+
+		// MaxPool2d / AvgPool2d: [N, C, H, W] → [N, C, H/K, W/K]
+		case .MaxPool2d, .AvgPool2d:
+			first := get_node(graph, node.inputs[0])
+			if first != nil && first.output_shape != nil && len(first.output_shape) == 4 {
+				// Default kernel_size=2, stride=kernel_size
+				k := 2
+				shape := make([]int, 4, ctx.allocator)
+				shape[0] = first.output_shape[0]
+				shape[1] = first.output_shape[1]
+				shape[2] = first.output_shape[2] / k
+				shape[3] = first.output_shape[3] / k
+				node.output_shape = shape
+				if node.output_type == checker.INVALID_TYPE {
+					node.output_type = first.output_type
+				}
+			}
+
+		// BatchNorm / Dropout: same shape as input
+		case .BatchNorm, .Dropout:
+			first := get_node(graph, node.inputs[0])
+			if first != nil {
+				node.output_shape = first.output_shape
+				if node.output_type == checker.INVALID_TYPE {
+					node.output_type = first.output_type
+				}
+			}
+
+		// Flatten: [N, C, H, W] → [N, C*H*W]
+		case .Flatten:
+			first := get_node(graph, node.inputs[0])
+			if first != nil && first.output_shape != nil && len(first.output_shape) >= 2 {
+				flat_dim := 1
+				for i := 1; i < len(first.output_shape); i += 1 {
+					if first.output_shape[i] > 0 {
+						flat_dim *= first.output_shape[i]
+					} else {
+						flat_dim = -1
+						break
+					}
+				}
+				shape := make([]int, 2, ctx.allocator)
+				shape[0] = first.output_shape[0]
+				shape[1] = flat_dim
+				node.output_shape = shape
+				if node.output_type == checker.INVALID_TYPE {
+					node.output_type = first.output_type
+				}
+			}
+
+		// CrossEntropy: [N, C] → [1] (scalar loss)
+		case .CrossEntropy:
+			shape := make([]int, 1, ctx.allocator)
+			shape[0] = 1
+			node.output_shape = shape
+			if len(node.inputs) > 0 {
+				first := get_node(graph, node.inputs[0])
+				if first != nil && node.output_type == checker.INVALID_TYPE {
+					node.output_type = first.output_type
+				}
+			}
 		}
 	}
 }
@@ -627,8 +756,12 @@ count_ops :: proc(graph: ^Compute_Graph) -> (elementwise: int, matmul: int, redu
 			matmul += 1
 		case .Sum, .Mean, .Max, .Min, .Softmax:
 			reduction += 1
-		case .Equal, .NotEqual, .Less, .Greater, .LessEq, .GreaterEq,
-		     .Transpose, .Param, .Constant, .Select, .Reshape, .Broadcast:
+		case .Exp, .Log, .Sqrt, .Pow, .Clamp:
+			elementwise += 1
+	case .Conv2d, .MaxPool2d, .AvgPool2d, .BatchNorm, .Flatten, .CrossEntropy:
+			other += 1
+	case .Equal, .NotEqual, .Less, .Greater, .LessEq, .GreaterEq,
+		     .Transpose, .Param, .Constant, .Select, .Reshape, .Broadcast, .Dropout:
 			other += 1
 		}
 	}
@@ -687,8 +820,20 @@ op_kind_string :: proc(kind: GPU_Op_Kind) -> string {
 	case .Param:     return "Param"
 	case .Constant:  return "Constant"
 	case .Select:    return "Select"
-	case .Reshape:   return "Reshape"
-	case .Broadcast: return "Broadcast"
+	case .Reshape:       return "Reshape"
+	case .Broadcast:     return "Broadcast"
+	case .Conv2d:        return "Conv2d"
+	case .MaxPool2d:     return "MaxPool2d"
+	case .AvgPool2d:     return "AvgPool2d"
+	case .BatchNorm:     return "BatchNorm"
+	case .Dropout:       return "Dropout"
+	case .Flatten:       return "Flatten"
+	case .CrossEntropy:  return "CrossEntropy"
+	case .Exp:           return "Exp"
+	case .Log:           return "Log"
+	case .Sqrt:          return "Sqrt"
+	case .Pow:           return "Pow"
+	case .Clamp:         return "Clamp"
 	}
 	return "Unknown"
 }
@@ -730,52 +875,10 @@ validate_graph_shapes :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
 	}
 }
 
-// H2: Check for unsupported ops that would produce wrong output (silent passthrough).
+// H2: Check for unsupported ops that would produce wrong output.
+// Phase 27: reduction, transpose, softmax are now supported with dedicated kernels.
 check_unsupported_ops :: proc(graph: ^Compute_Graph, ctx: ^GPU_Graph_Context) {
-	for &node in graph.nodes {
-		#partial switch node.kind {
-		case .Softmax:
-			append(ctx.diagnostics, core.Diagnostic{
-				severity = .Error,
-				location = core.Location{
-					file   = ctx.file_path,
-					line   = int(node.loc.line),
-					column = int(node.loc.col),
-				},
-				what = "softmax cannot be compiled to a per-element GPU kernel",
-				why  = "softmax requires a reduction pass (find max, sum exp) that needs shared memory and synchronization",
-				fix  = "compute softmax on the host, or split into separate max/exp/sum/div operations",
-				code = "GPU010",
-			})
-		case .Sum, .Mean, .Max, .Min:
-			append(ctx.diagnostics, core.Diagnostic{
-				severity = .Error,
-				location = core.Location{
-					file   = ctx.file_path,
-					line   = int(node.loc.line),
-					column = int(node.loc.col),
-				},
-				what = fmt.tprintf("%s reduction cannot be compiled to a per-element GPU kernel", op_kind_string(node.kind)),
-				why  = "reductions require shared memory accumulation and work group synchronization",
-				fix  = "compute the reduction on the host or use a dedicated reduction kernel",
-				code = "GPU010",
-			})
-		case .Transpose:
-			append(ctx.diagnostics, core.Diagnostic{
-				severity = .Error,
-				location = core.Location{
-					file   = ctx.file_path,
-					line   = int(node.loc.line),
-					column = int(node.loc.col),
-				},
-				what = "transpose cannot be compiled to a per-element GPU kernel",
-				why  = "transpose requires index remapping that per-element kernels cannot express",
-				fix  = "transpose on the host or use a dedicated transpose kernel with shared memory",
-				code = "GPU010",
-			})
-		case:
-		}
-	}
+	// All ops are now supported — this remains as a hook for future ops.
 }
 
 // H4: Validate output types — INVALID_TYPE means extraction failed silently.

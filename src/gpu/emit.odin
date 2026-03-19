@@ -103,11 +103,19 @@ has_matmul :: proc(graph: ^Compute_Graph) -> bool {
 	return false
 }
 
+// Check if a graph has Conv2d ops (needs 2D dispatch).
+has_conv2d :: proc(graph: ^Compute_Graph) -> bool {
+	for node in graph.nodes {
+		if node.kind == .Conv2d { return true }
+	}
+	return false
+}
+
 // Check if a graph has reduction ops.
 has_reduction :: proc(graph: ^Compute_Graph) -> bool {
 	for node in graph.nodes {
 		#partial switch node.kind {
-		case .Sum, .Mean, .Max, .Min, .Softmax:
+		case .Sum, .Mean, .Max, .Min, .Softmax, .CrossEntropy:
 			return true
 		case:
 		}

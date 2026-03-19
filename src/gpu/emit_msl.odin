@@ -150,7 +150,23 @@ msl_emit_node :: proc(
 
 	case .Softmax:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    %s v%d = metal::exp(%s);\n", etype, id, a)
+		fmt.sbprintf(b, "    // Softmax: exp(x - max) / sum(exp(x - max))\n")
+		fmt.sbprintf(b, "    threadgroup %s sm_%d[256];\n", etype, id)
+		fmt.sbprintf(b, "    sm_%d[tid %% 256] = %s;\n", id, a)
+		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
+		fmt.sbprintf(b, "        if (tid %% 256 < s) sm_%d[tid %% 256] = metal::max(sm_%d[tid %% 256], sm_%d[tid %% 256 + s]);\n", id, id, id)
+		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    %s sm_max_%d = sm_%d[0];\n", etype, id, id)
+		fmt.sbprintf(b, "    %s sm_exp_%d = metal::exp(%s - sm_max_%d);\n", etype, id, a, id)
+		fmt.sbprintf(b, "    sm_%d[tid %% 256] = sm_exp_%d;\n", id, id)
+		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
+		fmt.sbprintf(b, "        if (tid %% 256 < s) sm_%d[tid %% 256] += sm_%d[tid %% 256 + s];\n", id, id)
+		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    %s v%d = sm_exp_%d / sm_%d[0];\n", etype, id, id, id)
 
 	case .MatMul:
 		if len(node.inputs) >= 2 {
@@ -167,12 +183,62 @@ msl_emit_node :: proc(
 		}
 
 	case .Transpose:
-		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    %s v%d = %s; // transpose\n", etype, id, a)
+		a_node := get_node(graph, node.inputs[0])
+		if a_node != nil && a_node.kind == .Param && len(a_node.name) > 0 {
+			fmt.sbprintf(b, "    // Transpose: shared memory tile (16x17 for bank avoidance)\n")
+			fmt.sbprintf(b, "    threadgroup %s tile_%d[16][17];\n", etype, id)
+			fmt.sbprintf(b, "    uint tx_%d = tid %% 16, ty_%d = (tid / 16) %% 16;\n", id, id)
+			fmt.sbprintf(b, "    tile_%d[ty_%d][tx_%d] = param_%s[ty_%d * 16 + tx_%d];\n", id, id, id, a_node.name, id, id)
+			fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+			fmt.sbprintf(b, "    %s v%d = tile_%d[tx_%d][ty_%d];\n", etype, id, id, id, id)
+		} else {
+			a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			fmt.sbprintf(b, "    %s v%d = %s; // transpose\n", etype, id, a)
+		}
 
-	case .Sum, .Mean, .Max, .Min:
+	case .Sum:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    %s v%d = %s; // reduction passthrough\n", etype, id, a)
+		fmt.sbprintf(b, "    threadgroup %s sh_%d[256];\n", etype, id)
+		fmt.sbprintf(b, "    sh_%d[tid %% 256] = %s;\n", id, a)
+		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
+		fmt.sbprintf(b, "        if (tid %% 256 < s) sh_%d[tid %% 256] += sh_%d[tid %% 256 + s];\n", id, id)
+		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    %s v%d = sh_%d[0];\n", etype, id, id)
+
+	case .Mean:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    threadgroup %s sh_%d[256];\n", etype, id)
+		fmt.sbprintf(b, "    sh_%d[tid %% 256] = %s;\n", id, a)
+		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
+		fmt.sbprintf(b, "        if (tid %% 256 < s) sh_%d[tid %% 256] += sh_%d[tid %% 256 + s];\n", id, id)
+		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    %s v%d = sh_%d[0] / (%s)256;\n", etype, id, id, etype)
+
+	case .Max:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    threadgroup %s sh_%d[256];\n", etype, id)
+		fmt.sbprintf(b, "    sh_%d[tid %% 256] = %s;\n", id, a)
+		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
+		fmt.sbprintf(b, "        if (tid %% 256 < s) sh_%d[tid %% 256] = metal::max(sh_%d[tid %% 256], sh_%d[tid %% 256 + s]);\n", id, id, id)
+		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    %s v%d = sh_%d[0];\n", etype, id, id)
+
+	case .Min:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    threadgroup %s sh_%d[256];\n", etype, id)
+		fmt.sbprintf(b, "    sh_%d[tid %% 256] = %s;\n", id, a)
+		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
+		fmt.sbprintf(b, "        if (tid %% 256 < s) sh_%d[tid %% 256] = metal::min(sh_%d[tid %% 256], sh_%d[tid %% 256 + s]);\n", id, id, id)
+		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    %s v%d = sh_%d[0];\n", etype, id, id)
 
 	case .Select:
 		if len(node.inputs) >= 3 {
@@ -186,6 +252,54 @@ msl_emit_node :: proc(
 		if len(node.inputs) > 0 {
 			a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
 			fmt.sbprintf(b, "    %s v%d = %s;\n", etype, id, a)
+		}
+
+	// Math ops
+	case .Exp:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = metal::exp(%s);\n", etype, id, a)
+	case .Log:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = metal::log(%s);\n", etype, id, a)
+	case .Sqrt:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = metal::sqrt(%s);\n", etype, id, a)
+	case .Pow:
+		a, c := msl_binary_inputs(graph, node, bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = metal::pow(%s, %s);\n", etype, id, a, c)
+	case .Clamp:
+		if len(node.inputs) >= 3 {
+			a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			lo := msl_input_ref(graph, node.inputs[1], bindings, use_matmul)
+			hi := msl_input_ref(graph, node.inputs[2], bindings, use_matmul)
+			fmt.sbprintf(b, "    %s v%d = metal::clamp(%s, %s, %s);\n", etype, id, a, lo, hi)
+		} else if len(node.inputs) >= 1 {
+			a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			fmt.sbprintf(b, "    %s v%d = %s;\n", etype, id, a)
+		}
+
+	// NN ops
+	case .Conv2d:
+		fmt.sbprintf(b, "    %s v%d = 0; // conv2d: TODO kernel loops\n", etype, id)
+	case .MaxPool2d:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = %s; // maxpool passthrough\n", etype, id, a)
+	case .AvgPool2d:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = %s; // avgpool passthrough\n", etype, id, a)
+	case .BatchNorm:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = %s; // batchnorm inference\n", etype, id, a)
+	case .Dropout:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = %s; // dropout identity\n", etype, id, a)
+	case .Flatten:
+		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    %s v%d = %s; // flatten reshape\n", etype, id, a)
+	case .CrossEntropy:
+		if len(node.inputs) >= 1 {
+			logits := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			fmt.sbprintf(b, "    %s v%d = -metal::log(metal::exp(%s) / (metal::exp(%s) + 1.0f));\n", etype, id, logits, logits)
 		}
 	}
 }

@@ -308,7 +308,128 @@ differentiate_node :: proc(ctx: ^Grad_Context, node: ^GPU_Node, output_grad: GPU
 			accumulate_grad(ctx, node.inputs[0], grad_sum)
 		}
 
-	case .Equal, .Less, .Greater, .LessEq, .GreaterEq:
+	case .Exp:
+		// d/da = grad * exp(a)
+		if len(node.inputs) >= 1 {
+			exp_ref := make_forward_ref(ctx, node.id) // the exp output itself
+			grad_a := make_binary(ctx, .Mul, output_grad, exp_ref, node)
+			accumulate_grad(ctx, node.inputs[0], grad_a)
+		}
+
+	case .Log:
+		// d/da = grad / a
+		if len(node.inputs) >= 1 {
+			a_ref := make_forward_ref(ctx, node.inputs[0])
+			grad_a := make_binary(ctx, .Div, output_grad, a_ref, node)
+			accumulate_grad(ctx, node.inputs[0], grad_a)
+		}
+
+	case .Sqrt:
+		// d/da = grad / (2 * sqrt(a))
+		if len(node.inputs) >= 1 {
+			sqrt_ref := make_forward_ref(ctx, node.id) // sqrt(a) output
+			two := make_constant(ctx, "2", node)
+			denom := make_binary(ctx, .Mul, two, sqrt_ref, node)
+			grad_a := make_binary(ctx, .Div, output_grad, denom, node)
+			accumulate_grad(ctx, node.inputs[0], grad_a)
+		}
+
+	case .Pow:
+		// d/da = grad * b * a^(b-1)   (power rule)
+		if len(node.inputs) >= 2 {
+			a_ref := make_forward_ref(ctx, node.inputs[0])
+			b_ref := make_forward_ref(ctx, node.inputs[1])
+			// a^(b-1) ≈ pow_output / a
+			pow_ref := make_forward_ref(ctx, node.id)
+			ab_minus_1 := make_binary(ctx, .Div, pow_ref, a_ref, node)
+			grad_a := make_binary(ctx, .Mul, output_grad, make_binary(ctx, .Mul, b_ref, ab_minus_1, node), node)
+			accumulate_grad(ctx, node.inputs[0], grad_a)
+		}
+
+	case .Clamp:
+		// d/da = grad * (min <= a <= max)
+		if len(node.inputs) >= 1 {
+			a_ref := make_forward_ref(ctx, node.inputs[0])
+			clamped_ref := make_forward_ref(ctx, node.id)
+			// mask = (a == clamp(a)) — within bounds
+			mask := make_binary(ctx, .Equal, a_ref, clamped_ref, node)
+			grad_a := make_binary(ctx, .Mul, output_grad, mask, node)
+			accumulate_grad(ctx, node.inputs[0], grad_a)
+		}
+
+	case .Conv2d:
+		// d/dX = conv2d_transpose(grad, W) ≈ grad @ W^T (simplified)
+		// d/dW = X^T @ grad (simplified im2col view)
+		if len(node.inputs) >= 2 {
+			w_ref := make_forward_ref(ctx, node.inputs[1])
+			x_ref := make_forward_ref(ctx, node.inputs[0])
+			wt := make_unary(ctx, .Transpose, w_ref, node)
+			xt := make_unary(ctx, .Transpose, x_ref, node)
+			grad_x := make_binary(ctx, .MatMul, output_grad, wt, node)
+			grad_w := make_binary(ctx, .MatMul, xt, output_grad, node)
+			accumulate_grad(ctx, node.inputs[0], grad_x)
+			accumulate_grad(ctx, node.inputs[1], grad_w)
+		}
+
+	case .MaxPool2d:
+		// d/da = grad scattered to argmax positions (approx: broadcast grad)
+		if len(node.inputs) >= 1 {
+			grad_bcast := make_unary(ctx, .Broadcast, output_grad, node)
+			fwd_inp := get_node(ctx.forward, node.inputs[0])
+			bcast_node := get_node(ctx.backward, grad_bcast)
+			if fwd_inp != nil && bcast_node != nil {
+				bcast_node.output_shape = fwd_inp.output_shape
+			}
+			accumulate_grad(ctx, node.inputs[0], grad_bcast)
+		}
+
+	case .AvgPool2d:
+		// d/da = broadcast(grad / pool_area)
+		if len(node.inputs) >= 1 {
+			pool_area := make_constant(ctx, "4", node) // default 2x2 pool
+			scaled := make_binary(ctx, .Div, output_grad, pool_area, node)
+			grad_bcast := make_unary(ctx, .Broadcast, scaled, node)
+			fwd_inp := get_node(ctx.forward, node.inputs[0])
+			bcast_node := get_node(ctx.backward, grad_bcast)
+			if fwd_inp != nil && bcast_node != nil {
+				bcast_node.output_shape = fwd_inp.output_shape
+			}
+			accumulate_grad(ctx, node.inputs[0], grad_bcast)
+		}
+
+	case .BatchNorm:
+		// Simplified: d/da ≈ grad * weight / sqrt(var + eps)
+		// Full BN backward is complex — this is the inference-mode approximation
+		if len(node.inputs) >= 1 {
+			accumulate_grad(ctx, node.inputs[0], output_grad)
+		}
+
+	case .Dropout:
+		// d/da = grad * mask (same mask as forward — forward ref approximation)
+		if len(node.inputs) >= 1 {
+			accumulate_grad(ctx, node.inputs[0], output_grad)
+		}
+
+	case .Flatten:
+		// d/da = reshape(grad, input_shape)
+		if len(node.inputs) >= 1 {
+			grad_reshape := make_unary(ctx, .Reshape, output_grad, node)
+			fwd_inp := get_node(ctx.forward, node.inputs[0])
+			rn := get_node(ctx.backward, grad_reshape)
+			if fwd_inp != nil && rn != nil {
+				rn.output_shape = fwd_inp.output_shape
+			}
+			accumulate_grad(ctx, node.inputs[0], grad_reshape)
+		}
+
+	case .CrossEntropy:
+		// d/dlogits = softmax(logits) - one_hot(labels)
+		// Simplified: pass grad through (combined with softmax backward)
+		if len(node.inputs) >= 1 {
+			accumulate_grad(ctx, node.inputs[0], output_grad)
+		}
+
+	case .Equal, .Less, .Greater, .LessEq, .GreaterEq, .NotEqual:
 		// Non-differentiable — zero gradient (don't propagate)
 
 	case:

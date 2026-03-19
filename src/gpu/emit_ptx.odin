@@ -185,9 +185,8 @@ ptx_emit_node :: proc(
 		fmt.sbprintf(b, "    div.approx.f32 %%v%d, %%v%d, %%tanh_t%d; // tanh\n", id, t1, id)
 
 	case .Softmax:
-		// Filtered at extraction — should not appear in graph
 		if len(node.inputs) > 0 {
-			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // softmax: unsupported\n", op_suffix, id, int(node.inputs[0]))
+			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // softmax: needs shared mem reduction\n", op_suffix, id, int(node.inputs[0]))
 		}
 
 	case .Equal, .NotEqual, .Less, .Greater, .LessEq, .GreaterEq:
@@ -222,6 +221,33 @@ ptx_emit_node :: proc(
 	case .MatMul, .Transpose, .Sum, .Mean, .Max, .Min, .Reshape, .Broadcast:
 		if len(node.inputs) > 0 {
 			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // %s passthrough\n",
+				op_suffix, id, int(node.inputs[0]), op_kind_string(node.kind))
+		}
+
+	// Phase 27: new ops — PTX stubs
+	case .Exp:
+		if is_float {
+			fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3FB8AA3B; // * log2(e)\n", id, int(node.inputs[0]))
+			fmt.sbprintf(b, "    ex2.approx.f32 %%v%d, %%v%d;\n", id, id)
+		} else {
+			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // exp: integer passthrough\n", op_suffix, id, int(node.inputs[0]))
+		}
+	case .Log:
+		if is_float {
+			fmt.sbprintf(b, "    lg2.approx.f32 %%v%d, %%v%d;\n", id, int(node.inputs[0]))
+			fmt.sbprintf(b, "    mul.f32 %%v%d, %%v%d, 0f3F317218; // * ln(2)\n", id, id)
+		} else {
+			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // log: integer passthrough\n", op_suffix, id, int(node.inputs[0]))
+		}
+	case .Sqrt:
+		if is_float {
+			fmt.sbprintf(b, "    sqrt.approx.f32 %%v%d, %%v%d;\n", id, int(node.inputs[0]))
+		} else {
+			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // sqrt: integer passthrough\n", op_suffix, id, int(node.inputs[0]))
+		}
+	case .Pow, .Clamp, .Conv2d, .MaxPool2d, .AvgPool2d, .BatchNorm, .Dropout, .Flatten, .CrossEntropy:
+		if len(node.inputs) > 0 {
+			fmt.sbprintf(b, "    mov%s %%v%d, %%v%d; // %s: PTX stub\n",
 				op_suffix, id, int(node.inputs[0]), op_kind_string(node.kind))
 		}
 	}

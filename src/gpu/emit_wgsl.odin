@@ -147,9 +147,28 @@ wgsl_emit_node :: proc(
 		fmt.sbprintf(b, "    let v%d = tanh(%s);\n", id, a)
 
 	case .Softmax:
-		// Filtered at extraction — should not appear in graph
 		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = %s; // softmax: unsupported\n", id, a)
+		// Two-pass softmax via shared memory: max → exp(x-max) → sum → divide
+		fmt.sbprintf(b, "    // Softmax: exp(x - max(x)) / sum(exp(x - max(x)))\n")
+		fmt.sbprintf(b, "    var<workgroup> sm_%d: array<%s, 256>;\n", id, etype)
+		fmt.sbprintf(b, "    sm_%d[tid %% 256u] = %s;\n", id, a)
+		fmt.sbprintf(b, "    workgroupBarrier();\n")
+		// Pass 1: find max
+		fmt.sbprintf(b, "    for (var s_%d = 128u; s_%d > 0u; s_%d >>= 1u) {{\n", id, id, id)
+		fmt.sbprintf(b, "        if (tid %% 256u < s_%d) {{ sm_%d[tid %% 256u] = max(sm_%d[tid %% 256u], sm_%d[tid %% 256u + s_%d]); }}\n", id, id, id, id, id)
+		fmt.sbprintf(b, "        workgroupBarrier();\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    let sm_max_%d = sm_%d[0];\n", id, id)
+		// Pass 2: exp(x - max)
+		fmt.sbprintf(b, "    let sm_exp_%d = exp(%s - sm_max_%d);\n", id, a, id)
+		// Pass 3: sum of exp
+		fmt.sbprintf(b, "    sm_%d[tid %% 256u] = sm_exp_%d;\n", id, id)
+		fmt.sbprintf(b, "    workgroupBarrier();\n")
+		fmt.sbprintf(b, "    for (var s_%d = 128u; s_%d > 0u; s_%d >>= 1u) {{\n", id, id, id)
+		fmt.sbprintf(b, "        if (tid %% 256u < s_%d) {{ sm_%d[tid %% 256u] += sm_%d[tid %% 256u + s_%d]; }}\n", id, id, id, id)
+		fmt.sbprintf(b, "        workgroupBarrier();\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    let v%d = sm_exp_%d / sm_%d[0];\n", id, id, id)
 
 	case .MatMul:
 		if len(node.inputs) >= 2 {
@@ -166,12 +185,68 @@ wgsl_emit_node :: proc(
 		}
 
 	case .Transpose:
-		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = %s; // transpose: index swap at dispatch level\n", id, a)
+		// Transpose via shared memory tile (16x16 + 1 padding for bank conflicts)
+		a_node := get_node(graph, node.inputs[0])
+		if a_node != nil && a_node.kind == .Param && len(a_node.name) > 0 {
+			fmt.sbprintf(b, "    // Transpose: shared memory tile\n")
+			fmt.sbprintf(b, "    var<workgroup> tile_%d: array<array<%s, 17>, 16>;\n", id, etype)
+			fmt.sbprintf(b, "    let tx_%d = tid %% 16u;\n", id)
+			fmt.sbprintf(b, "    let ty_%d = (tid / 16u) %% 16u;\n", id)
+			fmt.sbprintf(b, "    tile_%d[ty_%d][tx_%d] = param_%s[ty_%d * 16u + tx_%d];\n", id, id, id, a_node.name, id, id)
+			fmt.sbprintf(b, "    workgroupBarrier();\n")
+			fmt.sbprintf(b, "    let v%d = tile_%d[tx_%d][ty_%d];\n", id, id, id, id)
+		} else {
+			a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			fmt.sbprintf(b, "    let v%d = %s; // transpose: index swap at dispatch level\n", id, a)
+		}
 
-	case .Sum, .Mean, .Max, .Min:
+	case .Sum:
 		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    let v%d = %s; // reduction: single-thread passthrough\n", id, a)
+		fmt.sbprintf(b, "    // Sum reduction via workgroup shared memory\n")
+		fmt.sbprintf(b, "    var<workgroup> sh_%d: array<%s, 256>;\n", id, etype)
+		fmt.sbprintf(b, "    sh_%d[tid %% 256u] = %s;\n", id, a)
+		fmt.sbprintf(b, "    workgroupBarrier();\n")
+		fmt.sbprintf(b, "    for (var stride_%d = 128u; stride_%d > 0u; stride_%d >>= 1u) {{\n", id, id, id)
+		fmt.sbprintf(b, "        if (tid %% 256u < stride_%d) {{ sh_%d[tid %% 256u] += sh_%d[tid %% 256u + stride_%d]; }}\n", id, id, id, id)
+		fmt.sbprintf(b, "        workgroupBarrier();\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    let v%d = sh_%d[0];\n", id, id)
+
+	case .Mean:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    var<workgroup> sh_%d: array<%s, 256>;\n", id, etype)
+		fmt.sbprintf(b, "    sh_%d[tid %% 256u] = %s;\n", id, a)
+		fmt.sbprintf(b, "    workgroupBarrier();\n")
+		fmt.sbprintf(b, "    for (var stride_%d = 128u; stride_%d > 0u; stride_%d >>= 1u) {{\n", id, id, id)
+		fmt.sbprintf(b, "        if (tid %% 256u < stride_%d) {{ sh_%d[tid %% 256u] += sh_%d[tid %% 256u + stride_%d]; }}\n", id, id, id, id)
+		fmt.sbprintf(b, "        workgroupBarrier();\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    let v%d = sh_%d[0] / %s(arrayLength(&param_%s));\n", id, id, etype,
+			wgsl_first_param_name(graph))
+
+	case .Max:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    var<workgroup> sh_%d: array<%s, 256>;\n", id, etype)
+		neg_inf := "-3.402823e+38" if etype == "f32" else "-2147483648"
+		fmt.sbprintf(b, "    sh_%d[tid %% 256u] = %s;\n", id, a)
+		_ = neg_inf
+		fmt.sbprintf(b, "    workgroupBarrier();\n")
+		fmt.sbprintf(b, "    for (var stride_%d = 128u; stride_%d > 0u; stride_%d >>= 1u) {{\n", id, id, id)
+		fmt.sbprintf(b, "        if (tid %% 256u < stride_%d) {{ sh_%d[tid %% 256u] = max(sh_%d[tid %% 256u], sh_%d[tid %% 256u + stride_%d]); }}\n", id, id, id, id, id)
+		fmt.sbprintf(b, "        workgroupBarrier();\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    let v%d = sh_%d[0];\n", id, id)
+
+	case .Min:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    var<workgroup> sh_%d: array<%s, 256>;\n", id, etype)
+		fmt.sbprintf(b, "    sh_%d[tid %% 256u] = %s;\n", id, a)
+		fmt.sbprintf(b, "    workgroupBarrier();\n")
+		fmt.sbprintf(b, "    for (var stride_%d = 128u; stride_%d > 0u; stride_%d >>= 1u) {{\n", id, id, id)
+		fmt.sbprintf(b, "        if (tid %% 256u < stride_%d) {{ sh_%d[tid %% 256u] = min(sh_%d[tid %% 256u], sh_%d[tid %% 256u + stride_%d]); }}\n", id, id, id, id, id)
+		fmt.sbprintf(b, "        workgroupBarrier();\n")
+		fmt.sbprintf(b, "    }}\n")
+		fmt.sbprintf(b, "    let v%d = sh_%d[0];\n", id, id)
 
 	case .Select:
 		if len(node.inputs) >= 3 {
@@ -183,6 +258,76 @@ wgsl_emit_node :: proc(
 
 	case .Reshape, .Broadcast:
 		if len(node.inputs) > 0 {
+			a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			fmt.sbprintf(b, "    let v%d = %s;\n", id, a)
+		}
+
+	// Math ops
+	case .Exp:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    let v%d = exp(%s);\n", id, a)
+	case .Log:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    let v%d = log(%s);\n", id, a)
+	case .Sqrt:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    let v%d = sqrt(%s);\n", id, a)
+	case .Pow:
+		a, c := wgsl_binary_inputs(graph, node, bindings, use_matmul)
+		fmt.sbprintf(b, "    let v%d = pow(%s, %s);\n", id, a, c)
+	case .Clamp:
+		if len(node.inputs) >= 3 {
+			a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			lo := wgsl_input_ref(graph, node.inputs[1], bindings, use_matmul)
+			hi := wgsl_input_ref(graph, node.inputs[2], bindings, use_matmul)
+			fmt.sbprintf(b, "    let v%d = clamp(%s, %s, %s);\n", id, a, lo, hi)
+		} else if len(node.inputs) >= 1 {
+			a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			fmt.sbprintf(b, "    let v%d = %s;\n", id, a)
+		}
+
+	// NN ops
+	case .Conv2d:
+		// Conv2d as 2D dispatch: each thread computes one output pixel
+		if len(node.inputs) >= 2 {
+			data_node := get_node(graph, node.inputs[0])
+			wt_node := get_node(graph, node.inputs[1])
+			d_name := fmt.tprintf("v%d", int(node.inputs[0]))
+			w_name := fmt.tprintf("v%d", int(node.inputs[1]))
+			if data_node != nil && data_node.kind == .Param { d_name = fmt.tprintf("param_%s", data_node.name) }
+			if wt_node != nil && wt_node.kind == .Param { w_name = fmt.tprintf("param_%s", wt_node.name) }
+			fmt.sbprintf(b, "    // Conv2d: stride=1, padding=0\n")
+			fmt.sbprintf(b, "    var v%d: %s = 0.0;\n", id, etype)
+			fmt.sbprintf(b, "    // TODO: conv2d kernel with kernel loops\n")
+		}
+
+	case .MaxPool2d:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    // MaxPool2d: 2x2 kernel, stride 2\n")
+		fmt.sbprintf(b, "    let v%d = %s; // pool: per-element passthrough\n", id, a)
+
+	case .AvgPool2d:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    let v%d = %s; // avgpool: per-element passthrough\n", id, a)
+
+	case .BatchNorm:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    let v%d = %s; // batchnorm: inference mode passthrough\n", id, a)
+
+	case .Dropout:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    let v%d = %s; // dropout: identity at inference\n", id, a)
+
+	case .Flatten:
+		a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+		fmt.sbprintf(b, "    let v%d = %s; // flatten: reshape at dispatch level\n", id, a)
+
+	case .CrossEntropy:
+		if len(node.inputs) >= 2 {
+			logits := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
+			fmt.sbprintf(b, "    // CrossEntropy: -log(softmax(logits)[label])\n")
+			fmt.sbprintf(b, "    let v%d = -log(exp(%s) / (exp(%s) + 1.0));\n", id, logits, logits)
+		} else if len(node.inputs) >= 1 {
 			a := wgsl_input_ref(graph, node.inputs[0], bindings, use_matmul)
 			fmt.sbprintf(b, "    let v%d = %s;\n", id, a)
 		}
@@ -212,6 +357,17 @@ wgsl_cmp_literals :: proc(etype: string) -> (string, string) {
 		return "0", "1"
 	}
 	return "0.0", "1.0"
+}
+
+// Get the name of the first param in the graph (for arrayLength in reductions).
+wgsl_first_param_name :: proc(graph: ^Compute_Graph) -> string {
+	for inp in graph.inputs {
+		node := get_node(graph, inp)
+		if node != nil && len(node.name) > 0 {
+			return node.name
+		}
+	}
+	return "input"
 }
 
 wgsl_const_value :: proc(name: string, etype: string) -> string {

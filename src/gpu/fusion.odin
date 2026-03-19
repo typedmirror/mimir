@@ -33,12 +33,20 @@ classify_dispatch :: proc(kind: GPU_Op_Kind) -> Dispatch_Kind {
 		return .MatMul_2D
 	case .Sum, .Mean, .Max, .Min, .Softmax:
 		return .Reduction
+	case .Conv2d:
+		return .MatMul_2D // Conv2d uses 2D dispatch (output height × output width)
 	case .Add, .Sub, .Mul, .Div, .Neg, .Abs,
 	     .Equal, .NotEqual, .Less, .Greater, .LessEq, .GreaterEq,
 	     .Transpose, .ReLU, .Sigmoid, .Tanh,
 	     .Select, .Reshape, .Broadcast,
-	     .Param, .Constant:
+	     .Param, .Constant,
+	     .BatchNorm, .Dropout, .Flatten,
+	     .Exp, .Log, .Sqrt, .Pow, .Clamp:
 		return .Elementwise_1D
+	case .MaxPool2d, .AvgPool2d:
+		return .Elementwise_1D // Pooling is per-output-element
+	case .CrossEntropy:
+		return .Reduction
 	}
 	return .Elementwise_1D
 }

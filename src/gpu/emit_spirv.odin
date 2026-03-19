@@ -548,7 +548,22 @@ spirv_emit_graph_node :: proc(
 		spirv_emit(&m.functions, SPIRV_OP_EXT_INST, float_id, result, glsl_id, SPIRV_GLSL_EXP, a)
 		return result
 
-	case .MatMul, .Transpose, .Sum, .Mean, .Max, .Min, .Reshape, .Broadcast:
+	case .Exp:
+		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
+		result := spirv_alloc_id(m)
+		spirv_emit(&m.functions, SPIRV_OP_EXT_INST, float_id, result, glsl_id, SPIRV_GLSL_EXP, a)
+		return result
+
+	case .Sqrt:
+		a := get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
+		result := spirv_alloc_id(m)
+		// GLSL.std.450 Sqrt = opcode 31
+		spirv_emit(&m.functions, SPIRV_OP_EXT_INST, float_id, result, glsl_id, 31, a)
+		return result
+
+	case .MatMul, .Transpose, .Sum, .Mean, .Max, .Min, .Reshape, .Broadcast,
+	     .Log, .Pow, .Clamp, .Conv2d, .MaxPool2d, .AvgPool2d, .BatchNorm,
+	     .Dropout, .Flatten, .CrossEntropy:
 		// Complex ops: passthrough first input for now
 		if len(node.inputs) > 0 {
 			return get_input(m, node.inputs[0], graph, node_ids, param_var_ids, float_id, ptr_float_id, const_0_uint, const_0_float, tid_id)
