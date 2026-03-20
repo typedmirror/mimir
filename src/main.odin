@@ -3260,7 +3260,7 @@ print_usage :: proc() {
 	fmt.println("  generate-tests <path>      Generate hypothesis test skeletons")
 	fmt.println("  gpu [path]        Validate @gpu functions and extract compute graphs")
 	fmt.println("  compile-gpu [path] Emit GPU compute shaders (--backend wgsl|msl|spirv|ptx|all)")
-	fmt.println("  compile-wasm [path] Compile @wasm functions to WebAssembly (--format wat|wasm|all)")
+	fmt.println("  compile-wasm [path] Compile @wasm functions to WebAssembly (--format wat|wasm|all, -O, --wasi, --js)")
 	fmt.println("  conform [path]    Run conformance tests (default: tests/conformance/)")
 	fmt.println("  explain <code>    Show detailed explanation for a diagnostic code")
 	fmt.println("  version           Print version")
@@ -3974,6 +3974,9 @@ cmd_compile_wasm :: proc(args: []string) {
 	format_name := "wat"
 	output_dir := ""
 	emit_all := false
+	optimize := false
+	wasi_mode := false
+	emit_js := false
 
 	i := 0
 	for i < len(args) {
@@ -3998,14 +4001,28 @@ cmd_compile_wasm :: proc(args: []string) {
 		} else if arg == "-v" || arg == "--verbose" {
 			verbose = true
 			i += 1
+		} else if arg == "--optimize" || arg == "-O" {
+			optimize = true
+			i += 1
+		} else if arg == "--wasi" {
+			wasi_mode = true
+			i += 1
+		} else if arg == "--js" {
+			emit_js = true
+			i += 1
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("mimir compile-wasm: unknown flag '%s'", arg)
-			fmt.eprintln("Usage: mimir compile-wasm [--format <wat|wasm|all>] [--output <dir>] [-v] [path]")
+			fmt.eprintln("Usage: mimir compile-wasm [--format <wat|wasm|all>] [--output <dir>] [-v] [-O] [--wasi] [--js] [path]")
 			os.exit(1)
 		} else {
 			target = arg
 			i += 1
 		}
+	}
+
+	// --js implies wasm binary output
+	if emit_js && format_name == "wat" {
+		format_name = "wasm"
 	}
 
 	// Validate format
@@ -4039,10 +4056,16 @@ cmd_compile_wasm :: proc(args: []string) {
 		if has_errors || len(wasm_funcs) == 0 { continue }
 
 		// Extract WASM module
-		wasm_module := wasm.extract_wasm_module(module, wasm_funcs, &bind_result, &type_ctx, p.arena.allocator)
+		wasm_module := wasm.extract_wasm_module(module, wasm_funcs, &bind_result, &type_ctx, p.arena.allocator, wasi_mode)
+
+		// Optimization pass
+		if optimize {
+			wasm.optimize_module(&wasm_module, p.arena.allocator)
+		}
 
 		if verbose {
-			fmt.printfln("  %s: %d @wasm function(s)", file, len(wasm_funcs))
+			fmt.printfln("  %s: %d @wasm function(s), %d import(s), %d global(s)",
+				file, len(wasm_funcs), len(wasm_module.imports), len(wasm_module.globals))
 			for &func in wasm_module.functions {
 				fmt.printfln("    $%s: %d params, %d locals, %d instructions",
 					func.name, len(func.type.params), len(func.locals), len(func.body))
@@ -4093,6 +4116,29 @@ cmd_compile_wasm :: proc(args: []string) {
 					wasm_bytes[3] if len(wasm_bytes) > 3 else 0)
 			}
 			total_modules += 1
+		}
+
+		// JS/TS bindings
+		if emit_js && output_dir != "" {
+			stem := file_stem(file)
+			wasm_filename := fmt.tprintf("%s.wasm", stem)
+			js_str := wasm.emit_js_loader(&wasm_module, wasm_filename, p.arena.allocator)
+			ts_str := wasm.emit_ts_declarations(&wasm_module, p.arena.allocator)
+			js_path := fmt.tprintf("%s/%s.js", output_dir, stem)
+			ts_path := fmt.tprintf("%s/%s.d.ts", output_dir, stem)
+			js_data := transmute([]byte)js_str
+			ts_data := transmute([]byte)ts_str
+			js_err := os.write_entire_file(js_path, js_data)
+			ts_err := os.write_entire_file(ts_path, ts_data)
+			if js_err != nil {
+				fmt.eprintfln("mimir compile-wasm: error writing '%s': %v", js_path, js_err)
+			}
+			if ts_err != nil {
+				fmt.eprintfln("mimir compile-wasm: error writing '%s': %v", ts_path, ts_err)
+			}
+			if verbose {
+				fmt.printfln("  wrote %s, %s", js_path, ts_path)
+			}
 		}
 	}
 

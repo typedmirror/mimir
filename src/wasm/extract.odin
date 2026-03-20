@@ -19,9 +19,13 @@ WASM_Extract_Context :: struct {
 	local_types:  map[string]WASM_Value_Type, // variable name → WASM type
 	label_depth:  int,                   // nesting depth for br targets
 	func_map:     map[string]int,        // @wasm function name → module func index
+	import_map:   map[string]int,        // import name → import index
+	global_map:   map[string]int,        // global name → global index
+	global_types: map[string]WASM_Value_Type, // global name → WASM type
 	// Track memory type parameters for expansion
 	param_annotations: map[string]parser.Expr, // param name → annotation
 	or_temp_counter:   int,                    // unique temp names for boolean or chains
+	wasi:         bool,                  // WASI mode
 	allocator:    mem.Allocator,
 }
 
@@ -32,24 +36,42 @@ extract_wasm_module :: proc(
 	bind_result: ^binder.Bind_Result,
 	type_ctx: ^WASM_Type_Context,
 	allocator: mem.Allocator,
+	wasi: bool = false,
 ) -> WASM_Module {
 	module := WASM_Module{
-		functions    = make([dynamic]WASM_Function, 0, len(wasm_funcs), allocator),
-		memory_pages = 1, // 64KB default
-		allocator    = allocator,
+		functions     = make([dynamic]WASM_Function, 0, len(wasm_funcs), allocator),
+		imports       = make([dynamic]WASM_Import, 0, 8, allocator),
+		globals       = make([dynamic]WASM_Global, 0, 8, allocator),
+		data_segments = make([dynamic]WASM_Data_Segment, 0, 4, allocator),
+		memory_pages  = 1, // 64KB default
+		wasi          = wasi,
+		allocator     = allocator,
 	}
 
 	ctx := WASM_Extract_Context{
-		module      = &module,
-		type_ctx    = type_ctx,
-		bind_result = bind_result,
-		func_map    = make(map[string]int, len(wasm_funcs), allocator),
-		allocator   = allocator,
+		module       = &module,
+		type_ctx     = type_ctx,
+		bind_result  = bind_result,
+		func_map     = make(map[string]int, len(wasm_funcs), allocator),
+		import_map   = make(map[string]int, 16, allocator),
+		global_map   = make(map[string]int, 8, allocator),
+		global_types = make(map[string]WASM_Value_Type, 8, allocator),
+		wasi         = wasi,
+		allocator    = allocator,
 	}
 
-	// Build func_map so @wasm→@wasm calls resolve
+	// Scan module-level assignments for globals
+	extract_module_globals(py_module, &ctx)
+
+	// Pre-scan functions for host function imports (math.sin, print, etc.)
+	for func in wasm_funcs {
+		scan_function_imports(func, &ctx)
+	}
+
+	// Build func_map: offset by import count so Call indices are correct
+	import_count := len(module.imports)
 	for func, idx in wasm_funcs {
-		ctx.func_map[func.name] = idx
+		ctx.func_map[func.name] = idx + import_count
 	}
 
 	// Extract each function
@@ -58,6 +80,234 @@ extract_wasm_module :: proc(
 	}
 
 	return module
+}
+
+// Scan module-level statements for constant assignments → WASM globals.
+extract_module_globals :: proc(py_module: ^parser.Module, ctx: ^WASM_Extract_Context) {
+	for stmt in py_module.body {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			if len(s.targets) != 1 { continue }
+			#partial switch t in s.targets[0] {
+			case ^parser.Name_Expr:
+				val, vtype, ok := try_constant_value(s.value, ctx)
+				if !ok { continue }
+				global_idx := len(ctx.module.globals)
+				g := WASM_Global{
+					name    = t.id,
+					type    = vtype,
+					mutable = false,
+				}
+				switch vtype {
+				case .I32: g.init_i32 = val.i32_val
+				case .I64: g.init_i64 = val.i64_val
+				case .F32: g.init_f32 = val.f32_val
+				case .F64: g.init_f64 = val.f64_val
+				case .Void:
+				}
+				append(&ctx.module.globals, g)
+				ctx.global_map[t.id] = global_idx
+				ctx.global_types[t.id] = vtype
+			}
+		case ^parser.Ann_Assign:
+			#partial switch t in s.target {
+			case ^parser.Name_Expr:
+				if s.value == nil { continue }
+				val, vtype, ok := try_constant_value(s.value, ctx)
+				if !ok { continue }
+				global_idx := len(ctx.module.globals)
+				g := WASM_Global{
+					name    = t.id,
+					type    = vtype,
+					mutable = false,
+				}
+				switch vtype {
+				case .I32: g.init_i32 = val.i32_val
+				case .I64: g.init_i64 = val.i64_val
+				case .F32: g.init_f32 = val.f32_val
+				case .F64: g.init_f64 = val.f64_val
+				case .Void:
+				}
+				append(&ctx.module.globals, g)
+				ctx.global_map[t.id] = global_idx
+				ctx.global_types[t.id] = vtype
+			}
+		}
+	}
+}
+
+// Try to extract a constant value from an expression.
+try_constant_value :: proc(expr: parser.Expr, ctx: ^WASM_Extract_Context) -> (WASM_Instruction, WASM_Value_Type, bool) {
+	if expr == nil { return {}, .Void, false }
+	#partial switch e in expr {
+	case ^parser.Constant_Expr:
+		#partial switch v in e.value {
+		case i64:
+			if v > i64(max(i32)) || v < i64(min(i32)) {
+				return WASM_Instruction{i64_val = v}, .I64, true
+			}
+			return WASM_Instruction{i32_val = i32(v)}, .I32, true
+		case f64:
+			return WASM_Instruction{f64_val = f64(v)}, .F64, true
+		case bool:
+			return WASM_Instruction{i32_val = 1 if v else 0}, .I32, true
+		}
+	case ^parser.Unary_Op_Expr:
+		if e.op == .USub {
+			inner, itype, ok := try_constant_value(e.operand, ctx)
+			if !ok { return {}, .Void, false }
+			switch itype {
+			case .I32: return WASM_Instruction{i32_val = -inner.i32_val}, .I32, true
+			case .I64: return WASM_Instruction{i64_val = -inner.i64_val}, .I64, true
+			case .F32: return WASM_Instruction{f32_val = -inner.f32_val}, .F32, true
+			case .F64: return WASM_Instruction{f64_val = -inner.f64_val}, .F64, true
+			case .Void:
+			}
+		}
+	}
+	return {}, .Void, false
+}
+
+// Pre-scan function body for calls that need host imports (math.sin, print, etc.).
+scan_function_imports :: proc(func: ^parser.Func_Def, ctx: ^WASM_Extract_Context) {
+	for stmt in func.body {
+		scan_stmt_imports(stmt, ctx)
+	}
+}
+
+scan_stmt_imports :: proc(stmt: parser.Stmt, ctx: ^WASM_Extract_Context) {
+	#partial switch s in stmt {
+	case ^parser.Expr_Stmt:
+		if s.value != nil { scan_expr_imports(s.value, ctx) }
+	case ^parser.Assign:
+		scan_expr_imports(s.value, ctx)
+	case ^parser.Ann_Assign:
+		if s.value != nil { scan_expr_imports(s.value, ctx) }
+	case ^parser.Aug_Assign:
+		scan_expr_imports(s.value, ctx)
+	case ^parser.Return_Stmt:
+		if s.value != nil { scan_expr_imports(s.value, ctx) }
+	case ^parser.If_Stmt:
+		scan_expr_imports(s.test, ctx)
+		for body_stmt in s.body { scan_stmt_imports(body_stmt, ctx) }
+		for else_stmt in s.orelse { scan_stmt_imports(else_stmt, ctx) }
+	case ^parser.While_Stmt:
+		scan_expr_imports(s.test, ctx)
+		for body_stmt in s.body { scan_stmt_imports(body_stmt, ctx) }
+	case ^parser.For_Stmt:
+		scan_expr_imports(s.iter, ctx)
+		for body_stmt in s.body { scan_stmt_imports(body_stmt, ctx) }
+	}
+}
+
+scan_expr_imports :: proc(expr: parser.Expr, ctx: ^WASM_Extract_Context) {
+	if expr == nil { return }
+	#partial switch e in expr {
+	case ^parser.Call_Expr:
+		// Check for print() → host import
+		#partial switch f in e.func {
+		case ^parser.Name_Expr:
+			if f.id == "print" {
+				register_print_import(ctx)
+			}
+		case ^parser.Attribute_Expr:
+			// math.sin, math.cos, etc.
+			#partial switch v in f.value {
+			case ^parser.Name_Expr:
+				if v.id == "math" {
+					register_math_import(f.attr, ctx)
+				}
+			}
+		}
+		// Recurse into args
+		for arg in e.args { scan_expr_imports(arg, ctx) }
+	case ^parser.Bin_Op_Expr:
+		scan_expr_imports(e.left, ctx)
+		scan_expr_imports(e.right, ctx)
+	case ^parser.Unary_Op_Expr:
+		scan_expr_imports(e.operand, ctx)
+	case ^parser.Compare_Expr:
+		scan_expr_imports(e.left, ctx)
+		for c in e.comparators { scan_expr_imports(c, ctx) }
+	case ^parser.Bool_Op_Expr:
+		for v in e.values { scan_expr_imports(v, ctx) }
+	case ^parser.If_Expr:
+		scan_expr_imports(e.test, ctx)
+		scan_expr_imports(e.body, ctx)
+		scan_expr_imports(e.orelse, ctx)
+	}
+}
+
+// Register a print() host import.
+register_print_import :: proc(ctx: ^WASM_Extract_Context) {
+	if ctx.wasi {
+		// WASI: fd_write(fd, iovs, iovs_len, nwritten) → i32
+		if _, ok := ctx.import_map["fd_write"]; ok { return }
+		idx := len(ctx.module.imports)
+		append(&ctx.module.imports, WASM_Import{
+			module_name = "wasi_snapshot_preview1",
+			field_name  = "fd_write",
+			type        = make_func_type(ctx.allocator, {.I32, .I32, .I32, .I32}, {.I32}),
+		})
+		ctx.import_map["fd_write"] = idx
+	} else {
+		// Browser: console_log_i32(x), console_log_f64(x)
+		if _, ok := ctx.import_map["console_log_i32"]; !ok {
+			idx := len(ctx.module.imports)
+			append(&ctx.module.imports, WASM_Import{
+				module_name = "env",
+				field_name  = "console_log_i32",
+				type        = make_func_type(ctx.allocator, {.I32}, {}),
+			})
+			ctx.import_map["console_log_i32"] = idx
+		}
+		if _, ok := ctx.import_map["console_log_f64"]; !ok {
+			idx := len(ctx.module.imports)
+			append(&ctx.module.imports, WASM_Import{
+				module_name = "env",
+				field_name  = "console_log_f64",
+				type        = make_func_type(ctx.allocator, {.F64}, {}),
+			})
+			ctx.import_map["console_log_f64"] = idx
+		}
+	}
+}
+
+// Register a math.X host import.
+register_math_import :: proc(attr: string, ctx: ^WASM_Extract_Context) {
+	// floor, ceil, sqrt use native WASM instructions — no import needed
+	if attr == "floor" || attr == "ceil" || attr == "sqrt" || attr == "trunc" { return }
+	if attr == "fabs" || attr == "copysign" { return }
+
+	import_name := fmt.tprintf("math_%s", attr)
+	if _, ok := ctx.import_map[import_name]; ok { return }
+
+	idx := len(ctx.module.imports)
+	math_type: WASM_Func_Type
+	switch attr {
+	case "sin", "cos", "tan", "asin", "acos", "atan", "exp", "log", "log2", "log10":
+		math_type = make_func_type(ctx.allocator, {.F64}, {.F64})
+	case "pow", "atan2", "fmod":
+		math_type = make_func_type(ctx.allocator, {.F64, .F64}, {.F64})
+	case:
+		return // Unknown math function
+	}
+
+	append(&ctx.module.imports, WASM_Import{
+		module_name = "Math",
+		field_name  = attr,
+		type        = math_type,
+	})
+	ctx.import_map[import_name] = idx
+}
+
+// Helper: create a WASM_Func_Type with properly allocated slices.
+make_func_type :: proc(allocator: mem.Allocator, params: []WASM_Value_Type, results: []WASM_Value_Type) -> WASM_Func_Type {
+	p := make([]WASM_Value_Type, len(params), allocator)
+	for v, i in params { p[i] = v }
+	r := make([]WASM_Value_Type, len(results), allocator)
+	for v, i in results { r[i] = v }
+	return WASM_Func_Type{params = p, results = r}
 }
 
 // Extract a single @wasm function to WASM IR.
@@ -465,10 +715,15 @@ extract_name :: proc(e: ^parser.Name_Expr, ctx: ^WASM_Extract_Context) {
 	idx, ok := ctx.locals_map[e.id]
 	if ok {
 		emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = idx})
-	} else {
-		// Unknown name — emit 0 as fallback
-		emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})
+		return
 	}
+	// Check globals
+	if gidx, gok := ctx.global_map[e.id]; gok {
+		emit(ctx, WASM_Instruction{kind = .Global_Get, local_idx = gidx})
+		return
+	}
+	// Unknown name — emit 0 as fallback
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})
 }
 
 extract_binop :: proc(e: ^parser.Bin_Op_Expr, ctx: ^WASM_Extract_Context) {
@@ -725,6 +980,12 @@ extract_call :: proc(e: ^parser.Call_Expr, ctx: ^WASM_Extract_Context) {
 		// range() is handled in for_stmt extraction — if we get here, it's a standalone call
 		if f.id == "range" { return }
 
+		// print() → host import call
+		if f.id == "print" && len(e.args) >= 1 {
+			extract_print_call(e, ctx)
+			return
+		}
+
 		// @wasm function call
 		if func_idx, ok := ctx.func_map[f.id]; ok {
 			for arg in e.args {
@@ -736,7 +997,165 @@ extract_call :: proc(e: ^parser.Call_Expr, ctx: ^WASM_Extract_Context) {
 
 		// Unknown call — push 0 as fallback
 		emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})
+
+	case ^parser.Attribute_Expr:
+		// math.sin(x), math.cos(x), etc.
+		#partial switch v in f.value {
+		case ^parser.Name_Expr:
+			if v.id == "math" {
+				extract_math_call(f.attr, e, ctx)
+				return
+			}
+		}
+		// Unknown attribute call — push 0
+		emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})
 	}
+}
+
+// Emit a print() call via host import.
+extract_print_call :: proc(e: ^parser.Call_Expr, ctx: ^WASM_Extract_Context) {
+	if ctx.wasi {
+		// WASI fd_write: need to write value to memory, then call fd_write
+		// Simplified: write i32 value as decimal to memory, call fd_write
+		extract_wasi_print(e, ctx)
+		return
+	}
+	// Browser mode: call console_log_i32 or console_log_f64
+	arg_type := infer_expr_type(e.args[0], ctx)
+	extract_expr(e.args[0], ctx)
+	if arg_type == .F64 || arg_type == .F32 {
+		if arg_type == .F32 {
+			emit(ctx, WASM_Instruction{kind = .F64_Promote_F32})
+		}
+		if idx, ok := ctx.import_map["console_log_f64"]; ok {
+			emit(ctx, WASM_Instruction{kind = .Call, func_idx = idx})
+		}
+	} else {
+		if idx, ok := ctx.import_map["console_log_i32"]; ok {
+			emit(ctx, WASM_Instruction{kind = .Call, func_idx = idx})
+		}
+	}
+}
+
+// Emit WASI print: convert value to string in memory, fd_write to stdout.
+extract_wasi_print :: proc(e: ^parser.Call_Expr, ctx: ^WASM_Extract_Context) {
+	// Reserve memory at offset 0 for iov_buf (8 bytes: ptr, len)
+	// and at offset 8+ for the actual string data
+	// Simple approach: write decimal digits at offset 16, iov at offset 0
+	fd_write_idx, ok := ctx.import_map["fd_write"]
+	if !ok { return }
+
+	arg_type := infer_expr_type(e.args[0], ctx)
+	extract_expr(e.args[0], ctx)
+
+	// Convert to i32 if needed
+	if arg_type == .F64 {
+		emit(ctx, WASM_Instruction{kind = .I32_Trunc_F64_S})
+	} else if arg_type == .F32 {
+		emit(ctx, WASM_Instruction{kind = .I32_Trunc_F32_S})
+	} else if arg_type == .I64 {
+		emit(ctx, WASM_Instruction{kind = .I32_Wrap_I64})
+	}
+
+	// Store value at offset 16 as a single ASCII digit (simplified)
+	// For a proper implementation, we'd need itoa in WASM instructions
+	// Simplified: store single byte '0'+val for 0-9, or '?' for larger
+	buf_temp := get_or_alloc_temp_named(ctx, "__print_val", .I32)
+	emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = buf_temp})
+
+	// Store the digit at offset 16
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 16})  // address
+	emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = buf_temp})
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 48}) // '0'
+	emit(ctx, WASM_Instruction{kind = .I32_Add})
+	emit(ctx, WASM_Instruction{kind = .I32_Store8, mem_align = 0, mem_offset = 0})
+
+	// Store newline at offset 17
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 17})
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 10}) // '\n'
+	emit(ctx, WASM_Instruction{kind = .I32_Store8, mem_align = 0, mem_offset = 0})
+
+	// Set iov_buf: ptr=16, len=2 at offset 0
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 16})
+	emit(ctx, WASM_Instruction{kind = .I32_Store, mem_align = 0, mem_offset = 0})
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 4})
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 2})
+	emit(ctx, WASM_Instruction{kind = .I32_Store, mem_align = 0, mem_offset = 0})
+
+	// fd_write(1, 0, 1, 8) → stdout, iov at 0, 1 iov, nwritten at 8
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 1})   // fd = stdout
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})   // iovs ptr
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 1})   // iovs_len
+	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 8})   // nwritten ptr
+	emit(ctx, WASM_Instruction{kind = .Call, func_idx = fd_write_idx})
+	emit(ctx, WASM_Instruction{kind = .Drop}) // discard fd_write return value
+}
+
+// Emit math.X() call via host import or native instruction.
+extract_math_call :: proc(attr: string, e: ^parser.Call_Expr, ctx: ^WASM_Extract_Context) {
+	// Native WASM instructions for some math functions
+	switch attr {
+	case "floor":
+		if len(e.args) >= 1 {
+			extract_expr(e.args[0], ctx)
+			arg_type := infer_expr_type(e.args[0], ctx)
+			if arg_type == .I32 { emit(ctx, WASM_Instruction{kind = .F64_Convert_I32_S}) }
+			if arg_type == .F32 { emit(ctx, WASM_Instruction{kind = .F64_Promote_F32}) }
+			emit(ctx, WASM_Instruction{kind = .F64_Floor})
+		}
+		return
+	case "ceil":
+		if len(e.args) >= 1 {
+			extract_expr(e.args[0], ctx)
+			arg_type := infer_expr_type(e.args[0], ctx)
+			if arg_type == .I32 { emit(ctx, WASM_Instruction{kind = .F64_Convert_I32_S}) }
+			if arg_type == .F32 { emit(ctx, WASM_Instruction{kind = .F64_Promote_F32}) }
+			emit(ctx, WASM_Instruction{kind = .F64_Ceil})
+		}
+		return
+	case "sqrt":
+		if len(e.args) >= 1 {
+			extract_expr(e.args[0], ctx)
+			arg_type := infer_expr_type(e.args[0], ctx)
+			if arg_type == .I32 { emit(ctx, WASM_Instruction{kind = .F64_Convert_I32_S}) }
+			if arg_type == .F32 { emit(ctx, WASM_Instruction{kind = .F64_Promote_F32}) }
+			emit(ctx, WASM_Instruction{kind = .F64_Sqrt})
+		}
+		return
+	case "trunc":
+		if len(e.args) >= 1 {
+			extract_expr(e.args[0], ctx)
+			arg_type := infer_expr_type(e.args[0], ctx)
+			if arg_type == .I32 { emit(ctx, WASM_Instruction{kind = .F64_Convert_I32_S}) }
+			if arg_type == .F32 { emit(ctx, WASM_Instruction{kind = .F64_Promote_F32}) }
+			emit(ctx, WASM_Instruction{kind = .F64_Trunc})
+		}
+		return
+	case "fabs":
+		if len(e.args) >= 1 {
+			extract_expr(e.args[0], ctx)
+			arg_type := infer_expr_type(e.args[0], ctx)
+			if arg_type == .I32 { emit(ctx, WASM_Instruction{kind = .F64_Convert_I32_S}) }
+			if arg_type == .F32 { emit(ctx, WASM_Instruction{kind = .F64_Promote_F32}) }
+			emit(ctx, WASM_Instruction{kind = .F64_Abs})
+		}
+		return
+	}
+
+	// Host imports for transcendental functions
+	import_name := fmt.tprintf("math_%s", attr)
+	idx, ok := ctx.import_map[import_name]
+	if !ok { return }
+
+	// Push args, promoting to f64
+	for arg in e.args {
+		extract_expr(arg, ctx)
+		arg_type := infer_expr_type(arg, ctx)
+		if arg_type == .I32 { emit(ctx, WASM_Instruction{kind = .F64_Convert_I32_S}) }
+		if arg_type == .F32 { emit(ctx, WASM_Instruction{kind = .F64_Promote_F32}) }
+	}
+	emit(ctx, WASM_Instruction{kind = .Call, func_idx = idx})
 }
 
 extract_subscript :: proc(e: ^parser.Subscript_Expr, ctx: ^WASM_Extract_Context) {
@@ -844,6 +1263,9 @@ infer_expr_type :: proc(expr: parser.Expr, ctx: ^WASM_Extract_Context) -> WASM_V
 		if wtype, ok := ctx.local_types[e.id]; ok {
 			return wtype
 		}
+		if gtype, gok := ctx.global_types[e.id]; gok {
+			return gtype
+		}
 	case ^parser.Bin_Op_Expr:
 		if e.op == .Div { return .F64 }
 		ltype := infer_expr_type(e.left, ctx)
@@ -865,6 +1287,12 @@ infer_expr_type :: proc(expr: parser.Expr, ctx: ^WASM_Extract_Context) -> WASM_V
 			if f.id == "min" && len(e.args) >= 1 { return infer_expr_type(e.args[0], ctx) }
 			if f.id == "max" && len(e.args) >= 1 { return infer_expr_type(e.args[0], ctx) }
 			if f.id == "len" { return .I32 }
+			if f.id == "print" { return .Void }
+		case ^parser.Attribute_Expr:
+			#partial switch v in f.value {
+			case ^parser.Name_Expr:
+				if v.id == "math" { return .F64 } // math functions return f64
+			}
 		}
 	case ^parser.Subscript_Expr:
 		#partial switch v in e.value {

@@ -11,8 +11,51 @@ emit_wat :: proc(module: ^WASM_Module, allocator: mem.Allocator) -> string {
 
 	fmt.sbprint(&b, "(module\n")
 
+	// Imports
+	for &imp, idx in module.imports {
+		fmt.sbprintf(&b, "  (import \"%s\" \"%s\" (func $import_%d", imp.module_name, imp.field_name, idx)
+		if len(imp.type.params) > 0 {
+			fmt.sbprint(&b, " (param")
+			for p in imp.type.params { fmt.sbprintf(&b, " %s", wasm_type_str(p)) }
+			fmt.sbprint(&b, ")")
+		}
+		if len(imp.type.results) > 0 {
+			fmt.sbprint(&b, " (result")
+			for r in imp.type.results { fmt.sbprintf(&b, " %s", wasm_type_str(r)) }
+			fmt.sbprint(&b, ")")
+		}
+		fmt.sbprint(&b, "))\n")
+	}
+
 	// Memory export
 	fmt.sbprintf(&b, "  (memory (export \"memory\") %d)\n", module.memory_pages)
+
+	// Globals
+	for &g in module.globals {
+		type_str := wasm_type_str(g.type)
+		if g.mutable {
+			fmt.sbprintf(&b, "  (global $%s (mut %s) ", g.name, type_str)
+		} else {
+			fmt.sbprintf(&b, "  (global $%s %s ", g.name, type_str)
+		}
+		switch g.type {
+		case .I32: fmt.sbprintf(&b, "(i32.const %d)", g.init_i32)
+		case .I64: fmt.sbprintf(&b, "(i64.const %d)", g.init_i64)
+		case .F32: fmt.sbprintf(&b, "(f32.const %f)", g.init_f32)
+		case .F64: fmt.sbprintf(&b, "(f64.const %f)", g.init_f64)
+		case .Void: fmt.sbprint(&b, "(i32.const 0)")
+		}
+		fmt.sbprint(&b, ")\n")
+	}
+
+	// Data segments
+	for &seg in module.data_segments {
+		fmt.sbprintf(&b, "  (data (i32.const %d) \"", seg.offset)
+		for byte in seg.data {
+			fmt.sbprintf(&b, "\\%02x", byte)
+		}
+		fmt.sbprint(&b, "\")\n")
+	}
 
 	// Functions
 	for &func in module.functions {
@@ -89,6 +132,10 @@ emit_wat_instruction :: proc(instr: ^WASM_Instruction, sb: ^strings.Builder, ind
 	case .Local_Get, .Local_Set, .Local_Tee:
 		fmt.sbprintf(sb, "%s %d\n", name, instr.local_idx)
 
+	// Global ops
+	case .Global_Get, .Global_Set:
+		fmt.sbprintf(sb, "%s %d\n", name, instr.local_idx)
+
 	// Branch ops
 	case .Br, .Br_If:
 		fmt.sbprintf(sb, "%s %d\n", name, instr.label_idx)
@@ -137,6 +184,8 @@ wat_instr_name :: proc(kind: WASM_Instr_Kind) -> string {
 	case .Local_Get:  return "local.get"
 	case .Local_Set:  return "local.set"
 	case .Local_Tee:  return "local.tee"
+	case .Global_Get: return "global.get"
+	case .Global_Set: return "global.set"
 
 	case .I32_Add:    return "i32.add"
 	case .I32_Sub:    return "i32.sub"

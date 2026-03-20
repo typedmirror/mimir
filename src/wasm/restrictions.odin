@@ -412,9 +412,9 @@ check_call_for_wasm :: proc(call: ^parser.Call_Expr, ctx: ^WASM_Restriction_Cont
 				}
 			}
 		}
-		// WASM002: String operations
+		// WASM002: String operations (print is exempt — supported via host import)
 		if is_wasm_rule_enabled("WASM002", ctx.config) {
-			if f.id == "str" || f.id == "format" || f.id == "repr" || f.id == "print" {
+			if f.id == "str" || f.id == "format" || f.id == "repr" {
 				add_wasm_diagnostic(ctx, call.loc, "WASM002",
 					fmt.tprintf("String operation '%s()' in @wasm function", f.id),
 					"No string heap in WASM linear memory",

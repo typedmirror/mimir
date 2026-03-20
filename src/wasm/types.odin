@@ -32,6 +32,8 @@ WASM_Instr_Kind :: enum {
 	I32_Const, I64_Const, F32_Const, F64_Const,
 	// Local variable ops
 	Local_Get, Local_Set, Local_Tee,
+	// Global variable ops
+	Global_Get, Global_Set,
 	// i32 arithmetic
 	I32_Add, I32_Sub, I32_Mul, I32_Div_S, I32_Rem_S,
 	I32_And, I32_Or, I32_Xor, I32_Shl, I32_Shr_S,
@@ -97,11 +99,39 @@ WASM_Function :: struct {
 	exported: bool,
 }
 
-// A WASM module containing functions and memory.
+// A WASM import declaration.
+WASM_Import :: struct {
+	module_name: string,  // e.g., "env", "Math", "wasi_snapshot_preview1"
+	field_name:  string,  // e.g., "console_log_i32", "sin"
+	type:        WASM_Func_Type,
+}
+
+// A WASM global variable.
+WASM_Global :: struct {
+	name:      string,
+	type:      WASM_Value_Type,
+	mutable:   bool,
+	init_i32:  i32,
+	init_i64:  i64,
+	init_f32:  f32,
+	init_f64:  f64,
+}
+
+// A WASM data segment for memory initialization.
+WASM_Data_Segment :: struct {
+	offset: i32,   // memory offset (i32.const expr)
+	data:   []u8,
+}
+
+// A WASM module containing functions, imports, globals, data, and memory.
 WASM_Module :: struct {
-	functions:    [dynamic]WASM_Function,
-	memory_pages: int,
-	allocator:    mem.Allocator,
+	functions:     [dynamic]WASM_Function,
+	imports:       [dynamic]WASM_Import,
+	globals:       [dynamic]WASM_Global,
+	data_segments: [dynamic]WASM_Data_Segment,
+	memory_pages:  int,
+	wasi:          bool,
+	allocator:     mem.Allocator,
 }
 
 // Type resolution context for Python → WASM type mapping.

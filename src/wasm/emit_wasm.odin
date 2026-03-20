@@ -9,12 +9,15 @@ import "core:math"
 WASM_MAGIC   :: [4]u8{0x00, 0x61, 0x73, 0x6D}  // "\0asm"
 WASM_VERSION :: [4]u8{0x01, 0x00, 0x00, 0x00}
 
-// Section IDs
+// Section IDs (strict order per WASM spec)
 SECTION_TYPE     :: 1
+SECTION_IMPORT   :: 2
 SECTION_FUNCTION :: 3
 SECTION_MEMORY   :: 5
+SECTION_GLOBAL   :: 6
 SECTION_EXPORT   :: 7
 SECTION_CODE     :: 10
+SECTION_DATA     :: 11
 
 // Value type encodings
 VALTYPE_I32 :: 0x7F
@@ -40,20 +43,29 @@ emit_wasm_binary :: proc(module: ^WASM_Module, allocator: mem.Allocator) -> []u8
 	for b in WASM_MAGIC   { append(&buf, b) }
 	for b in WASM_VERSION { append(&buf, b) }
 
-	// Section 1: Type section — function signatures
+	// Section 1: Type section — function signatures (imports + local functions)
 	emit_type_section(module, &buf, allocator)
 
-	// Section 3: Function section — type indices
+	// Section 2: Import section
+	emit_import_section(module, &buf, allocator)
+
+	// Section 3: Function section — type indices (local functions only)
 	emit_function_section(module, &buf, allocator)
 
 	// Section 5: Memory section
 	emit_memory_section(module, &buf, allocator)
+
+	// Section 6: Global section
+	emit_global_section(module, &buf, allocator)
 
 	// Section 7: Export section
 	emit_export_section(module, &buf, allocator)
 
 	// Section 10: Code section — function bodies
 	emit_code_section(module, &buf, allocator)
+
+	// Section 11: Data section
+	emit_data_section(module, &buf, allocator)
 
 	return buf[:]
 }
@@ -86,31 +98,56 @@ encode_sleb128 :: proc(buf: ^[dynamic]u8, value: i64) {
 // === Section emission ===
 
 emit_type_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: mem.Allocator) {
-	if len(module.functions) == 0 { return }
+	total_types := len(module.imports) + len(module.functions)
+	if total_types == 0 { return }
 
 	section_buf := make([dynamic]u8, 0, 256, allocator)
+	encode_uleb128(&section_buf, u64(total_types))
 
-	// Number of types
-	encode_uleb128(&section_buf, u64(len(module.functions)))
-
-	for &func in module.functions {
+	// Import function types first
+	for &imp in module.imports {
 		append(&section_buf, 0x60) // functype prefix
-
-		// Params
-		encode_uleb128(&section_buf, u64(len(func.type.params)))
-		for p in func.type.params {
-			append(&section_buf, valtype_byte(p))
-		}
-
-		// Results
-		encode_uleb128(&section_buf, u64(len(func.type.results)))
-		for r in func.type.results {
-			append(&section_buf, valtype_byte(r))
-		}
+		encode_uleb128(&section_buf, u64(len(imp.type.params)))
+		for p in imp.type.params { append(&section_buf, valtype_byte(p)) }
+		encode_uleb128(&section_buf, u64(len(imp.type.results)))
+		for r in imp.type.results { append(&section_buf, valtype_byte(r)) }
 	}
 
-	// Write section header
+	// Local function types
+	for &func in module.functions {
+		append(&section_buf, 0x60) // functype prefix
+		encode_uleb128(&section_buf, u64(len(func.type.params)))
+		for p in func.type.params { append(&section_buf, valtype_byte(p)) }
+		encode_uleb128(&section_buf, u64(len(func.type.results)))
+		for r in func.type.results { append(&section_buf, valtype_byte(r)) }
+	}
+
 	append(buf, SECTION_TYPE)
+	encode_uleb128(buf, u64(len(section_buf)))
+	for b in section_buf { append(buf, b) }
+}
+
+emit_import_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: mem.Allocator) {
+	if len(module.imports) == 0 { return }
+
+	section_buf := make([dynamic]u8, 0, 256, allocator)
+	encode_uleb128(&section_buf, u64(len(module.imports)))
+
+	for &imp, idx in module.imports {
+		// Module name
+		mod_bytes := transmute([]u8)imp.module_name
+		encode_uleb128(&section_buf, u64(len(mod_bytes)))
+		for b in mod_bytes { append(&section_buf, b) }
+		// Field name
+		field_bytes := transmute([]u8)imp.field_name
+		encode_uleb128(&section_buf, u64(len(field_bytes)))
+		for b in field_bytes { append(&section_buf, b) }
+		// Import kind: function (0x00) + type index
+		append(&section_buf, 0x00)
+		encode_uleb128(&section_buf, u64(idx)) // type index = import index (1:1 in type section)
+	}
+
+	append(buf, SECTION_IMPORT)
 	encode_uleb128(buf, u64(len(section_buf)))
 	for b in section_buf { append(buf, b) }
 }
@@ -118,10 +155,12 @@ emit_type_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: me
 emit_function_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: mem.Allocator) {
 	if len(module.functions) == 0 { return }
 
+	import_count := len(module.imports)
 	section_buf := make([dynamic]u8, 0, 64, allocator)
 	encode_uleb128(&section_buf, u64(len(module.functions)))
 	for i in 0..<len(module.functions) {
-		encode_uleb128(&section_buf, u64(i)) // type index = function index (1:1)
+		// Type index offset by import count (imports occupy 0..N-1)
+		encode_uleb128(&section_buf, u64(i + import_count))
 	}
 
 	append(buf, SECTION_FUNCTION)
@@ -140,6 +179,54 @@ emit_memory_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: 
 	for b in section_buf { append(buf, b) }
 }
 
+emit_global_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: mem.Allocator) {
+	if len(module.globals) == 0 { return }
+
+	section_buf := make([dynamic]u8, 0, 128, allocator)
+	encode_uleb128(&section_buf, u64(len(module.globals)))
+
+	for &g in module.globals {
+		// Type + mutability
+		append(&section_buf, valtype_byte(g.type))
+		append(&section_buf, 0x01 if g.mutable else 0x00)
+		// Init expression
+		switch g.type {
+		case .I32:
+			append(&section_buf, 0x41) // i32.const
+			encode_sleb128(&section_buf, i64(g.init_i32))
+		case .I64:
+			append(&section_buf, 0x42) // i64.const
+			encode_sleb128(&section_buf, g.init_i64)
+		case .F32:
+			append(&section_buf, 0x43) // f32.const
+			bits := transmute(u32)g.init_f32
+			append(&section_buf, u8(bits))
+			append(&section_buf, u8(bits >> 8))
+			append(&section_buf, u8(bits >> 16))
+			append(&section_buf, u8(bits >> 24))
+		case .F64:
+			append(&section_buf, 0x44) // f64.const
+			bits := transmute(u64)g.init_f64
+			append(&section_buf, u8(bits))
+			append(&section_buf, u8(bits >> 8))
+			append(&section_buf, u8(bits >> 16))
+			append(&section_buf, u8(bits >> 24))
+			append(&section_buf, u8(bits >> 32))
+			append(&section_buf, u8(bits >> 40))
+			append(&section_buf, u8(bits >> 48))
+			append(&section_buf, u8(bits >> 56))
+		case .Void:
+			append(&section_buf, 0x41) // i32.const 0
+			encode_sleb128(&section_buf, 0)
+		}
+		append(&section_buf, 0x0B) // end
+	}
+
+	append(buf, SECTION_GLOBAL)
+	encode_uleb128(buf, u64(len(section_buf)))
+	for b in section_buf { append(buf, b) }
+}
+
 emit_export_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: mem.Allocator) {
 	section_buf := make([dynamic]u8, 0, 256, allocator)
 
@@ -153,11 +240,12 @@ emit_export_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: 
 	// Export memory
 	emit_export_entry(&section_buf, "memory", EXPORT_MEMORY, 0)
 
-	// Export functions
+	// Export functions (indices offset by import count)
+	import_count := len(module.imports)
 	func_idx := 0
 	for &func in module.functions {
 		if func.exported {
-			emit_export_entry(&section_buf, func.name, EXPORT_FUNC, func_idx)
+			emit_export_entry(&section_buf, func.name, EXPORT_FUNC, func_idx + import_count)
 		}
 		func_idx += 1
 	}
@@ -261,6 +349,10 @@ emit_binary_instruction :: proc(instr: ^WASM_Instruction, buf: ^[dynamic]u8) {
 	case .Local_Get, .Local_Set, .Local_Tee:
 		encode_uleb128(buf, u64(instr.local_idx))
 
+	// Global variable ops
+	case .Global_Get, .Global_Set:
+		encode_uleb128(buf, u64(instr.local_idx)) // reuse local_idx field for global index
+
 	// Branch ops
 	case .Br, .Br_If:
 		encode_uleb128(buf, u64(instr.label_idx))
@@ -296,6 +388,29 @@ emit_binary_instruction :: proc(instr: ^WASM_Instruction, buf: ^[dynamic]u8) {
 	}
 }
 
+emit_data_section :: proc(module: ^WASM_Module, buf: ^[dynamic]u8, allocator: mem.Allocator) {
+	if len(module.data_segments) == 0 { return }
+
+	section_buf := make([dynamic]u8, 0, 256, allocator)
+	encode_uleb128(&section_buf, u64(len(module.data_segments)))
+
+	for &seg in module.data_segments {
+		// Active data segment: memory index 0
+		append(&section_buf, 0x00) // active, memory 0
+		// Offset expression: i32.const + end
+		append(&section_buf, 0x41)
+		encode_sleb128(&section_buf, i64(seg.offset))
+		append(&section_buf, 0x0B) // end
+		// Data bytes
+		encode_uleb128(&section_buf, u64(len(seg.data)))
+		for b in seg.data { append(&section_buf, b) }
+	}
+
+	append(buf, SECTION_DATA)
+	encode_uleb128(buf, u64(len(section_buf)))
+	for b in section_buf { append(buf, b) }
+}
+
 // === Opcode mapping ===
 
 wasm_opcode :: proc(kind: WASM_Instr_Kind) -> u8 {
@@ -316,6 +431,8 @@ wasm_opcode :: proc(kind: WASM_Instr_Kind) -> u8 {
 	case .Local_Get:   return 0x20
 	case .Local_Set:   return 0x21
 	case .Local_Tee:   return 0x22
+	case .Global_Get:  return 0x23
+	case .Global_Set:  return 0x24
 
 	case .I32_Load:    return 0x28
 	case .I64_Load:    return 0x29
