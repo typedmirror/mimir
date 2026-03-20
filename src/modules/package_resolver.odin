@@ -135,19 +135,19 @@ extract_package_exports :: proc(
 	// Pre-resolve relative imports from within the package
 	// Parse each relative import target, extract its exports, build import_types
 	import_types := make(map[binder.Symbol_ID]checker.Type_ID, 16, allocator)
-	sub_registry := checker.init_registry(allocator)
-	sub_builtins := checker.init_builtins(&sub_registry)
+	// Use shared registry for builtins — sub_registry caused Type_ID mismatch
+	builtins := checker.init_builtins(registry)
 
 	mod_scope := binder.result_get_scope(&bind_result, bind_result.module_scope)
 
-	// Track already-parsed submodules to avoid cycles (shared across recursion)
+	// Track already-parsed submodules to avoid cycles
 	parsed_subs := make(map[string]bool, 16, allocator)
 	parsed_subs[file_path] = true // mark self
 
 	// Recursively resolve relative imports within the package
 	_resolve_pkg_imports(
 		&bind_result, mod_scope, pkg_root, &import_types,
-		bridge, registry, &sub_builtins, &parsed_subs, allocator, 0,
+		bridge, registry, &builtins, &parsed_subs, allocator, 0,
 	)
 
 	// Flow analysis on main file
@@ -156,7 +156,7 @@ extract_package_exports :: proc(
 	// Type check main file with resolved intra-package imports (shared registry)
 	check_result := checker.check_with_imports(
 		module, &bind_result, &flow_result, file_path,
-		registry, &sub_builtins, import_types, allocator,
+		registry, &builtins, import_types, allocator,
 	)
 
 	// Extract exports from module scope
@@ -197,7 +197,10 @@ _resolve_pkg_imports :: proc(
 
 	for imp in bind_result.imports {
 		if imp.level == 0 { continue } // skip absolute imports
-		if len(imp.module_name) == 0 { continue } // bare "from . import X"
+
+		// Bare "from . import X" — skip for now (sub-module as namespace)
+		// These would need Module_Type wrapping and separate resolution.
+		if len(imp.module_name) == 0 { continue }
 
 		// Resolve relative module to file
 		sub_file := _resolve_relative_import(pkg_root, imp.module_name, allocator)
@@ -228,7 +231,7 @@ _resolve_pkg_imports :: proc(
 			registry, builtins, sub_import_types, allocator,
 		)
 
-		// Build name→type map from sub scope
+		// Build name→type map from sub scope and CACHE it
 		sub_type_map := make(map[string]checker.Type_ID, 8, allocator)
 		if sub_scope != nil {
 			for name, sub_sym_id in sub_scope.symbols {

@@ -288,7 +288,8 @@ wgsl_emit_node :: proc(
 
 	// NN ops
 	case .Conv2d:
-		// Conv2d as 2D dispatch: each thread computes one output pixel
+		// Conv2d: each thread computes one output element
+		// output[n, co, oh, ow] = sum_{ci, kh, kw} data[n, ci, oh+kh, ow+kw] * weight[co, ci, kh, kw]
 		if len(node.inputs) >= 2 {
 			data_node := get_node(graph, node.inputs[0])
 			wt_node := get_node(graph, node.inputs[1])
@@ -296,9 +297,39 @@ wgsl_emit_node :: proc(
 			w_name := fmt.tprintf("v%d", int(node.inputs[1]))
 			if data_node != nil && data_node.kind == .Param { d_name = fmt.tprintf("param_%s", data_node.name) }
 			if wt_node != nil && wt_node.kind == .Param { w_name = fmt.tprintf("param_%s", wt_node.name) }
-			fmt.sbprintf(b, "    // Conv2d: stride=1, padding=0\n")
+			// Extract shapes for loop bounds
+			c_in := 3; kh := 3; kw := 3; h_in := 32; w_in := 32; c_out := 16
+			if data_node != nil && data_node.output_shape != nil && len(data_node.output_shape) == 4 {
+				c_in = data_node.output_shape[1]
+				h_in = data_node.output_shape[2]
+				w_in = data_node.output_shape[3]
+			}
+			if wt_node != nil && wt_node.output_shape != nil && len(wt_node.output_shape) == 4 {
+				c_out = wt_node.output_shape[0]
+				kh = wt_node.output_shape[2]
+				kw = wt_node.output_shape[3]
+			}
+			h_out := h_in - kh + 1
+			w_out := w_in - kw + 1
+			fmt.sbprintf(b, "    // Conv2d: [N,%d,%d,%d] * [%d,%d,%d,%d] → [N,%d,%d,%d], stride=1, padding=0\n",
+				c_in, h_in, w_in, c_out, c_in, kh, kw, c_out, h_out, w_out)
+			fmt.sbprintf(b, "    let oidx_%d = tid;\n", id)
+			fmt.sbprintf(b, "    let ow_%d = oidx_%d %% %du;\n", id, id, w_out)
+			fmt.sbprintf(b, "    let oh_%d = (oidx_%d / %du) %% %du;\n", id, id, w_out, h_out)
+			fmt.sbprintf(b, "    let oc_%d = (oidx_%d / %du) %% %du;\n", id, id, h_out * w_out, c_out)
+			fmt.sbprintf(b, "    let on_%d = oidx_%d / %du;\n", id, id, c_out * h_out * w_out)
 			fmt.sbprintf(b, "    var v%d: %s = 0.0;\n", id, etype)
-			fmt.sbprintf(b, "    // TODO: conv2d kernel with kernel loops\n")
+			fmt.sbprintf(b, "    for (var ci_%d: u32 = 0u; ci_%d < %du; ci_%d++) {{\n", id, id, c_in, id)
+			fmt.sbprintf(b, "      for (var ky_%d: u32 = 0u; ky_%d < %du; ky_%d++) {{\n", id, id, kh, id)
+			fmt.sbprintf(b, "        for (var kx_%d: u32 = 0u; kx_%d < %du; kx_%d++) {{\n", id, id, kw, id)
+			fmt.sbprintf(b, "          let di_%d = on_%d * %du + ci_%d * %du + (oh_%d + ky_%d) * %du + ow_%d + kx_%d;\n",
+				id, id, c_in * h_in * w_in, id, h_in * w_in, id, id, w_in, id, id)
+			fmt.sbprintf(b, "          let wi_%d = oc_%d * %du + ci_%d * %du + ky_%d * %du + kx_%d;\n",
+				id, id, c_in * kh * kw, id, kh * kw, id, kw, id)
+			fmt.sbprintf(b, "          v%d += %s[di_%d] * %s[wi_%d];\n", id, d_name, id, w_name, id)
+			fmt.sbprintf(b, "        }}\n")
+			fmt.sbprintf(b, "      }}\n")
+			fmt.sbprintf(b, "    }}\n")
 		}
 
 	case .MaxPool2d:

@@ -280,7 +280,46 @@ msl_emit_node :: proc(
 
 	// NN ops
 	case .Conv2d:
-		fmt.sbprintf(b, "    %s v%d = 0; // conv2d: TODO kernel loops\n", etype, id)
+		if len(node.inputs) >= 2 {
+			data_node := get_node(graph, node.inputs[0])
+			wt_node := get_node(graph, node.inputs[1])
+			d_name := fmt.tprintf("v%d", int(node.inputs[0]))
+			w_name := fmt.tprintf("v%d", int(node.inputs[1]))
+			if data_node != nil && data_node.kind == .Param { d_name = fmt.tprintf("param_%s", data_node.name) }
+			if wt_node != nil && wt_node.kind == .Param { w_name = fmt.tprintf("param_%s", wt_node.name) }
+			c_in := 3; kh := 3; kw := 3; h_in := 32; w_in := 32; c_out := 16
+			if data_node != nil && data_node.output_shape != nil && len(data_node.output_shape) == 4 {
+				c_in = data_node.output_shape[1]
+				h_in = data_node.output_shape[2]
+				w_in = data_node.output_shape[3]
+			}
+			if wt_node != nil && wt_node.output_shape != nil && len(wt_node.output_shape) == 4 {
+				c_out = wt_node.output_shape[0]
+				kh = wt_node.output_shape[2]
+				kw = wt_node.output_shape[3]
+			}
+			h_out := h_in - kh + 1
+			w_out := w_in - kw + 1
+			fmt.sbprintf(b, "    // Conv2d: stride=1, padding=0\n")
+			fmt.sbprintf(b, "    uint ow_%d = tid %% %d;\n", id, w_out)
+			fmt.sbprintf(b, "    uint oh_%d = (tid / %d) %% %d;\n", id, w_out, h_out)
+			fmt.sbprintf(b, "    uint oc_%d = (tid / %d) %% %d;\n", id, h_out * w_out, c_out)
+			fmt.sbprintf(b, "    uint on_%d = tid / %d;\n", id, c_out * h_out * w_out)
+			fmt.sbprintf(b, "    %s v%d = 0;\n", etype, id)
+			fmt.sbprintf(b, "    for (uint ci = 0; ci < %d; ci++) {{\n", c_in)
+			fmt.sbprintf(b, "      for (uint ky = 0; ky < %d; ky++) {{\n", kh)
+			fmt.sbprintf(b, "        for (uint kx = 0; kx < %d; kx++) {{\n", kw)
+			fmt.sbprintf(b, "          uint di = on_%d * %d + ci * %d + (oh_%d + ky) * %d + ow_%d + kx;\n",
+				id, c_in * h_in * w_in, h_in * w_in, id, w_in, id)
+			fmt.sbprintf(b, "          uint wi = oc_%d * %d + ci * %d + ky * %d + kx;\n",
+				id, c_in * kh * kw, kh * kw, kw)
+			fmt.sbprintf(b, "          v%d += %s[di] * %s[wi];\n", id, d_name, w_name)
+			fmt.sbprintf(b, "        }}\n")
+			fmt.sbprintf(b, "      }}\n")
+			fmt.sbprintf(b, "    }}\n")
+		} else {
+			fmt.sbprintf(b, "    %s v%d = 0; // conv2d: missing inputs\n", etype, id)
+		}
 	case .MaxPool2d:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
 		fmt.sbprintf(b, "    %s v%d = %s; // maxpool passthrough\n", etype, id, a)
