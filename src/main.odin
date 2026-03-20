@@ -3,6 +3,7 @@ package mimir
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 import "core"
 import "parser"
@@ -1413,6 +1414,7 @@ cmd_check :: proc(args: []string) {
 
 	// Parse flags
 	sarif_mode := false
+	watch_mode := false
 	level := Analysis_Level.Strict  // default: everything
 	target := args[0]
 	for i := 0; i < len(args); i += 1 {
@@ -1430,9 +1432,16 @@ cmd_check :: proc(args: []string) {
 				os.exit(1)
 			}
 			i += 1
+		} else if args[i] == "--watch" || args[i] == "-w" {
+			watch_mode = true
 		} else if !strings.has_prefix(args[i], "-") {
 			target = args[i]
 		}
+	}
+
+	if watch_mode {
+		cmd_check_watch(target, level)
+		return
 	}
 
 	p: Pipeline; ok := pipeline_start("check", target, &p)
@@ -1474,6 +1483,77 @@ cmd_check :: proc(args: []string) {
 }
 
 // Single-file check — original behavior, unchanged
+// Watch mode: re-run check whenever files change.
+// Polls file modification times every 1.5 seconds.
+cmd_check_watch :: proc(target: string, level: Analysis_Level) {
+	fmt.printfln("mimir check --watch: watching '%s' (Ctrl+C to stop)\n", target)
+
+	// Collect initial file mtimes
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir check: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.printfln("mimir check: no Python files found in '%s'", target)
+		return
+	}
+
+	mtimes := make(map[string]i64, len(files))
+	for file in files {
+		info, info_err := os.stat(file, context.allocator)
+		if info_err == nil {
+			mtimes[file] = i64(info.modification_time._nsec)
+		}
+	}
+
+	// Initial run
+	_run_check_once(target, level)
+
+	// Poll loop
+	for {
+		time.sleep(1500 * time.Millisecond)
+
+		changed := false
+		// Re-discover files (handle new files)
+		new_files, _ := core.find_python_files(target)
+		for file in new_files {
+			info, info_err := os.stat(file, context.allocator)
+			if info_err != nil { continue }
+			mtime := i64(info.modification_time._nsec)
+			prev_mtime, has_prev := mtimes[file]
+			if !has_prev || mtime != prev_mtime {
+				changed = true
+				mtimes[file] = mtime
+			}
+		}
+
+		if changed {
+			fmt.printfln("\n--- file change detected, re-checking... ---\n")
+			_run_check_once(target, level)
+		}
+	}
+}
+
+_run_check_once :: proc(target: string, level: Analysis_Level) {
+	p: Pipeline; ok := pipeline_start("check", target, &p)
+	if !ok { return }
+	defer pipeline_stop(&p)
+
+	errors := 0
+	if len(p.files) == 1 {
+		errors = cmd_check_single(p.files[0], &p.bridge, &p.arena, nil, level)
+	} else {
+		errors = cmd_check_multi(target, p.files, &p.bridge, &p.arena, level)
+	}
+
+	if errors > 0 {
+		fmt.printfln("\nmimir check: %d error(s)", errors)
+	} else {
+		fmt.printfln("\nmimir check: all clear")
+	}
+}
+
 cmd_check_single :: proc(
 	file: string,
 	bridge: ^parser.Bridge,
@@ -2250,9 +2330,12 @@ cmd_test :: proc(args: []string) {
 		} else if arg == "-v" || arg == "--verbose" {
 			config.verbose = true
 			i += 1
+		} else if arg == "--coverage" || arg == "--cov" {
+			config.coverage = true
+			i += 1
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("mimir test: unknown flag '%s'", arg)
-			fmt.eprintln("Usage: mimir test [-k <pattern>] [--check] [-v] [path]")
+			fmt.eprintln("Usage: mimir test [-k <pattern>] [--check] [--coverage] [-v] [path]")
 			os.exit(1)
 		} else {
 			config.target = arg
@@ -2313,6 +2396,13 @@ cmd_test :: proc(args: []string) {
 	}
 
 	platform.print_results(&summary, config.verbose)
+
+	// Print coverage report if available
+	if len(summary.coverage_report) > 0 {
+		fmt.println()
+		fmt.println("=== Coverage Report ===")
+		fmt.print(summary.coverage_report)
+	}
 
 	if summary.failed > 0 || summary.errors > 0 {
 		os.exit(1)

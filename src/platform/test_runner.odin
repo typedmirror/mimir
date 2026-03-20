@@ -15,6 +15,7 @@ Test_Config :: struct {
 	filter:      string,   // -k filter pattern (substring match)
 	check_first: bool,     // --check flag
 	verbose:     bool,     // -v flag
+	coverage:    bool,     // --coverage flag
 }
 
 Test_Status :: enum { Pass, Fail, Error, Skip }
@@ -28,12 +29,13 @@ Test_Result :: struct {
 }
 
 Test_Summary :: struct {
-	results:  [dynamic]Test_Result,
-	passed:   int,
-	failed:   int,
-	errors:   int,
-	skipped:  int,
-	duration: f64,
+	results:         [dynamic]Test_Result,
+	passed:          int,
+	failed:          int,
+	errors:          int,
+	skipped:         int,
+	duration:        f64,
+	coverage_report: string,
 }
 
 // Discover test files under root. Finds test_*.py and *_test.py files.
@@ -195,8 +197,14 @@ run_tests :: proc(config: Test_Config, allocator: mem.Allocator) -> (Test_Summar
 	}
 
 	// 7. Execute harness — capture stdout (JSON results)
+	run_cmd: []string
+	if config.coverage {
+		run_cmd = {python, "-m", "coverage", "run", "--source=.", harness_path}
+	} else {
+		run_cmd = {python, harness_path}
+	}
 	state, stdout_bytes, stderr_bytes, exec_err := os.process_exec({
-		command = {python, harness_path},
+		command = run_cmd,
 	}, allocator)
 
 	if exec_err != nil {
@@ -216,6 +224,17 @@ run_tests :: proc(config: Test_Config, allocator: mem.Allocator) -> (Test_Summar
 	}
 
 	summary.duration = time.duration_seconds(time.diff(start, time.now()))
+
+	// 9. Coverage report (if enabled)
+	if config.coverage {
+		_, cov_stdout, _, cov_err := os.process_exec({
+			command = {python, "-m", "coverage", "report", "--show-missing"},
+		}, allocator)
+		if cov_err == nil && cov_stdout != nil {
+			summary.coverage_report = string(cov_stdout)
+		}
+	}
+
 	return summary, nil
 }
 
