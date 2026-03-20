@@ -268,3 +268,154 @@ check_list_wrap_comp :: proc(ctx: ^Perf_Context) {
 	}
 	core.walk_all_stmts(&visitor, ctx.module.body)
 }
+
+// ==================== §24 Profiling Integration ====================
+
+// PROF001 — O(n²) nested loop on same iterable
+check_quadratic_nested_loop :: proc(ctx: ^Perf_Context) {
+	_walk_for_nested(ctx, ctx.module.body, nil)
+}
+
+_walk_for_nested :: proc(ctx: ^Perf_Context, stmts: []parser.Stmt, outer_iter_name: ^string) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.For_Stmt:
+			iter_name := _get_iter_name(s.iter)
+			if outer_iter_name != nil && len(iter_name) > 0 && iter_name == outer_iter_name^ {
+				append(&ctx.diagnostics, core.Diagnostic{
+					severity = .Performance,
+					location = core.Location{
+						file   = ctx.file_path,
+						line   = int(s.loc.line),
+						column = int(s.loc.col),
+					},
+					what = fmt.tprintf("O(n²) nested loop — both loops iterate over '%s'", iter_name),
+					why  = "iterating over the same collection in nested loops is quadratic in the collection size",
+					fix  = "use a set/dict for O(1) lookups, or restructure to avoid nested iteration",
+					code = "PROF001",
+				})
+			}
+			if len(iter_name) > 0 {
+				_walk_for_nested(ctx, s.body, &iter_name)
+			} else if outer_iter_name != nil {
+				_walk_for_nested(ctx, s.body, outer_iter_name)
+			} else {
+				_walk_for_nested(ctx, s.body, nil)
+			}
+			_walk_for_nested(ctx, s.orelse, outer_iter_name)
+		case ^parser.If_Stmt:
+			_walk_for_nested(ctx, s.body, outer_iter_name)
+			_walk_for_nested(ctx, s.orelse, outer_iter_name)
+		case ^parser.While_Stmt:
+			_walk_for_nested(ctx, s.body, outer_iter_name)
+		case ^parser.With_Stmt:
+			_walk_for_nested(ctx, s.body, outer_iter_name)
+		case ^parser.Try_Stmt:
+			_walk_for_nested(ctx, s.body, outer_iter_name)
+			_walk_for_nested(ctx, s.orelse, outer_iter_name)
+		case ^parser.Func_Def:
+			_walk_for_nested(ctx, s.body, nil)
+		}
+	}
+}
+
+_get_iter_name :: proc(expr: parser.Expr) -> string {
+	if name, ok := expr.(^parser.Name_Expr); ok {
+		return name.id
+	}
+	return ""
+}
+
+// PROF002 — Blocking/expensive call inside a loop
+check_blocking_call_in_loop :: proc(ctx: ^Perf_Context) {
+	_walk_for_blocking(ctx, ctx.module.body, false)
+}
+
+_walk_for_blocking :: proc(ctx: ^Perf_Context, stmts: []parser.Stmt, in_loop: bool) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.For_Stmt:
+			_walk_for_blocking(ctx, s.body, true)
+			_walk_for_blocking(ctx, s.orelse, in_loop)
+		case ^parser.While_Stmt:
+			_walk_for_blocking(ctx, s.body, true)
+			_walk_for_blocking(ctx, s.orelse, in_loop)
+		case ^parser.If_Stmt:
+			_walk_for_blocking(ctx, s.body, in_loop)
+			_walk_for_blocking(ctx, s.orelse, in_loop)
+		case ^parser.With_Stmt:
+			_walk_for_blocking(ctx, s.body, in_loop)
+		case ^parser.Try_Stmt:
+			_walk_for_blocking(ctx, s.body, in_loop)
+		case ^parser.Func_Def:
+			_walk_for_blocking(ctx, s.body, false)
+		case ^parser.Expr_Stmt:
+			if in_loop { _check_blocking_expr(ctx, s.value) }
+		case ^parser.Assign:
+			if in_loop { _check_blocking_expr(ctx, s.value) }
+		case ^parser.Ann_Assign:
+			if in_loop && s.value != nil { _check_blocking_expr(ctx, s.value) }
+		}
+	}
+}
+
+_check_blocking_expr :: proc(ctx: ^Perf_Context, expr: parser.Expr) {
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return }
+
+	mod := ""
+	func_name := ""
+
+	#partial switch f in call.func {
+	case ^parser.Attribute_Expr:
+		if name, n_ok := f.value.(^parser.Name_Expr); n_ok {
+			mod = name.id
+			func_name = f.attr
+		}
+	case ^parser.Name_Expr:
+		func_name = f.id
+	}
+
+	is_blocking := false
+	reason := ""
+
+	if mod == "time" && func_name == "sleep" {
+		is_blocking = true
+		reason = "time.sleep() blocks the thread"
+	}
+	if mod == "requests" || mod == "httpx" {
+		BLOCKING_HTTP :: [?]string{"get", "post", "put", "delete", "patch", "head", "request"}
+		for m in BLOCKING_HTTP {
+			if func_name == m {
+				is_blocking = true
+				reason = fmt.tprintf("%s.%s() makes a blocking HTTP request", mod, func_name)
+				break
+			}
+		}
+	}
+	if mod == "subprocess" {
+		if func_name == "run" || func_name == "call" || func_name == "check_output" || func_name == "check_call" {
+			is_blocking = true
+			reason = fmt.tprintf("subprocess.%s() blocks waiting for process", func_name)
+		}
+	}
+	if func_name == "open" && mod == "" {
+		is_blocking = true
+		reason = "open() in a loop creates repeated file I/O"
+	}
+
+	if is_blocking {
+		append(&ctx.diagnostics, core.Diagnostic{
+			severity = .Performance,
+			location = core.Location{
+				file   = ctx.file_path,
+				line   = int(call.loc.line),
+				column = int(call.loc.col),
+			},
+			what = fmt.tprintf("blocking call in loop: %s", reason),
+			why  = "blocking calls in loops serialize execution and multiply latency",
+			fix  = "batch operations outside the loop, use async/concurrent patterns, or cache results",
+			code = "PROF002",
+		})
+	}
+}

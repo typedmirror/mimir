@@ -111,6 +111,8 @@ main :: proc() {
 		cmd_generate_schema(args[2:])
 	case "profile-plan":
 		cmd_profile_plan(args[2:])
+	case "profile":
+		cmd_profile_run(args[2:])
 	case "diff-with":
 		cmd_diff_with(args[2:])
 	case "docs":
@@ -904,6 +906,94 @@ cmd_profile_plan :: proc(args: []string) {
 	for hs, i in hotspots {
 		fmt.printfln("  %d. %s:%d [%s] %s", i + 1, hs.file, hs.line, hs.code, hs.what)
 	}
+}
+
+// §24.2 — Run Python script with cProfile and correlate with static hotspots
+cmd_profile_run :: proc(args: []string) {
+	if len(args) < 1 {
+		fmt.eprintln("Usage: mimir profile run <script.py> [args...]")
+		fmt.eprintln("Runs the script under cProfile and correlates with static analysis.")
+		os.exit(1)
+	}
+
+	subcommand := args[0]
+	if subcommand != "run" {
+		fmt.eprintfln("mimir profile: unknown subcommand '%s'", subcommand)
+		fmt.eprintln("Usage: mimir profile run <script.py> [args...]")
+		os.exit(1)
+	}
+
+	if len(args) < 2 {
+		fmt.eprintln("Usage: mimir profile run <script.py>")
+		os.exit(1)
+	}
+
+	script := args[1]
+
+	// Step 1: Run static analysis (profile-plan)
+	fmt.printfln("=== Static Analysis ===")
+
+	p: Pipeline; ok := pipeline_start("profile", script, &p)
+	if !ok {
+		fmt.printfln("  no Python files found")
+	} else {
+		defer pipeline_stop(&p)
+
+		module := pipeline_parse_file(&p, "profile", script)
+		if module != nil {
+			bind_result := binder.bind(module, script, p.arena.allocator)
+			source_data, _ := os.read_entire_file(script, p.arena.allocator)
+			source_str := string(source_data) if source_data != nil else ""
+			perf_config := perf.default_config()
+			static_diags := perf.analyze_performance(module, &bind_result, source_str, script, &perf_config, p.arena.allocator)
+
+			if len(static_diags) > 0 {
+				fmt.printfln("  %d static hotspot(s):", len(static_diags))
+				for d, i in static_diags {
+					fmt.printfln("  %d. %s:%d [%s] %s", i + 1, d.location.file, d.location.line, d.code, d.what)
+				}
+			} else {
+				fmt.printfln("  no static hotspots found")
+			}
+		}
+	}
+	fmt.println()
+
+	// Step 2: Run script under cProfile
+	fmt.printfln("=== Runtime Profile (cProfile) ===")
+
+	python, py_ok := platform.find_python("", context.allocator)
+	if !py_ok {
+		fmt.eprintln("mimir profile: no Python interpreter found")
+		os.exit(1)
+	}
+
+	prof_args := make([dynamic]string, 0, 8)
+	append(&prof_args, python)
+	append(&prof_args, "-m")
+	append(&prof_args, "cProfile")
+	append(&prof_args, "-s")
+	append(&prof_args, "cumulative")
+	append(&prof_args, script)
+	for i := 2; i < len(args); i += 1 {
+		append(&prof_args, args[i])
+	}
+
+	_, prof_stdout, _, exec_err := os.process_exec(
+		{command = prof_args[:]},
+		context.allocator,
+	)
+
+	if exec_err != nil {
+		fmt.eprintfln("mimir profile: failed to run cProfile: %v", exec_err)
+		os.exit(1)
+	}
+
+	if prof_stdout != nil {
+		fmt.println(string(prof_stdout))
+	}
+
+	fmt.printfln("mimir profile: static analysis + cProfile complete for %s", script)
 }
 
 // Run both mimir and mypy on the same files, show the delta
