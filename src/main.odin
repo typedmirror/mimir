@@ -2021,7 +2021,7 @@ cmd_add :: proc(args: []string) {
 	}
 
 	fmt.println("  resolving dependencies...")
-	locked, resolve_err := platform.resolve(python, config.dependencies[:], allocator)
+	locked, resolve_err := platform.resolve_auto(python, config.dependencies[:], allocator)
 	if resolve_err != nil {
 		fmt.eprintfln("mimir add: %s", platform.error_msg(resolve_err))
 		os.exit(1)
@@ -2114,7 +2114,7 @@ cmd_lock :: proc(args: []string) {
 	}
 
 	fmt.println("  resolving dependencies...")
-	locked, resolve_err := platform.resolve(python, config.dependencies[:], allocator)
+	locked, resolve_err := platform.resolve_auto(python, config.dependencies[:], allocator)
 	if resolve_err != nil {
 		fmt.eprintfln("mimir lock: %s", platform.error_msg(resolve_err))
 		os.exit(1)
@@ -2620,7 +2620,7 @@ cmd_remove :: proc(args: []string) {
 	}
 
 	fmt.println("  resolving dependencies...")
-	locked, resolve_err := platform.resolve(python, config.dependencies[:], allocator)
+	locked, resolve_err := platform.resolve_auto(python, config.dependencies[:], allocator)
 	if resolve_err != nil {
 		fmt.eprintfln("mimir remove: %s", platform.error_msg(resolve_err))
 		os.exit(1)
@@ -2693,7 +2693,7 @@ cmd_update :: proc(args: []string) {
 
 	// Re-resolve all dependencies (pip finds latest matching versions)
 	fmt.println("  resolving dependencies...")
-	locked, resolve_err := platform.resolve(python, config.dependencies[:], allocator)
+	locked, resolve_err := platform.resolve_auto(python, config.dependencies[:], allocator)
 	if resolve_err != nil {
 		fmt.eprintfln("mimir update: %s", platform.error_msg(resolve_err))
 		os.exit(1)

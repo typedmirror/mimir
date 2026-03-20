@@ -7,8 +7,21 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 
-// Pip-delegated dependency resolver.
-// Uses `pip install --dry-run --report` to resolve all transitive deps.
+// Dependency resolver — native PyPI-based or pip fallback.
+// Native: queries PyPI JSON API directly via curl (no pip needed).
+// Pip fallback: uses `pip install --dry-run --report` for edge cases.
+
+// Auto resolver: try native first, fall back to pip on failure.
+resolve_auto :: proc(python: string, deps: []Dep_Spec, allocator: mem.Allocator) -> ([]Locked_Package, Platform_Error) {
+	// Try native resolution first (no pip needed)
+	native_result, native_err := resolve_native(deps, allocator)
+	if native_err == nil {
+		return native_result, nil
+	}
+	// Fall back to pip
+	fmt.eprintfln("  native resolver: %s — falling back to pip", error_msg(native_err))
+	return resolve(python, deps, allocator)
+}
 
 // Resolve dependencies via pip --dry-run --report.
 // Returns sorted list of locked packages (direct + transitive).
