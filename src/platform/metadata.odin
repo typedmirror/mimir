@@ -112,15 +112,23 @@ parse_metadata_from_source :: proc(source: string, allocator: mem.Allocator) -> 
 parse_dep_spec :: proc(raw: string, allocator: mem.Allocator) -> Dep_Spec {
 	trimmed := strings.trim_space(raw)
 
-	// Version operators to split on (check longest first)
+	// Find the EARLIEST position of any version operator.
+	// Must check all operators and take the one at the smallest index.
+	best_idx := -1
 	operators := [?]string{">=", "<=", "~=", "!=", "==", ">", "<"}
 	for op in operators {
 		if idx := strings.index(trimmed, op); idx >= 0 {
-			return Dep_Spec{
-				name       = strings.trim_space(trimmed[:idx]),
-				constraint = trimmed[idx:],
-				raw        = trimmed,
+			if best_idx < 0 || idx < best_idx {
+				best_idx = idx
 			}
+		}
+	}
+
+	if best_idx >= 0 {
+		return Dep_Spec{
+			name       = strings.trim_space(trimmed[:best_idx]),
+			constraint = trimmed[best_idx:],
+			raw        = trimmed,
 		}
 	}
 
