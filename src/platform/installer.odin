@@ -87,7 +87,30 @@ ensure_dependencies :: proc(
 	return paths, nil
 }
 
-// Install a single package at an exact version with --no-deps.
+// Install a single package — try native (curl + unzip) first, fall back to pip.
+install_package_pinned_auto :: proc(
+	python: string,
+	name, version: string,
+	target_dir: string,
+	cache: ^Cache,
+	allocator: mem.Allocator,
+	content_hash: string = "",
+) -> Platform_Error {
+	// Try native install (no pip needed)
+	pkg := Locked_Package{
+		name         = name,
+		version      = version,
+		content_hash = content_hash,
+	}
+	native_err := install_package_native(&pkg, cache, allocator)
+	if native_err == nil {
+		return nil
+	}
+	// Fall back to pip
+	return install_package_pinned(python, name, version, target_dir, allocator, content_hash)
+}
+
+// Install a single package at an exact version with --no-deps (pip fallback).
 // Used by lockfile install — all transitive deps are already resolved.
 // content_hash is written as .mimir-hash marker after install (optional).
 install_package_pinned :: proc(
@@ -184,7 +207,7 @@ install_from_lockfile :: proc(
 						// Force reinstall
 						target := package_version_dir(cache, pkg.name, pkg.version)
 						fmt.printfln("  reinstalling %s==%s (hash mismatch)...", pkg.name, pkg.version)
-						inst_err := install_package_pinned(python, pkg.name, pkg.version, target, allocator, pkg.content_hash)
+						inst_err := install_package_pinned_auto(python, pkg.name, pkg.version, target, cache, allocator, pkg.content_hash)
 						if inst_err != nil { return inst_err }
 						installed += 1
 						continue
@@ -208,7 +231,7 @@ install_from_lockfile :: proc(
 		parent := parent_dir(target)
 		os.make_directory_all(parent)
 		fmt.printfln("  installing %s==%s...", pkg.name, pkg.version)
-		install_err := install_package_pinned(python, pkg.name, pkg.version, target, allocator, pkg.content_hash)
+		install_err := install_package_pinned_auto(python, pkg.name, pkg.version, target, cache, allocator, pkg.content_hash)
 		if install_err != nil {
 			return install_err
 		}
