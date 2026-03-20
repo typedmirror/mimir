@@ -11,3 +11,8 @@ def get_user(req: Request, id: str) -> Response:
 @route("GET", "/health")
 def health(req: Request) -> Response:
     return Response(body={"status": "ok"})  # API003 is Warning, not caught by marker
+
+# API004: type mismatch — spec says "id" is integer but handler returns string
+@route("GET", "/users/{id}")
+def get_user_bad_type(req: Request, id: str) -> Response:  # E: duplicate route
+    return Response(body={"id": "not_an_int", "name": "bob"})  # API004 is Warning

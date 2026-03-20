@@ -19,12 +19,16 @@ import core   "mimir:core"
 //   API001 — Response field not in OpenAPI spec
 //   API002 — Required field missing from response
 //   API003 — Route not in OpenAPI spec
+//   API004 — Response field type mismatch (spec says integer, handler returns string)
+//   API005 — Handler does not read required request body
 
 API_Spec_Route :: struct {
 	method:          string,
 	path:            string,
 	response_fields: map[string]bool,
 	required_fields: map[string]bool,
+	field_types:     map[string]string, // field_name → OpenAPI type ("integer", "string", etc.)
+	has_request_body: bool,
 }
 
 // Entry point — called from checker.odin after analyze_routes.
@@ -115,7 +119,60 @@ analyze_api_contracts :: proc(
 				})
 			}
 		}
+
+		// API004: response field type mismatch
+		handler_types := extract_handler_response_types(module, route.handler_name, allocator)
+		for key, py_type in handler_types {
+			if spec_type, has_st := spec_route.field_types[key]; has_st {
+				expected_py := openapi_type_to_python(spec_type)
+				if len(expected_py) > 0 && expected_py != py_type {
+					append(diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = file_path,
+							line   = int(route.handler_loc.line),
+							column = int(route.handler_loc.col),
+						},
+						what = fmt.tprintf("response field \"%s\" type mismatch: handler returns %s, spec expects %s", key, py_type, spec_type),
+						why  = "handler returns a value whose type does not match the OpenAPI specification",
+						fix  = fmt.tprintf("change the value to match the spec type (%s)", spec_type),
+						code = "API004",
+					})
+				}
+			}
+		}
+
+		// API005: handler does not read required request body
+		if spec_route.has_request_body {
+			if !handler_reads_request_body(module, route.handler_name) {
+				append(diagnostics, core.Diagnostic{
+					severity = .Warning,
+					location = core.Location{
+						file   = file_path,
+						line   = int(route.handler_loc.line),
+						column = int(route.handler_loc.col),
+					},
+					what = fmt.tprintf("handler %s does not read request body for %s %s", route.handler_name, route.method, route.path),
+					why  = "OpenAPI spec declares a requestBody but handler does not access req.json or req.body",
+					fix  = "add request body parsing (e.g., data = req.json) or remove requestBody from spec",
+					code = "API005",
+				})
+			}
+		}
 	}
+}
+
+// Map OpenAPI type strings to Python type names for comparison.
+openapi_type_to_python :: proc(openapi_type: string) -> string {
+	switch openapi_type {
+	case "integer": return "int"
+	case "string":  return "str"
+	case "number":  return "float"
+	case "boolean": return "bool"
+	case "array":   return "list"
+	case "object":  return "dict"
+	}
+	return ""
 }
 
 // ==================== OpenAPI Spec Parsing ====================
@@ -130,8 +187,17 @@ find_openapi_spec :: proc(file_path: string, allocator: mem.Allocator) -> string
 		}
 	}
 
-	candidate := fmt.tprintf("%s/openapi.json", dir)
-	if os.exists(candidate) { return candidate }
+	// Search for openapi.json, openapi.yaml, openapi.yml (JSON only parsed)
+	SPEC_NAMES :: [?]string{"openapi.json", "openapi.yaml", "openapi.yml"}
+	for name in SPEC_NAMES {
+		candidate := fmt.tprintf("%s/%s", dir, name)
+		if os.exists(candidate) {
+			// Only parse JSON format — YAML needs external converter
+			if strings.has_suffix(name, ".json") {
+				return candidate
+			}
+		}
+	}
 
 	return ""
 }
@@ -157,17 +223,26 @@ extract_spec_routes :: proc(root: json.Object, allocator: mem.Allocator) -> map[
 
 			response_fields := make(map[string]bool, 8, allocator)
 			required_fields := make(map[string]bool, 8, allocator)
+			field_types := make(map[string]string, 8, allocator)
 
 			// Navigate: responses → 200 → content → application/json → schema → properties
-			extract_response_schema(method_obj, &response_fields, &required_fields)
+			extract_response_schema(method_obj, &response_fields, &required_fields, &field_types)
+
+			// Check for requestBody
+			has_req_body := false
+			if _, has_rb := method_obj["requestBody"]; has_rb {
+				has_req_body = true
+			}
 
 			method_upper := strings.to_upper(method, context.temp_allocator)
 			key := fmt.aprintf("%s %s", method_upper, path_str, allocator = allocator)
 			result[key] = API_Spec_Route{
-				method          = method_upper,
-				path            = path_str,
-				response_fields = response_fields,
-				required_fields = required_fields,
+				method           = method_upper,
+				path             = path_str,
+				response_fields  = response_fields,
+				required_fields  = required_fields,
+				field_types      = field_types,
+				has_request_body = has_req_body,
 			}
 		}
 	}
@@ -175,7 +250,7 @@ extract_spec_routes :: proc(root: json.Object, allocator: mem.Allocator) -> map[
 	return result
 }
 
-extract_response_schema :: proc(method_obj: json.Object, response_fields: ^map[string]bool, required_fields: ^map[string]bool) {
+extract_response_schema :: proc(method_obj: json.Object, response_fields: ^map[string]bool, required_fields: ^map[string]bool, field_types: ^map[string]string = nil) {
 	responses_val, has_resp := method_obj["responses"]
 	if !has_resp { return }
 	responses, is_resp_obj := responses_val.(json.Object)
@@ -217,8 +292,18 @@ extract_response_schema :: proc(method_obj: json.Object, response_fields: ^map[s
 	props, is_props_obj := props_val.(json.Object)
 	if !is_props_obj { return }
 
-	for prop_name in props {
+	for prop_name, prop_val in props {
 		response_fields[prop_name] = true
+		// Extract type for API004 validation
+		if field_types != nil {
+			if prop_obj, p_ok := prop_val.(json.Object); p_ok {
+				if type_val, has_type := prop_obj["type"]; has_type {
+					if type_str, t_ok := type_val.(json.String); t_ok {
+						field_types[prop_name] = type_str
+					}
+				}
+			}
+		}
 	}
 
 	// Extract required fields
@@ -284,6 +369,141 @@ collect_return_dict_keys :: proc(body: []parser.Stmt, keys: ^map[string]bool) {
 			}
 		}
 	}
+}
+
+// Extract response dict key→type from handler return statements.
+// Returns map like {"id": "int", "name": "str"} based on literal value types.
+extract_handler_response_types :: proc(module: ^parser.Module, handler_name: string, allocator: mem.Allocator) -> map[string]string {
+	types := make(map[string]string, 8, allocator)
+	for stmt in module.body {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			if s.name == handler_name {
+				collect_return_dict_types(s.body, &types)
+				return types
+			}
+		case ^parser.Async_Func_Def:
+			if s.name == handler_name {
+				collect_return_dict_types(s.body, &types)
+				return types
+			}
+		}
+	}
+	return types
+}
+
+collect_return_dict_types :: proc(body: []parser.Stmt, types: ^map[string]string) {
+	for stmt in body {
+		#partial switch s in stmt {
+		case ^parser.Return_Stmt:
+			if s.value != nil {
+				extract_dict_types_from_expr(s.value, types)
+			}
+		case ^parser.If_Stmt:
+			collect_return_dict_types(s.body, types)
+			collect_return_dict_types(s.orelse, types)
+		}
+	}
+}
+
+extract_dict_types_from_expr :: proc(expr: parser.Expr, types: ^map[string]string) {
+	// Direct dict literal: return {"key": value}
+	if dict, ok := expr.(^parser.Dict_Expr); ok {
+		for k, i in dict.keys {
+			if c, c_ok := k.(^parser.Constant_Expr); c_ok {
+				if s, s_ok := c.value.(string); s_ok {
+					if i < len(dict.values) {
+						types[s] = infer_literal_type(dict.values[i])
+					}
+				}
+			}
+		}
+		return
+	}
+	// Response(body={"key": value})
+	if call, ok := expr.(^parser.Call_Expr); ok {
+		for kw in call.keywords {
+			if kw.arg == "body" {
+				extract_dict_types_from_expr(kw.value, types)
+				return
+			}
+		}
+		if len(call.args) >= 1 {
+			extract_dict_types_from_expr(call.args[0], types)
+		}
+	}
+}
+
+// Infer Python type name from a literal expression.
+infer_literal_type :: proc(expr: parser.Expr) -> string {
+	#partial switch e in expr {
+	case ^parser.Constant_Expr:
+		#partial switch _ in e.value {
+		case i64:    return "int"
+		case f64:    return "float"
+		case string: return "str"
+		case bool:   return "bool"
+		}
+	case ^parser.List_Expr:
+		return "list"
+	case ^parser.Dict_Expr:
+		return "dict"
+	}
+	return ""
+}
+
+// Check if a handler function reads the request body (req.json, req.body, req.data).
+handler_reads_request_body :: proc(module: ^parser.Module, handler_name: string) -> bool {
+	for stmt in module.body {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			if s.name == handler_name {
+				return _body_reads_request(s.body)
+			}
+		case ^parser.Async_Func_Def:
+			if s.name == handler_name {
+				return _body_reads_request(s.body)
+			}
+		}
+	}
+	return false
+}
+
+_body_reads_request :: proc(body: []parser.Stmt) -> bool {
+	for stmt in body {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			if _expr_reads_request(s.value) { return true }
+		case ^parser.Ann_Assign:
+			if s.value != nil && _expr_reads_request(s.value) { return true }
+		case ^parser.Expr_Stmt:
+			if _expr_reads_request(s.value) { return true }
+		case ^parser.If_Stmt:
+			if _body_reads_request(s.body) || _body_reads_request(s.orelse) { return true }
+		case ^parser.Return_Stmt:
+			if s.value != nil && _expr_reads_request(s.value) { return true }
+		}
+	}
+	return false
+}
+
+_expr_reads_request :: proc(expr: parser.Expr) -> bool {
+	if expr == nil { return false }
+	// req.json, req.body, req.data, request.json, etc.
+	if attr, ok := expr.(^parser.Attribute_Expr); ok {
+		if name, n_ok := attr.value.(^parser.Name_Expr); n_ok {
+			if name.id == "req" || name.id == "request" {
+				if attr.attr == "json" || attr.attr == "body" || attr.attr == "data" || attr.attr == "form" {
+					return true
+				}
+			}
+		}
+	}
+	// Recurse into calls: e.g., req.json()
+	if call, ok := expr.(^parser.Call_Expr); ok {
+		if _expr_reads_request(call.func) { return true }
+	}
+	return false
 }
 
 extract_dict_keys_from_expr :: proc(expr: parser.Expr, keys: ^map[string]bool) {
