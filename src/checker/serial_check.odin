@@ -17,6 +17,7 @@ import core   "mimir:core"
 //   SER001 — Pickle/marshal with tainted data (request/input source)
 //   SER002 — shelve.open (uses pickle internally)
 //   SER003 — json.dumps(obj.__dict__) may contain non-serializable types
+//   SER004 — Unvalidated config deserialization (Config(**yaml.safe_load(f)))
 
 // Entry point — called from checker.odin after type checking.
 analyze_serialization :: proc(
@@ -30,15 +31,19 @@ analyze_serialization :: proc(
 	has_shelve := false
 	has_marshal := false
 	has_json := false
+	has_yaml := false
+	has_toml := false
 
 	for &imp in bind_result.imports {
 		if imp.module_name == "pickle"  { has_pickle = true }
 		if imp.module_name == "shelve"  { has_shelve = true }
 		if imp.module_name == "marshal" { has_marshal = true }
 		if imp.module_name == "json"    { has_json = true }
+		if imp.module_name == "yaml" || imp.module_name == "pyyaml" { has_yaml = true }
+		if imp.module_name == "toml" || imp.module_name == "tomllib" || imp.module_name == "tomli" { has_toml = true }
 	}
 
-	if !has_pickle && !has_shelve && !has_marshal && !has_json { return }
+	if !has_pickle && !has_shelve && !has_marshal && !has_json && !has_yaml && !has_toml { return }
 
 	ctx := Serial_Context{
 		file_path   = file_path,
@@ -47,12 +52,17 @@ analyze_serialization :: proc(
 		has_shelve  = has_shelve,
 		has_marshal = has_marshal,
 		has_json    = has_json,
+		has_yaml    = has_yaml,
+		has_toml    = has_toml,
 	}
 
 	visitor := core.AST_Visitor{
 		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
 			ctx := cast(^Serial_Context)raw_ctx
 			check_serial_call(ctx, expr)
+			if ctx.has_yaml || ctx.has_toml {
+				check_config_deser(ctx, expr)
+			}
 		},
 		ctx = rawptr(&ctx),
 	}
@@ -66,6 +76,8 @@ Serial_Context :: struct {
 	has_shelve:  bool,
 	has_marshal: bool,
 	has_json:    bool,
+	has_yaml:    bool,
+	has_toml:    bool,
 }
 
 check_serial_call :: proc(ctx: ^Serial_Context, expr: parser.Expr) {
@@ -137,6 +149,59 @@ check_serial_call :: proc(ctx: ^Serial_Context, expr: parser.Expr) {
 					})
 				}
 			}
+		}
+	}
+}
+
+// SER004: Detect unvalidated config deserialization.
+// Pattern: ClassName(**yaml.safe_load(f)) or ClassName(**toml.load(f))
+// Called from visit_expr on Call_Expr nodes.
+check_config_deser :: proc(ctx: ^Serial_Context, expr: parser.Expr) {
+	call, is_call := expr.(^parser.Call_Expr)
+	if !is_call { return }
+
+	// Check the callee is a Name_Expr (class constructor)
+	_, is_name := call.func.(^parser.Name_Expr)
+	if !is_name { return }
+
+	// Check for **kwargs where the value is yaml.safe_load/toml.load
+	for kw in call.keywords {
+		if len(kw.arg) != 0 { continue } // only **unpacking (arg == "")
+		// Check if value is a call to yaml.safe_load/toml.load/yaml.load
+		inner_call, is_inner := kw.value.(^parser.Call_Expr)
+		if !is_inner { continue }
+
+		attr, is_attr := inner_call.func.(^parser.Attribute_Expr)
+		if !is_attr { continue }
+
+		base, is_base := attr.value.(^parser.Name_Expr)
+		if !is_base { continue }
+
+		is_deser := false
+		source := ""
+		if ctx.has_yaml && base.id == "yaml" && (attr.attr == "safe_load" || attr.attr == "load" || attr.attr == "full_load") {
+			is_deser = true
+			source = fmt.tprintf("yaml.%s()", attr.attr)
+		}
+		if ctx.has_toml && (base.id == "toml" || base.id == "tomllib" || base.id == "tomli") && attr.attr == "load" {
+			is_deser = true
+			source = fmt.tprintf("%s.load()", base.id)
+		}
+
+		if is_deser {
+			cls_name, _ := call.func.(^parser.Name_Expr)
+			append(ctx.diagnostics, core.Diagnostic{
+				severity = .Warning,
+				location = core.Location{
+					file   = ctx.file_path,
+					line   = int(call.loc.line),
+					column = int(call.loc.col),
+				},
+				what = fmt.tprintf("%s(**%s) — config loaded without field validation", cls_name.id, source),
+				why  = "if the YAML/TOML data has missing or wrong-typed fields, this will fail at runtime",
+				fix  = "validate fields before constructing, or use a schema validation library (e.g., pydantic)",
+				code = "SER004",
+			})
 		}
 	}
 }

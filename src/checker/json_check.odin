@@ -229,6 +229,23 @@ is_json_serializable :: proc(reg: ^Type_Registry, type_id: Type_ID, visited: ^ma
 	case Set_Type:
 		return false
 	case Instance_Type:
+		// Check for known serializable stdlib types by class name
+		ct := get_type(reg, info.class_type)
+		if ct != nil {
+			#partial switch cls in ct.info {
+			case Class_Type:
+				// Known non-serializable types — return false with specific info
+				NON_SERIAL :: [?]string{
+					"datetime", "date", "time", "timedelta",  // datetime module
+					"Decimal",                                  // decimal module
+					"UUID",                                     // uuid module
+					"Path", "PurePath", "PosixPath", "WindowsPath", // pathlib module
+				}
+				for ns in NON_SERIAL {
+					if cls.name == ns { return false }
+				}
+			}
+		}
 		return false
 	case Callable_Type:
 		return false
