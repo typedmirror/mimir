@@ -162,7 +162,7 @@ _skip_string_literal :: proc(source: string, start: int) -> int {
 }
 
 // If true, skip native parser and always use CPython bridge.
-use_legacy_parser := false
+use_legacy_parser := true
 
 bridge_parse :: proc(b: ^Bridge, path: string, allocator: mem.Allocator) -> (^Module, Parse_Error) {
 	// Try native parser first (unless legacy mode is forced)

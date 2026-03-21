@@ -948,6 +948,7 @@ _parse_generators :: proc(ctx: ^Parser_Context) -> []Comprehension {
 		_expect(ctx, .KW_FOR)
 
 		target := _parse_target_list(ctx) // don't consume 'in'
+		_mark_store(target)
 		_expect(ctx, .KW_IN)
 		iter := parse_expr(ctx, PREC_TERNARY) // don't consume 'if'
 

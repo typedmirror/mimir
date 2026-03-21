@@ -156,6 +156,23 @@ _parse_target_expr :: proc(ctx: ^Parser_Context) -> Expr {
 	return left
 }
 
+// Mark an expression as Store context (for assignment targets, for-loop targets, etc.)
+_mark_store :: proc(e: Expr) {
+	if e == nil { return }
+	#partial switch n in e {
+	case ^Name_Expr:       n.ctx = .Store
+	case ^Attribute_Expr:  n.ctx = .Store
+	case ^Subscript_Expr:  n.ctx = .Store
+	case ^Starred_Expr:    n.ctx = .Store; _mark_store(n.value)
+	case ^Tuple_Expr:
+		n.ctx = .Store
+		for elt in n.elts { _mark_store(elt) }
+	case ^List_Expr:
+		n.ctx = .Store
+		for elt in n.elts { _mark_store(elt) }
+	}
+}
+
 _consume_newline :: proc(ctx: ^Parser_Context) {
 	if _at(ctx, .NEWLINE) { _advance(ctx) }
 	if _at(ctx, .SEMICOLON) { _advance(ctx) }
@@ -420,6 +437,7 @@ _parse_while :: proc(ctx: ^Parser_Context) -> Stmt {
 _parse_for :: proc(ctx: ^Parser_Context, is_async: bool) -> Stmt {
 	tok := _advance(ctx) // consume 'for'
 	target := _parse_target_list(ctx) // don't consume 'in' as comparison
+	_mark_store(target)
 	_expect(ctx, .KW_IN)
 	iter := parse_expr_list(ctx)
 	_expect(ctx, .COLON)
@@ -498,7 +516,7 @@ _parse_try :: proc(ctx: ^Parser_Context) -> Stmt {
 
 	_skip_newlines(ctx)
 	for _at(ctx, .KW_EXCEPT) {
-		_advance(ctx) // consume 'except'
+		except_tok := _advance(ctx) // consume 'except'
 
 		// except* for exception groups
 		if _at(ctx, .STAR) {
@@ -507,7 +525,7 @@ _parse_try :: proc(ctx: ^Parser_Context) -> Stmt {
 		}
 
 		h: Exception_Handler
-		h.loc = tok.loc
+		h.loc = except_tok.loc
 
 		if !_at(ctx, .COLON) {
 			h.type = parse_expr(ctx)
@@ -1075,6 +1093,7 @@ _parse_expr_or_assign :: proc(ctx: ^Parser_Context) -> Stmt {
 		_advance(ctx) // consume op=
 		value := parse_expr_list(ctx)
 		_consume_newline(ctx)
+		_mark_store(left)
 		n := new(Aug_Assign, ctx.allocator)
 		n.loc = loc
 		n.target = left
@@ -1093,6 +1112,7 @@ _parse_expr_or_assign :: proc(ctx: ^Parser_Context) -> Stmt {
 			value = parse_expr_list(ctx)
 		}
 		_consume_newline(ctx)
+		_mark_store(left)
 		n := new(Ann_Assign, ctx.allocator)
 		n.loc = loc
 		n.target = left
@@ -1116,6 +1136,7 @@ _parse_expr_or_assign :: proc(ctx: ^Parser_Context) -> Stmt {
 		// Last element is the value, rest are targets
 		value := targets[len(targets) - 1]
 		tgts := targets[:len(targets) - 1]
+		for t in tgts { _mark_store(t) }
 
 		_consume_newline(ctx)
 		n := new(Assign, ctx.allocator)
