@@ -65,7 +65,48 @@ bridge_start :: proc() -> (Bridge, Parse_Error) {
 	}, nil
 }
 
+// Native parser entry point: read file → tokenize → parse → AST.
+parse_native :: proc(path: string, allocator: mem.Allocator) -> (^Module, Parse_Error) {
+	data, read_err := os.read_entire_file(path, allocator)
+	if read_err != nil {
+		return nil, Bridge_Error{fmt.aprintf("failed to read file: %s", path, allocator = allocator)}
+	}
+	source := string(data)
+
+	tokens, tok_err := tokenize(source, allocator)
+	if tok_err != nil {
+		// Add file path to error
+		#partial switch &e in tok_err {
+		case Syntax_Error:
+			e.file = path
+		}
+		return nil, tok_err
+	}
+
+	ctx := Parser_Context{
+		tokens    = tokens,
+		pos       = 0,
+		allocator = allocator,
+		file      = path,
+	}
+
+	mod := parse_module_native(&ctx)
+	return mod, nil
+}
+
+// If true, skip native parser and always use CPython bridge.
+use_legacy_parser := false
+
 bridge_parse :: proc(b: ^Bridge, path: string, allocator: mem.Allocator) -> (^Module, Parse_Error) {
+	// Try native parser first (unless legacy mode is forced)
+	if !use_legacy_parser {
+		mod, err := parse_native(path, allocator)
+		if err == nil && mod != nil {
+			return mod, nil
+		}
+		// Fall through to CPython bridge on failure
+	}
+
 	// Send PARSE request
 	request := fmt.tprintf("PARSE %s\n", path)
 	_, write_err := os.write(b.stdin_w, transmute([]byte)request)
