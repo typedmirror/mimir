@@ -13,6 +13,8 @@ import core   "mimir:core"
 //
 // Diagnostics:
 //   TIME001 — Naive/aware datetime mixing (arithmetic/comparison between naive and aware)
+//   TIME002 — datetime.now() without timezone — produces naive datetime
+//   TIME003 — timedelta arithmetic on aware datetime without DST normalization
 //   ENC001  — str passed to bytes-expecting function (hashlib, hmac)
 
 Datetime_Kind :: enum u8 {
@@ -111,6 +113,14 @@ analyze_te_in_body :: proc(
 			// TIME001: datetime mixing
 			if ctx.has_datetime && len(ctx.datetime_vars) > 0 {
 				check_datetime_mixing(ctx, expr)
+			}
+			// TIME002: datetime.now() without timezone
+			if ctx.has_datetime {
+				check_naive_now(ctx, expr)
+			}
+			// TIME003: timedelta arithmetic on aware datetime
+			if ctx.has_datetime && len(ctx.datetime_vars) > 0 {
+				check_dst_unsafe_arithmetic(ctx, expr)
 			}
 			// ENC001: str to hashlib/hmac
 			if ctx.has_hashlib || ctx.has_hmac {
@@ -384,4 +394,100 @@ check_bytes_arg :: proc(ctx: ^Time_Enc_Context, arg: parser.Expr, loc: parser.Sr
 			code = "ENC001",
 		})
 	}
+}
+
+// ==================== TIME002: Naive datetime.now() ====================
+
+check_naive_now :: proc(ctx: ^Time_Enc_Context, expr: parser.Expr) {
+	call, is_call := expr.(^parser.Call_Expr)
+	if !is_call { return }
+
+	attr, is_attr := call.func.(^parser.Attribute_Expr)
+	if !is_attr { return }
+
+	base_name := get_datetime_base(attr)
+	if len(base_name) == 0 { return }
+
+	// datetime.now() without tz argument
+	if attr.attr == "now" && !has_tz_arg(call) {
+		append(ctx.diagnostics, core.Diagnostic{
+			severity = .Warning,
+			location = core.Location{
+				file   = ctx.file_path,
+				line   = int(call.loc.line),
+				column = int(call.loc.col),
+			},
+			code = "TIME002",
+			what = "datetime.now() called without timezone — produces naive datetime",
+			why  = "naive datetimes have no timezone info, causing bugs with DST transitions, serialization, and cross-timezone comparisons",
+			fix  = "use datetime.now(tz=timezone.utc) or datetime.now(tz=ZoneInfo('America/New_York'))",
+		})
+	}
+
+	// datetime.utcnow() — always naive despite the name
+	if attr.attr == "utcnow" {
+		append(ctx.diagnostics, core.Diagnostic{
+			severity = .Warning,
+			location = core.Location{
+				file   = ctx.file_path,
+				line   = int(call.loc.line),
+				column = int(call.loc.col),
+			},
+			code = "TIME002",
+			what = "datetime.utcnow() produces naive datetime despite the name",
+			why  = "utcnow() returns a naive datetime with no tzinfo — deprecated in Python 3.12",
+			fix  = "use datetime.now(tz=timezone.utc) instead",
+		})
+	}
+}
+
+// ==================== TIME003: DST-unsafe timedelta arithmetic ====================
+
+check_dst_unsafe_arithmetic :: proc(ctx: ^Time_Enc_Context, expr: parser.Expr) {
+	binop, is_binop := expr.(^parser.Bin_Op_Expr)
+	if !is_binop { return }
+	if binop.op != .Add && binop.op != .Sub { return }
+
+	// Check: aware_dt + timedelta(hours=N) or aware_dt - timedelta(hours=N)
+	left_kind := get_expr_datetime_kind(ctx, binop.left)
+	if left_kind != .Aware { return }
+
+	// Check if right side is a timedelta with hours/minutes (DST-sensitive)
+	if !_is_timedelta_with_hours(binop.right) { return }
+
+	append(ctx.diagnostics, core.Diagnostic{
+		severity = .Warning,
+		location = core.Location{
+			file   = ctx.file_path,
+			line   = int(binop.loc.line),
+			column = int(binop.loc.col),
+		},
+		code = "TIME003",
+		what = "timedelta arithmetic on aware datetime may produce wrong results during DST transitions",
+		why  = "adding timedelta(hours=N) doesn't account for DST spring-forward/fall-back — wall clock time may be off by 1 hour",
+		fix  = "use dateutil.relativedelta or pytz tz.normalize() after arithmetic",
+	})
+}
+
+_is_timedelta_with_hours :: proc(expr: parser.Expr) -> bool {
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return false }
+
+	// timedelta(...) or datetime.timedelta(...)
+	is_td := false
+	#partial switch f in call.func {
+	case ^parser.Name_Expr:
+		is_td = f.id == "timedelta"
+	case ^parser.Attribute_Expr:
+		if f.attr == "timedelta" { is_td = true }
+	}
+	if !is_td { return false }
+
+	// Check for hours= or minutes= keyword args (DST-sensitive)
+	for kw in call.keywords {
+		if kw.arg == "hours" || kw.arg == "minutes" {
+			return true
+		}
+	}
+	return false
 }
