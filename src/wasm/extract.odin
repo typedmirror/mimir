@@ -25,6 +25,7 @@ WASM_Extract_Context :: struct {
 	// Track memory type parameters for expansion
 	param_annotations: map[string]parser.Expr, // param name → annotation
 	or_temp_counter:   int,                    // unique temp names for boolean or chains
+	temp_counter:      int,                    // unique temp names for mod/min/max
 	wasi:         bool,                  // WASI mode
 	allocator:    mem.Allocator,
 }
@@ -764,9 +765,10 @@ extract_binop :: proc(e: ^parser.Bin_Op_Expr, ctx: ^WASM_Extract_Context) {
 
 	// Float mod: a - floor(a/b) * b
 	if e.op == .Mod && (result_type == .F32 || result_type == .F64) {
-		a_temp := get_or_alloc_temp_named(ctx, "__mod_a", result_type)
-		b_temp := get_or_alloc_temp_named(ctx, "__mod_b", result_type)
-		fv_temp := get_or_alloc_temp_named(ctx, "__mod_fv", result_type)
+		tc := ctx.temp_counter; ctx.temp_counter += 1
+		a_temp := get_or_alloc_temp_named(ctx, fmt.tprintf("__mod_a_%d", tc), result_type)
+		b_temp := get_or_alloc_temp_named(ctx, fmt.tprintf("__mod_b_%d", tc), result_type)
+		fv_temp := get_or_alloc_temp_named(ctx, fmt.tprintf("__mod_fv_%d", tc), result_type)
 		is_f64 := result_type == .F64
 		// Compute a and b, save to temps
 		extract_expr(e.left, ctx)
@@ -929,8 +931,9 @@ extract_call :: proc(e: ^parser.Call_Expr, ctx: ^WASM_Extract_Context) {
 			} else {
 				// i32 min via select: a < b ? a : b
 				// Stack: [a, b] → need to compare then select
-				temp_a := get_or_alloc_temp(ctx, .I32)
-				temp_b := get_or_alloc_temp_named(ctx, "__min_b", .I32)
+				mc := ctx.temp_counter; ctx.temp_counter += 1
+				temp_a := get_or_alloc_temp_named(ctx, fmt.tprintf("__min_a_%d", mc), .I32)
+				temp_b := get_or_alloc_temp_named(ctx, fmt.tprintf("__min_b_%d", mc), .I32)
 				emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = temp_b})
 				emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = temp_a})
 				emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = temp_a})
@@ -951,8 +954,9 @@ extract_call :: proc(e: ^parser.Call_Expr, ctx: ^WASM_Extract_Context) {
 			} else if arg_type == .F64 {
 				emit(ctx, WASM_Instruction{kind = .F64_Max})
 			} else {
-				temp_a := get_or_alloc_temp(ctx, .I32)
-				temp_b := get_or_alloc_temp_named(ctx, "__max_b", .I32)
+				mc := ctx.temp_counter; ctx.temp_counter += 1
+				temp_a := get_or_alloc_temp_named(ctx, fmt.tprintf("__max_a_%d", mc), .I32)
+				temp_b := get_or_alloc_temp_named(ctx, fmt.tprintf("__max_b_%d", mc), .I32)
 				emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = temp_b})
 				emit(ctx, WASM_Instruction{kind = .Local_Set, local_idx = temp_a})
 				emit(ctx, WASM_Instruction{kind = .Local_Get, local_idx = temp_a})
@@ -1078,10 +1082,10 @@ extract_wasi_print :: proc(e: ^parser.Call_Expr, ctx: ^WASM_Extract_Context) {
 	// Set iov_buf: ptr=16, len=2 at offset 0
 	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 0})
 	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 16})
-	emit(ctx, WASM_Instruction{kind = .I32_Store, mem_align = 0, mem_offset = 0})
+	emit(ctx, WASM_Instruction{kind = .I32_Store, mem_align = 2, mem_offset = 0})
 	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 4})
 	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 2})
-	emit(ctx, WASM_Instruction{kind = .I32_Store, mem_align = 0, mem_offset = 0})
+	emit(ctx, WASM_Instruction{kind = .I32_Store, mem_align = 2, mem_offset = 0})
 
 	// fd_write(1, 0, 1, 8) → stdout, iov at 0, 1 iov, nwritten at 8
 	emit(ctx, WASM_Instruction{kind = .I32_Const, i32_val = 1})   // fd = stdout

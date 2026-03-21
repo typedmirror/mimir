@@ -513,6 +513,7 @@ _parse_lambda :: proc(ctx: ^Parser_Context) -> Expr {
 _parse_lambda_params :: proc(ctx: ^Parser_Context) -> Arguments {
 	args: Arguments
 	params := make([dynamic]Arg, 0, 4, ctx.allocator)
+	defaults := make([dynamic]Expr, 0, 2, ctx.allocator)
 
 	for !_at(ctx, .COLON) && !_at(ctx, .EOF) {
 		if _at(ctx, .COMMA) { _advance(ctx); continue }
@@ -545,7 +546,8 @@ _parse_lambda_params :: proc(ctx: ^Parser_Context) -> Arguments {
 			// Check for default value
 			if _at(ctx, .ASSIGN) {
 				_advance(ctx)
-				param.annotation = nil // lambda params don't have annotations
+				default_val := parse_expr(ctx, PREC_LAMBDA + 1)
+				append(&defaults, default_val)
 			}
 			append(&params, param)
 		} else {
@@ -553,6 +555,7 @@ _parse_lambda_params :: proc(ctx: ^Parser_Context) -> Arguments {
 		}
 	}
 	args.args = params[:]
+	args.defaults = defaults[:]
 	return args
 }
 

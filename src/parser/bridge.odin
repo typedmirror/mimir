@@ -99,17 +99,66 @@ parse_native :: proc(path: string, allocator: mem.Allocator) -> (^Module, Parse_
 	return mod, nil
 }
 
-// Quick check if source contains f-strings (f" or f')
+// Quick check if source contains f-strings.
+// Tracks comment/string context to avoid false positives on `# f"..."` or `"f\""`.
 _source_has_fstrings :: proc(source: string) -> bool {
-	for i := 0; i < len(source) - 1; i += 1 {
+	i := 0
+	for i < len(source) {
 		c := source[i]
-		if (c == 'f' || c == 'F') && (source[i + 1] == '"' || source[i + 1] == '\'') {
-			// Check it's not inside a comment or string (simplified: check for # before on same line)
-			// Simple heuristic: if f" appears, assume f-string
+
+		// Skip comments (# to end of line)
+		if c == '#' {
+			for i < len(source) && source[i] != '\n' { i += 1 }
+			continue
+		}
+
+		// Skip string literals (to avoid matching f" inside strings)
+		if c == '\'' || c == '"' {
+			i = _skip_string_literal(source, i)
+			continue
+		}
+
+		// Check for f-string prefix: f", f', F", F', rf", fr", RF", FR", etc.
+		if (c == 'f' || c == 'F') && i + 1 < len(source) && (source[i + 1] == '"' || source[i + 1] == '\'') {
 			return true
 		}
+		if (c == 'r' || c == 'R') && i + 2 < len(source) && (source[i + 1] == 'f' || source[i + 1] == 'F') && (source[i + 2] == '"' || source[i + 2] == '\'') {
+			return true
+		}
+		if (c == 'f' || c == 'F') && i + 2 < len(source) && (source[i + 1] == 'r' || source[i + 1] == 'R') && (source[i + 2] == '"' || source[i + 2] == '\'') {
+			return true
+		}
+
+		i += 1
 	}
 	return false
+}
+
+// Skip past a string literal starting at position i (on the opening quote).
+_skip_string_literal :: proc(source: string, start: int) -> int {
+	i := start
+	if i >= len(source) { return i }
+	quote := source[i]
+	// Triple-quoted?
+	if i + 2 < len(source) && source[i + 1] == quote && source[i + 2] == quote {
+		i += 3
+		for i < len(source) {
+			if source[i] == '\\' { i += 2; continue }
+			if source[i] == quote && i + 2 < len(source) && source[i + 1] == quote && source[i + 2] == quote {
+				return i + 3
+			}
+			i += 1
+		}
+		return i
+	}
+	// Single-quoted
+	i += 1
+	for i < len(source) && source[i] != '\n' {
+		if source[i] == '\\' { i += 2; continue }
+		if source[i] == quote { return i + 1 }
+		i += 1
+	}
+	return i
 }
 
 // If true, skip native parser and always use CPython bridge.
