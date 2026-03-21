@@ -73,11 +73,6 @@ parse_native :: proc(path: string, allocator: mem.Allocator) -> (^Module, Parse_
 	}
 	source := string(data)
 
-	// Bail out to CPython for files with f-strings (native doesn't parse f-string expressions yet)
-	if _source_has_fstrings(source) {
-		return nil, Bridge_Error{"native parser: f-string expressions not yet supported"}
-	}
-
 	tokens, tok_err := tokenize(source, allocator)
 	if tok_err != nil {
 		// Add file path to error

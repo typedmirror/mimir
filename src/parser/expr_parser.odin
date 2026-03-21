@@ -285,12 +285,205 @@ _parse_string_constant :: proc(ctx: ^Parser_Context) -> Expr {
 
 _parse_fstring :: proc(ctx: ^Parser_Context) -> Expr {
 	tok := _advance(ctx)
-	// For now, treat f-string as a JoinedStr with the raw text
-	// Full f-string expression parsing is deferred
+	content := _extract_string_content(tok.text, ctx.allocator)
+	values := _parse_fstring_parts(content, tok.loc, ctx)
+
 	js := new(Joined_Str, ctx.allocator)
 	js.loc = tok.loc
-	js.values = nil // simplified — downstream handles raw text
+	js.values = values
 	return js
+}
+
+// Parse f-string content into a sequence of Constant_Expr (text) and Formatted_Value (expressions).
+_parse_fstring_parts :: proc(content: string, base_loc: Src_Loc, ctx: ^Parser_Context) -> []Expr {
+	values := make([dynamic]Expr, 0, 4, ctx.allocator)
+	i := 0
+	text_start := 0
+
+	for i < len(content) {
+		c := content[i]
+
+		// Escaped braces: {{ → literal {, }} → literal }
+		if c == '{' && i + 1 < len(content) && content[i + 1] == '{' {
+			// Flush text so far + the literal {
+			if i > text_start {
+				_fstr_add_text(&values, content[text_start:i], base_loc, ctx)
+			}
+			_fstr_add_text(&values, "{", base_loc, ctx)
+			i += 2
+			text_start = i
+			continue
+		}
+		if c == '}' && i + 1 < len(content) && content[i + 1] == '}' {
+			if i > text_start {
+				_fstr_add_text(&values, content[text_start:i], base_loc, ctx)
+			}
+			_fstr_add_text(&values, "}", base_loc, ctx)
+			i += 2
+			text_start = i
+			continue
+		}
+
+		// Expression: { expr !conv :spec }
+		if c == '{' {
+			// Flush preceding text
+			if i > text_start {
+				_fstr_add_text(&values, content[text_start:i], base_loc, ctx)
+			}
+			i += 1 // skip {
+
+			// Find matching } respecting nesting
+			expr_start := i
+			depth := 1
+			in_str := false
+			str_quote: u8 = 0
+			for i < len(content) && depth > 0 {
+				ch := content[i]
+				if in_str {
+					if ch == '\\' { i += 2; continue }
+					if ch == str_quote { in_str = false }
+					i += 1
+					continue
+				}
+				if ch == '\'' || ch == '"' {
+					in_str = true
+					str_quote = ch
+					i += 1
+					continue
+				}
+				if ch == '{' || ch == '(' || ch == '[' { depth += 1 }
+				if ch == '}' || ch == ')' || ch == ']' { depth -= 1 }
+				if depth > 0 { i += 1 }
+			}
+
+			expr_text := content[expr_start:i]
+			if i < len(content) { i += 1 } // skip }
+			text_start = i
+
+			// Parse the expression part: expr !conv :spec
+			fv := _parse_fstring_expr(expr_text, base_loc, ctx)
+			append(&values, Expr(fv))
+			continue
+		}
+
+		i += 1
+	}
+
+	// Flush remaining text
+	if text_start < len(content) {
+		_fstr_add_text(&values, content[text_start:], base_loc, ctx)
+	}
+
+	return values[:]
+}
+
+_fstr_add_text :: proc(values: ^[dynamic]Expr, text: string, loc: Src_Loc, ctx: ^Parser_Context) {
+	if len(text) == 0 { return }
+	c := new(Constant_Expr, ctx.allocator)
+	c.loc = loc
+	c.value = strings.clone(text, ctx.allocator)
+	append(values, Expr(c))
+}
+
+// Parse a single f-string expression part: "expr", "expr!r", "expr:.2f", "expr!r:.2f"
+_parse_fstring_expr :: proc(text: string, loc: Src_Loc, ctx: ^Parser_Context) -> ^Formatted_Value {
+	fv := new(Formatted_Value, ctx.allocator)
+	fv.loc = loc
+	fv.conversion = -1 // no conversion
+
+	// Split at ! (conversion) and : (format spec), respecting nesting
+	expr_end := len(text)
+	conv_pos := -1
+	spec_pos := -1
+	depth := 0
+	in_str := false
+	str_quote: u8 = 0
+
+	for j := 0; j < len(text); j += 1 {
+		ch := text[j]
+		if in_str {
+			if ch == '\\' { j += 1; continue }
+			if ch == str_quote { in_str = false }
+			continue
+		}
+		if ch == '\'' || ch == '"' { in_str = true; str_quote = ch; continue }
+		if ch == '(' || ch == '[' || ch == '{' { depth += 1; continue }
+		if ch == ')' || ch == ']' || ch == '}' { depth -= 1; continue }
+		if depth == 0 {
+			if ch == '!' && conv_pos < 0 && spec_pos < 0 {
+				// Check it's a conversion (!r, !s, !a), not != operator
+				if j + 1 < len(text) && text[j + 1] != '=' {
+					conv_pos = j
+				}
+			}
+			if ch == ':' && spec_pos < 0 {
+				spec_pos = j
+			}
+		}
+	}
+
+	// Determine expression text boundaries
+	if conv_pos >= 0 {
+		expr_end = conv_pos
+	} else if spec_pos >= 0 {
+		expr_end = spec_pos
+	}
+
+	// Parse the expression
+	expr_src := strings.trim_space(text[:expr_end])
+	if len(expr_src) > 0 {
+		tokens, tok_err := tokenize(expr_src, ctx.allocator)
+		if tok_err == nil && len(tokens) > 0 {
+			sub_ctx := Parser_Context{
+				tokens    = tokens,
+				pos       = 0,
+				allocator = ctx.allocator,
+				file      = ctx.file,
+			}
+			fv.value = parse_expr(&sub_ctx)
+		}
+	}
+	if fv.value == nil {
+		// Fallback: create a name expression from the text
+		n := new(Name_Expr, ctx.allocator)
+		n.loc = loc
+		n.id = expr_src
+		n.ctx = .Load
+		fv.value = n
+	}
+
+	// Parse conversion
+	if conv_pos >= 0 && conv_pos + 1 < len(text) {
+		conv_char := text[conv_pos + 1]
+		fv.conversion = i32(conv_char) // 'r'=114, 's'=115, 'a'=97
+	}
+
+	// Parse format spec
+	actual_spec_pos := spec_pos
+	if conv_pos >= 0 && spec_pos < 0 {
+		// Check for : after conversion char
+		check := conv_pos + 2
+		if check < len(text) && text[check] == ':' {
+			actual_spec_pos = check
+		}
+	}
+	if actual_spec_pos >= 0 && actual_spec_pos + 1 < len(text) {
+		spec_text := text[actual_spec_pos + 1:]
+		if len(spec_text) > 0 {
+			// Format spec is itself a JoinedStr (can contain nested f-string expressions)
+			spec_js := new(Joined_Str, ctx.allocator)
+			spec_js.loc = loc
+			spec_c := new(Constant_Expr, ctx.allocator)
+			spec_c.loc = loc
+			spec_c.value = strings.clone(spec_text, ctx.allocator)
+			spec_vals := make([]Expr, 1, ctx.allocator)
+			spec_vals[0] = spec_c
+			spec_js.values = spec_vals
+			fv.format_spec = spec_js
+		}
+	}
+
+	return fv
 }
 
 _parse_paren_expr :: proc(ctx: ^Parser_Context) -> Expr {
