@@ -12,12 +12,10 @@ import core   "mimir:core"
 // Post-inference analysis pass for multiprocessing anti-patterns.
 //
 // Diagnostics:
-//   PROC001 — Shared mutable state in multiprocessing: module-level mutable
-//   PROC002 — Unpicklable target in multiprocessing: lambda, nested function,
-//             or generator used as Pool.map/apply target (§22.3)
-//             (dict, list, set) modified in a function that's used as a
-//             multiprocessing target. Each process gets a copy — mutations
-//             are not shared.
+//   PROC001 — Shared mutable state in multiprocessing (§22.1)
+//   PROC002 — Unpicklable target in multiprocessing (§22.3)
+//   PROC003 — Celery task with non-serializable argument types (§22.2)
+//   PROC004 — Celery task accessing ORM lazy-loaded relationships
 
 PROC_TARGET_METHODS :: [?]string{"map", "apply", "apply_async", "starmap", "imap", "map_async"}
 
@@ -28,14 +26,23 @@ analyze_crossproc :: proc(
 	diagnostics: ^[dynamic]core.Diagnostic,
 	allocator: mem.Allocator,
 ) {
-	// Check for multiprocessing import
+	// Check for multiprocessing / celery imports
 	has_mp := false
+	has_celery := false
 	for &imp in bind_result.imports {
 		if imp.module_name == "multiprocessing" || imp.module_name == "concurrent.futures" {
 			has_mp = true
-			break
+		}
+		if imp.module_name == "celery" || imp.module_name == "celery.app" {
+			has_celery = true
 		}
 	}
+
+	// §22.2: Celery task validation
+	if has_celery {
+		check_celery_tasks(module, bind_result, file_path, diagnostics, allocator)
+	}
+
 	if !has_mp { return }
 
 	// §22.3: Check for unpicklable targets (lambda, nested functions)
@@ -319,5 +326,141 @@ _check_unpicklable_call :: proc(
 				fix  = "move the function to module level",
 			})
 		}
+	}
+}
+
+// ==================== §22.2 Celery Task Validation ====================
+
+// ORM lazy-load attribute access patterns
+ORM_LAZY_ATTRS :: [?]string{"user", "author", "parent", "children", "items", "orders", "posts", "comments", "profile", "roles", "permissions", "tags", "category", "group", "members"}
+
+// Detect @celery.task or @app.task decorated functions, check for:
+// PROC003: non-serializable default arguments (db connections, file handles)
+// PROC004: ORM lazy-load attribute access (DetachedInstanceError risk)
+check_celery_tasks :: proc(
+	module: ^parser.Module,
+	bind_result: ^binder.Bind_Result,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	allocator: mem.Allocator,
+) {
+	for stmt in module.body {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			if _has_celery_task_decorator(s.decorator_list) {
+				_check_celery_func(s, file_path, diagnostics, allocator)
+			}
+		case ^parser.Async_Func_Def:
+			if _has_celery_task_decorator(s.decorator_list) {
+				_check_celery_async_func(s, file_path, diagnostics, allocator)
+			}
+		}
+	}
+}
+
+_has_celery_task_decorator :: proc(decorators: []parser.Expr) -> bool {
+	for d in decorators {
+		// @celery.task or @app.task
+		#partial switch e in d {
+		case ^parser.Attribute_Expr:
+			if e.attr == "task" { return true }
+		case ^parser.Name_Expr:
+			if e.id == "task" { return true }
+		case ^parser.Call_Expr:
+			// @celery.task(...) or @app.task(...)
+			#partial switch f in e.func {
+			case ^parser.Attribute_Expr:
+				if f.attr == "task" { return true }
+			case ^parser.Name_Expr:
+				if f.id == "task" { return true }
+			}
+		}
+	}
+	return false
+}
+
+_check_celery_func :: proc(func: ^parser.Func_Def, file_path: string, diagnostics: ^[dynamic]core.Diagnostic, allocator: mem.Allocator) {
+	// PROC004: Check body for ORM lazy-load access patterns
+	// Pattern: x.relationship_attr where x is a parameter or result of .query.get() / .objects.get()
+	_check_orm_lazy_load(func.body, func.name, file_path, diagnostics)
+}
+
+_check_celery_async_func :: proc(func: ^parser.Async_Func_Def, file_path: string, diagnostics: ^[dynamic]core.Diagnostic, allocator: mem.Allocator) {
+	_check_orm_lazy_load(func.body, func.name, file_path, diagnostics)
+}
+
+_check_orm_lazy_load :: proc(stmts: []parser.Stmt, task_name: string, file_path: string, diagnostics: ^[dynamic]core.Diagnostic) {
+	// Find variables assigned from .query.get() or .objects.get()
+	orm_vars := make(map[string]bool, 4, context.temp_allocator)
+
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			if len(s.targets) == 1 {
+				if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+					if _is_orm_query(s.value) {
+						orm_vars[name.id] = true
+					}
+				}
+			}
+			// Check RHS for lazy-load access
+			_check_lazy_access(s.value, orm_vars, task_name, file_path, diagnostics)
+		case ^parser.Expr_Stmt:
+			_check_lazy_access(s.value, orm_vars, task_name, file_path, diagnostics)
+		case ^parser.Return_Stmt:
+			if s.value != nil { _check_lazy_access(s.value, orm_vars, task_name, file_path, diagnostics) }
+		case ^parser.If_Stmt:
+			_check_orm_lazy_load(s.body, task_name, file_path, diagnostics)
+			_check_orm_lazy_load(s.orelse, task_name, file_path, diagnostics)
+		case ^parser.For_Stmt:
+			_check_orm_lazy_load(s.body, task_name, file_path, diagnostics)
+		}
+	}
+}
+
+_is_orm_query :: proc(expr: parser.Expr) -> bool {
+	if expr == nil { return false }
+	// Detect: Model.query.get(id), Model.objects.get(id), session.query(Model).get(id)
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return false }
+	attr, aok := call.func.(^parser.Attribute_Expr)
+	if !aok { return false }
+	return attr.attr == "get" || attr.attr == "first" || attr.attr == "one" || attr.attr == "get_or_404"
+}
+
+_check_lazy_access :: proc(expr: parser.Expr, orm_vars: map[string]bool, task_name: string, file_path: string, diagnostics: ^[dynamic]core.Diagnostic) {
+	if expr == nil { return }
+	#partial switch e in expr {
+	case ^parser.Attribute_Expr:
+		// Check: orm_var.lazy_attr
+		if name, ok := e.value.(^parser.Name_Expr); ok {
+			if name.id in orm_vars {
+				for lazy_attr in ORM_LAZY_ATTRS {
+					if e.attr == lazy_attr {
+						append(diagnostics, core.Diagnostic{
+							severity = .Error,
+							location = core.Location{
+								file   = file_path,
+								line   = int(e.loc.line),
+								column = int(e.loc.col),
+							},
+							code = "PROC004",
+							what = fmt.tprintf("lazy-loaded attribute '.%s' accessed in Celery task '%s'", e.attr, task_name),
+							why  = "Celery tasks run in a different process — ORM objects may be detached from the session, causing DetachedInstanceError",
+							fix  = "eagerly load relationships with .options(joinedload(...)) or pass IDs instead of ORM objects",
+						})
+						break
+					}
+				}
+			}
+		}
+		// Recurse
+		_check_lazy_access(e.value, orm_vars, task_name, file_path, diagnostics)
+	case ^parser.Call_Expr:
+		_check_lazy_access(e.func, orm_vars, task_name, file_path, diagnostics)
+		for arg in e.args { _check_lazy_access(arg, orm_vars, task_name, file_path, diagnostics) }
+	case ^parser.Bin_Op_Expr:
+		_check_lazy_access(e.left, orm_vars, task_name, file_path, diagnostics)
+		_check_lazy_access(e.right, orm_vars, task_name, file_path, diagnostics)
 	}
 }
