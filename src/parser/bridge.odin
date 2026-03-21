@@ -73,6 +73,11 @@ parse_native :: proc(path: string, allocator: mem.Allocator) -> (^Module, Parse_
 	}
 	source := string(data)
 
+	// Bail out to CPython for files with f-strings (native doesn't parse f-string expressions yet)
+	if _source_has_fstrings(source) {
+		return nil, Bridge_Error{"native parser: f-string expressions not yet supported"}
+	}
+
 	tokens, tok_err := tokenize(source, allocator)
 	if tok_err != nil {
 		// Add file path to error
@@ -92,6 +97,19 @@ parse_native :: proc(path: string, allocator: mem.Allocator) -> (^Module, Parse_
 
 	mod := parse_module_native(&ctx)
 	return mod, nil
+}
+
+// Quick check if source contains f-strings (f" or f')
+_source_has_fstrings :: proc(source: string) -> bool {
+	for i := 0; i < len(source) - 1; i += 1 {
+		c := source[i]
+		if (c == 'f' || c == 'F') && (source[i + 1] == '"' || source[i + 1] == '\'') {
+			// Check it's not inside a comment or string (simplified: check for # before on same line)
+			// Simple heuristic: if f" appears, assume f-string
+			return true
+		}
+	}
+	return false
 }
 
 // If true, skip native parser and always use CPython bridge.
