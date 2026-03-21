@@ -613,7 +613,53 @@ _parse_match_cases :: proc(ctx: ^Parser_Context) -> []Match_Case {
 }
 
 _parse_pattern :: proc(ctx: ^Parser_Context) -> Pattern {
-	// Simplified pattern parsing — covers common cases
+	pat := _parse_single_pattern(ctx)
+
+	// Or-pattern: pat1 | pat2 | pat3
+	if _at(ctx, .PIPE) {
+		patterns := make([dynamic]Pattern, 0, 3, ctx.allocator)
+		append(&patterns, pat)
+		for _at(ctx, .PIPE) {
+			_advance(ctx)
+			next := _parse_single_pattern(ctx)
+			append(&patterns, next)
+		}
+		orp := new(Match_Or, ctx.allocator)
+		orp.loc = _pattern_loc(pat)
+		orp.patterns = patterns[:]
+		return orp
+	}
+
+	// As-pattern: pattern as name
+	if _at(ctx, .KW_AS) {
+		_advance(ctx)
+		name_tok := _advance(ctx)
+		asp := new(Match_As, ctx.allocator)
+		asp.loc = _pattern_loc(pat)
+		asp.pattern = pat
+		asp.name = name_tok.text
+		return asp
+	}
+
+	return pat
+}
+
+_pattern_loc :: proc(p: Pattern) -> Src_Loc {
+	if p == nil { return {} }
+	#partial switch n in p {
+	case ^Match_Value:     return n.loc
+	case ^Match_Singleton: return n.loc
+	case ^Match_Sequence:  return n.loc
+	case ^Match_Mapping:   return n.loc
+	case ^Match_Class:     return n.loc
+	case ^Match_Star:      return n.loc
+	case ^Match_As:        return n.loc
+	case ^Match_Or:        return n.loc
+	}
+	return {}
+}
+
+_parse_single_pattern :: proc(ctx: ^Parser_Context) -> Pattern {
 	tok := _peek(ctx)
 
 	#partial switch tok.kind {
@@ -668,22 +714,60 @@ _parse_pattern :: proc(ctx: ^Parser_Context) -> Pattern {
 		return p
 	case .NAME, .KW_MATCH, .KW_CASE, .KW_TYPE:
 		_advance(ctx)
-		// Check for 'as' pattern
-		if _at(ctx, .KW_AS) {
-			_advance(ctx)
-			name_tok := _advance(ctx)
-			inner := new(Match_Value, ctx.allocator)
-			inner.loc = tok.loc
-			inner_name := new(Name_Expr, ctx.allocator)
-			inner_name.id = tok.text
-			inner_name.loc = tok.loc
-			inner.value = inner_name
-			p := new(Match_As, ctx.allocator)
-			p.loc = tok.loc
-			p.pattern = inner
-			p.name = name_tok.text
-			return p
+
+		// Class pattern: Name(...) or Name.Name(...)
+		if _at(ctx, .LPAREN) || _at(ctx, .DOT) {
+			// Build dotted name for class pattern
+			cls_expr: Expr
+			name_n := new(Name_Expr, ctx.allocator)
+			name_n.loc = tok.loc
+			name_n.id = tok.text
+			name_n.ctx = .Load
+			cls_expr = name_n
+			for _at(ctx, .DOT) {
+				_advance(ctx)
+				attr_tok := _advance(ctx)
+				a := new(Attribute_Expr, ctx.allocator)
+				a.loc = tok.loc
+				a.value = cls_expr
+				a.attr = attr_tok.text
+				a.ctx = .Load
+				cls_expr = a
+			}
+			if _at(ctx, .LPAREN) {
+				_advance(ctx)
+				patterns := make([dynamic]Pattern, 0, 2, ctx.allocator)
+				kw_attrs := make([dynamic]string, 0, 2, ctx.allocator)
+				kw_patterns := make([dynamic]Pattern, 0, 2, ctx.allocator)
+				for !_at(ctx, .RPAREN) && !_at(ctx, .EOF) {
+					if len(patterns) > 0 || len(kw_patterns) > 0 {
+						if !_at(ctx, .COMMA) { break }
+						_advance(ctx)
+						if _at(ctx, .RPAREN) { break }
+					}
+					// keyword pattern: attr=pattern
+					if (_at_any(ctx, .NAME, .KW_MATCH, .KW_CASE, .KW_TYPE)) && ctx.pos + 1 < len(ctx.tokens) && ctx.tokens[ctx.pos + 1].kind == .ASSIGN {
+						kw_name := _advance(ctx)
+						_advance(ctx) // =
+						kw_pat := _parse_pattern(ctx)
+						append(&kw_attrs, kw_name.text)
+						append(&kw_patterns, kw_pat)
+					} else {
+						append(&patterns, _parse_pattern(ctx))
+					}
+				}
+				_expect(ctx, .RPAREN)
+				p := new(Match_Class, ctx.allocator)
+				p.loc = tok.loc
+				p.cls = cls_expr
+				p.patterns = patterns[:]
+				p.kwd_attrs = kw_attrs[:]
+				p.kwd_patterns = kw_patterns[:]
+				return p
+			}
 		}
+
+		// 'as' handling moved to _parse_pattern wrapper
 		// Wildcard _
 		if tok.text == "_" {
 			p := new(Match_As, ctx.allocator)
