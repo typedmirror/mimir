@@ -18,6 +18,7 @@ import core   "mimir:core"
 // Diagnostics:
 //   COMPAT001 — Python version incompatibility (syntax requires newer Python)
 //   COMPAT002 — Deprecated library API usage (§19.1)
+//   COMPAT003 — Deprecated/removed stdlib module import
 //   DEP001    — Unused dependency (declared but never imported)
 //   DEP002    — Missing dependency (imported but not declared, not stdlib)
 
@@ -52,6 +53,9 @@ analyze_compat :: proc(
 
 	// §19.1: Deprecated library API usage (runs regardless of mimir.toml)
 	check_deprecated_apis(module, bind_result, file_path, diagnostics, allocator)
+
+	// §19.3: Deprecated/removed stdlib module imports
+	check_deprecated_stdlib_imports(bind_result, file_path, diagnostics)
 
 	config_path, min_version, deps := read_compat_config(dir, allocator)
 	if len(config_path) == 0 { return }
@@ -516,6 +520,74 @@ check_deprecated_apis :: proc(
 						}
 					}
 				}
+			}
+		}
+	}
+}
+
+// ==================== COMPAT003: Deprecated/Removed Stdlib Modules ====================
+
+Deprecated_Module :: struct {
+	name:        string,
+	removed_in:  string, // Python version where it was removed
+	replacement: string,
+}
+
+DEPRECATED_STDLIB_MODULES := [?]Deprecated_Module{
+	// Removed in Python 3.12
+	{name = "distutils",   removed_in = "3.12", replacement = "setuptools or packaging"},
+	{name = "imp",         removed_in = "3.12", replacement = "importlib"},
+	{name = "aifc",        removed_in = "3.13", replacement = "soundfile (PyPI)"},
+	{name = "audioop",     removed_in = "3.13", replacement = "soundfile (PyPI)"},
+	{name = "cgi",         removed_in = "3.13", replacement = "urllib.parse or multipart"},
+	{name = "cgitb",       removed_in = "3.13", replacement = "traceback"},
+	{name = "chunk",       removed_in = "3.13", replacement = "struct"},
+	{name = "crypt",       removed_in = "3.13", replacement = "bcrypt or passlib (PyPI)"},
+	{name = "imghdr",      removed_in = "3.13", replacement = "python-magic or filetype (PyPI)"},
+	{name = "mailcap",     removed_in = "3.13", replacement = "mimetypes"},
+	{name = "msilib",      removed_in = "3.13", replacement = "platform-specific tools"},
+	{name = "nis",         removed_in = "3.13", replacement = "none (NIS is deprecated)"},
+	{name = "nntplib",     removed_in = "3.13", replacement = "none (NNTP is deprecated)"},
+	{name = "ossaudiodev", removed_in = "3.13", replacement = "sounddevice (PyPI)"},
+	{name = "pipes",       removed_in = "3.13", replacement = "subprocess"},
+	{name = "sndhdr",      removed_in = "3.13", replacement = "python-magic or filetype (PyPI)"},
+	{name = "spwd",        removed_in = "3.13", replacement = "none"},
+	{name = "sunau",       removed_in = "3.13", replacement = "soundfile (PyPI)"},
+	{name = "telnetlib",   removed_in = "3.13", replacement = "telnetlib3 (PyPI)"},
+	{name = "uu",          removed_in = "3.13", replacement = "base64"},
+	{name = "xdrlib",      removed_in = "3.13", replacement = "struct"},
+	// Deprecated (not yet removed)
+	{name = "optparse",    removed_in = "deprecated", replacement = "argparse"},
+	{name = "formatter",   removed_in = "deprecated", replacement = "string formatting"},
+}
+
+check_deprecated_stdlib_imports :: proc(
+	bind_result: ^binder.Bind_Result,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+) {
+	for &imp in bind_result.imports {
+		for &dep in DEPRECATED_STDLIB_MODULES {
+			if imp.module_name == dep.name {
+				what_msg: string
+				if dep.removed_in == "deprecated" {
+					what_msg = fmt.tprintf("'%s' is deprecated", dep.name)
+				} else {
+					what_msg = fmt.tprintf("'%s' was removed in Python %s", dep.name, dep.removed_in)
+				}
+				append(diagnostics, core.Diagnostic{
+					severity = .Warning,
+					location = core.Location{
+						file   = file_path,
+						line   = int(imp.loc.line),
+						column = int(imp.loc.col),
+					},
+					code = "COMPAT003",
+					what = what_msg,
+					why  = fmt.tprintf("importing '%s' will fail on newer Python versions", dep.name),
+					fix  = fmt.tprintf("use '%s' instead", dep.replacement),
+				})
+				break
 			}
 		}
 	}
