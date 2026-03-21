@@ -116,6 +116,8 @@ main :: proc() {
 		cmd_profile_run(args[2:])
 	case "diff-with":
 		cmd_diff_with(args[2:])
+	case "bench":
+		cmd_bench(args[2:])
 	case "docs":
 		cmd_docs(args[2:])
 	case "changelog":
@@ -3962,6 +3964,126 @@ emit_gpu_output :: proc(
 		}
 		fmt.println()
 	}
+}
+
+// ==================== bench command ====================
+
+cmd_bench :: proc(args: []string) {
+	target := "tests/conformance/"
+	if len(args) > 0 && !strings.has_prefix(args[0], "-") {
+		target = args[0]
+	}
+
+	verbose := false
+	for arg in args {
+		if arg == "-v" || arg == "--verbose" { verbose = true }
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir bench: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+	if len(files) == 0 {
+		fmt.eprintfln("mimir bench: no Python files found in '%s'", target)
+		return
+	}
+
+	fmt.printfln("--- mimir bench: %d Python files ---\n", len(files))
+
+	if verbose {
+		fmt.printfln("%-50s | %6s | %9s | %9s | %9s | %9s",
+			"File", "Lines", "Parse", "Bind", "Check", "Total")
+		fmt.printfln("%-50s-|-%6s-|-%9s-|-%9s-|-%9s-|-%9s",
+			"--------------------------------------------------", "------", "---------", "---------", "---------", "---------")
+	}
+
+	total_lines := 0
+	total_files := 0
+	failed := 0
+	total_parse_us: f64 = 0
+	total_bind_us: f64 = 0
+	total_check_us: f64 = 0
+
+	// Measure full pipeline time
+	bench_start := time.now()
+
+	for file in files {
+		// Read file
+		data, read_err := os.read_entire_file(file, context.temp_allocator)
+		if read_err != nil { failed += 1; continue }
+		source := string(data)
+
+		line_count := 1
+		for i in 0..<len(source) {
+			if source[i] == '\n' { line_count += 1 }
+		}
+
+		// --- Parse ---
+		parse_start := time.now()
+		module, parse_err := parser.parse_native(file, context.temp_allocator)
+		parse_elapsed := time.duration_microseconds(time.diff(parse_start, time.now()))
+
+		if parse_err != nil || module == nil {
+			failed += 1
+			if verbose {
+				basename := _bench_basename(file)
+				fmt.printfln("%-50s | %6d | %7dμs | %9s | %9s | %9s",
+					basename, line_count, i64(parse_elapsed), "FAIL", "-", "-")
+			}
+			continue
+		}
+
+		// --- Bind ---
+		bind_start := time.now()
+		bind_result := binder.bind(module, file, context.temp_allocator)
+		bind_elapsed := time.duration_microseconds(time.diff(bind_start, time.now()))
+
+		// --- Check (flow analysis only — full check needs shared registry) ---
+		check_start := time.now()
+		flow_result := flow.analyze(module, &bind_result, file, context.temp_allocator)
+		_ = flow_result
+		check_elapsed := time.duration_microseconds(time.diff(check_start, time.now()))
+
+		file_total := parse_elapsed + bind_elapsed + check_elapsed
+		total_lines += line_count
+		total_files += 1
+		total_parse_us += parse_elapsed
+		total_bind_us += bind_elapsed
+		total_check_us += check_elapsed
+
+		if verbose {
+			basename := _bench_basename(file)
+			fmt.printfln("%-50s | %6d | %7dμs | %7dμs | %7dμs | %7dμs",
+				basename, line_count, i64(parse_elapsed), i64(bind_elapsed), i64(check_elapsed), i64(file_total))
+		}
+	}
+
+	bench_elapsed := time.diff(bench_start, time.now())
+	bench_ms := time.duration_milliseconds(bench_elapsed)
+
+	fmt.println()
+	fmt.printfln("Files: %d (%d compiled, %d failed)", len(files), total_files, failed)
+	fmt.printfln("Lines: %d", total_lines)
+	fmt.printfln("Time:  %dms", i64(bench_ms))
+	if bench_ms > 0 {
+		throughput := f64(total_lines) * 1000.0 / bench_ms
+		fmt.printfln("Throughput: %d lines/sec", i64(throughput))
+	}
+
+	fmt.println()
+	fmt.printfln("Breakdown:")
+	fmt.printfln("  Parse: %dμs (%dms)", i64(total_parse_us), i64(total_parse_us / 1000))
+	fmt.printfln("  Bind:  %dμs (%dms)", i64(total_bind_us), i64(total_bind_us / 1000))
+	fmt.printfln("  Flow:  %dμs (%dms)", i64(total_check_us), i64(total_check_us / 1000))
+}
+
+_bench_basename :: proc(path: string) -> string {
+	last := 0
+	for i in 0..<len(path) {
+		if path[i] == '/' { last = i + 1 }
+	}
+	return path[last:]
 }
 
 // ==================== compile-wasm command ====================
