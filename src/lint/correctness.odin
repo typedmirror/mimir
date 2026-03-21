@@ -375,3 +375,126 @@ _is_type_call :: proc(expr: parser.Expr) -> bool {
 	return name.id == "type" && len(call.args) == 1
 }
 
+// L010 — `is` comparison with literal (x is 1, x is "hello")
+// `is` tests identity, not equality. With literals, it's always wrong.
+check_is_with_literal :: proc(ctx: ^Lint_Context) {
+	visitor := core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			ctx := cast(^Lint_Context)raw_ctx
+			cmp, ok := expr.(^parser.Compare_Expr)
+			if !ok { return }
+			for op, i in cmp.ops {
+				if op != .Is && op != .Is_Not { continue }
+				if i >= len(cmp.comparators) { continue }
+				comp := cmp.comparators[i]
+				if _is_literal_value(comp) {
+					op_str := "is" if op == .Is else "is not"
+					eq_str := "==" if op == .Is else "!="
+					append(&ctx.diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = ctx.file_path,
+							line   = int(cmp.loc.line),
+							column = int(cmp.loc.col),
+						},
+						code = "L010",
+						what = fmt.tprintf("'%s' used with a literal value", op_str),
+						why  = "'is' tests object identity, not equality — with literals, the result is implementation-dependent",
+						fix  = fmt.tprintf("use '%s' for value comparison instead of '%s'", eq_str, op_str),
+					})
+				}
+				// Also check left side for first comparison
+				if i == 0 && _is_literal_value(cmp.left) {
+					op_str := "is" if op == .Is else "is not"
+					eq_str := "==" if op == .Is else "!="
+					append(&ctx.diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = ctx.file_path,
+							line   = int(cmp.loc.line),
+							column = int(cmp.loc.col),
+						},
+						code = "L010",
+						what = fmt.tprintf("'%s' used with a literal value", op_str),
+						why  = "'is' tests object identity — comparing literals with 'is' is unreliable",
+						fix  = fmt.tprintf("use '%s' for value comparison", eq_str),
+					})
+				}
+			}
+		},
+		ctx = rawptr(ctx),
+	}
+	core.walk_all_stmts(&visitor, ctx.module.body)
+}
+
+_is_literal_value :: proc(expr: parser.Expr) -> bool {
+	if expr == nil { return false }
+	if c, ok := expr.(^parser.Constant_Expr); ok {
+		// None, True, False are fine with `is` — only flag numbers and strings
+		_, is_none := c.value.(parser.Const_None)
+		if is_none { return false }
+		_, is_bool := c.value.(bool)
+		if is_bool { return false }
+		return true // int, float, string, etc.
+	}
+	return false
+}
+
+// L011 — Shadowing builtin names (list = [1,2,3], dict = {}, type = "foo")
+check_builtin_shadow :: proc(ctx: ^Lint_Context) {
+	BUILTINS :: [?]string{
+		"list", "dict", "set", "tuple", "str", "int", "float", "bool", "bytes",
+		"type", "id", "len", "range", "print", "input", "open", "map", "filter",
+		"zip", "enumerate", "sorted", "reversed", "sum", "min", "max", "abs",
+		"any", "all", "hash", "next", "iter", "super", "object", "property",
+		"staticmethod", "classmethod", "isinstance", "issubclass", "hasattr",
+		"getattr", "setattr", "delattr", "callable", "repr", "format", "vars",
+		"dir", "globals", "locals", "exec", "eval", "compile",
+	}
+
+	for stmt in ctx.module.body {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			for target in s.targets {
+				if name, ok := target.(^parser.Name_Expr); ok {
+					for b in BUILTINS {
+						if name.id == b {
+							append(&ctx.diagnostics, core.Diagnostic{
+								severity = .Warning,
+								location = core.Location{
+									file   = ctx.file_path,
+									line   = int(s.loc.line),
+									column = int(s.loc.col),
+								},
+								code = "L011",
+								what = fmt.tprintf("variable '%s' shadows builtin name", name.id),
+								why  = "redefining builtin names prevents using them later in the module",
+								fix  = fmt.tprintf("rename the variable (e.g., '%s_value', 'my_%s')", name.id, name.id),
+							})
+							break
+						}
+					}
+				}
+			}
+		case ^parser.Func_Def:
+			for b in BUILTINS {
+				if s.name == b {
+					append(&ctx.diagnostics, core.Diagnostic{
+						severity = .Warning,
+						location = core.Location{
+							file   = ctx.file_path,
+							line   = int(s.loc.line),
+							column = int(s.loc.col),
+						},
+						code = "L011",
+						what = fmt.tprintf("function '%s' shadows builtin name", s.name),
+						why  = "redefining builtin names prevents using them later in the module",
+						fix  = fmt.tprintf("rename the function"),
+					})
+					break
+				}
+			}
+		}
+	}
+}
+

@@ -18,6 +18,8 @@ ALL_RULES := [?]Lint_Rule{
 	{code = "L007", name = "compare-to-bool",          check = check_compare_to_bool},
 	{code = "L008", name = "compare-to-none",          check = check_compare_to_none},
 	{code = "L009", name = "type-equality",            check = check_type_equality},
+	{code = "L010", name = "is-with-literal",           check = check_is_with_literal},
+	{code = "L011", name = "builtin-shadow",           check = check_builtin_shadow},
 	{code = "C001", name = "naming-convention",        check = check_naming_convention},
 	{code = "C002", name = "star-import",              check = check_star_import},
 	{code = "S001", name = "line-too-long",            check = check_line_too_long},
