@@ -324,3 +324,33 @@ is_loop_blocking :: proc(ctx: ^Concurrency_Context, call: ^parser.Call_Expr) -> 
 	}
 	return false
 }
+
+// CONC007: asyncio.gather() without return_exceptions=True
+check_gather_no_return_exceptions :: proc(ctx: ^Concurrency_Context, expr: parser.Expr) {
+	call, is_call := expr.(^parser.Call_Expr)
+	if !is_call { return }
+
+	is_gather := false
+	#partial switch f in call.func {
+	case ^parser.Attribute_Expr:
+		if f.attr == "gather" {
+			#partial switch v in f.value {
+			case ^parser.Name_Expr:
+				if v.id == "asyncio" { is_gather = true }
+			}
+		}
+	case ^parser.Name_Expr:
+		if f.id == "gather" { is_gather = true }
+	}
+	if !is_gather { return }
+
+	for kw in call.keywords {
+		if kw.arg == "return_exceptions" { return }
+	}
+
+	emit(ctx, "CONC007", call.loc,
+		"asyncio.gather() without return_exceptions=True",
+		"if any gathered coroutine raises, other coroutines are silently cancelled",
+		"add return_exceptions=True: asyncio.gather(*tasks, return_exceptions=True)",
+	)
+}

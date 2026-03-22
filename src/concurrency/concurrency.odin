@@ -166,6 +166,12 @@ check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: b
 			}
 			// CONC003: threading.Thread(target=...)
 			check_thread_target(ctx, s.value)
+			// CONC007: asyncio.gather() without return_exceptions
+			check_gather_no_return_exceptions(ctx, s.value)
+			// Also check inside await
+			if aw, aw_ok := s.value.(^parser.Await_Expr); aw_ok {
+				check_gather_no_return_exceptions(ctx, aw.value)
+			}
 
 		case ^parser.Assign:
 			// Check RHS expressions for blocking/deadlock in async
@@ -175,6 +181,11 @@ check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: b
 			}
 			// CONC003: t = threading.Thread(target=...)
 			check_thread_target(ctx, s.value)
+			// CONC007: asyncio.gather() without return_exceptions
+			check_gather_no_return_exceptions(ctx, s.value)
+			if aw, aw_ok := s.value.(^parser.Await_Expr); aw_ok {
+				check_gather_no_return_exceptions(ctx, aw.value)
+			}
 			// CONC006: assignment to global in free-threaded context
 			if ctx.has_threading {
 				check_nogil_unsafe(ctx, stmt, globals)
