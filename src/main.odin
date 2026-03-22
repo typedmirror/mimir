@@ -3768,6 +3768,7 @@ cmd_compile_gpu :: proc(args: []string) {
 	fuse_flag := false
 	plan_flag := false
 	backward_flag := false
+	host_flag := false
 
 	i := 0
 	for i < len(args) {
@@ -3801,9 +3802,12 @@ cmd_compile_gpu :: proc(args: []string) {
 		} else if arg == "--backward" {
 			backward_flag = true
 			i += 1
+		} else if arg == "--host" {
+			host_flag = true
+			i += 1
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("mimir compile-gpu: unknown flag '%s'", arg)
-			fmt.eprintln("Usage: mimir compile-gpu [--backend <wgsl|msl|spirv|ptx|all>] [--output <dir>] [-v] [--fuse] [--plan] [--backward] [path]")
+			fmt.eprintln("Usage: mimir compile-gpu [--backend <wgsl|msl|spirv|ptx|all>] [--output <dir>] [-v] [--fuse] [--plan] [--backward] [--host] [path]")
 			os.exit(1)
 		} else {
 			target = arg
@@ -3902,6 +3906,25 @@ cmd_compile_gpu :: proc(args: []string) {
 					ext := gpu.backend_extension(be)
 					emit_gpu_output(output_dir, graph.func_name, ext, data, is_binary, verbose, &graph, be)
 					total_kernels += 1
+				}
+			}
+
+			// Host runtime: generate JS WebGPU dispatch code
+			if host_flag && output_dir != "" {
+				bindings := gpu.assign_bindings(&graph, p.arena.allocator)
+				wgsl_filename := fmt.tprintf("%s.wgsl", graph.func_name)
+				js_str := gpu.emit_host_js(&graph, &bindings, &type_ctx, wgsl_filename, p.arena.allocator)
+				ts_str := gpu.emit_host_ts(&graph, &type_ctx, p.arena.allocator)
+				js_path := fmt.tprintf("%s/%s.js", output_dir, graph.func_name)
+				ts_path := fmt.tprintf("%s/%s.d.ts", output_dir, graph.func_name)
+				js_data := transmute([]byte)js_str
+				ts_data := transmute([]byte)ts_str
+				js_err := os.write_entire_file(js_path, js_data)
+				ts_err := os.write_entire_file(ts_path, ts_data)
+				if js_err != nil { fmt.eprintfln("error writing %s: %v", js_path, js_err) }
+				if ts_err != nil { fmt.eprintfln("error writing %s: %v", ts_path, ts_err) }
+				if verbose {
+					fmt.printfln("  Host: wrote %s, %s", js_path, ts_path)
 				}
 			}
 
