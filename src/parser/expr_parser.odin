@@ -249,7 +249,15 @@ _parse_number :: proc(ctx: ^Parser_Context) -> Expr {
 		// Parse integer, handling 0x, 0o, 0b, underscores
 		text := tok.text
 		clean, _ := strings.replace_all(text, "_", "", ctx.allocator)
-		val, ok := strconv.parse_i64_of_base(clean, 0)
+		base := 10
+		if len(clean) >= 2 && clean[0] == '0' {
+			switch clean[1] {
+			case 'x', 'X': base = 16; clean = clean[2:]
+			case 'o', 'O': base = 8;  clean = clean[2:]
+			case 'b', 'B': base = 2;  clean = clean[2:]
+			}
+		}
+		val, ok := strconv.parse_i64_of_base(clean, base)
 		if ok { c.value = val } else { c.value = i64(0) }
 	case .FLOAT:
 		text, _ := strings.replace_all(tok.text, "_", "", ctx.allocator)
@@ -993,7 +1001,15 @@ _parse_call :: proc(ctx: ^Parser_Context, func_expr: Expr) -> Expr {
 		}
 
 		arg := parse_expr(ctx)
-		if arg != nil { append(&args, arg) }
+		if arg != nil {
+			// Generator expression: func(expr for x in iter)
+			if _at(ctx, .KW_FOR) {
+				gen := _parse_comprehension_tail(ctx, arg, _expr_loc(arg))
+				append(&args, gen)
+				break // generator is sole argument
+			}
+			append(&args, arg)
+		}
 	}
 
 	_expect(ctx, .RPAREN)
