@@ -28,38 +28,19 @@ JSON_Check_Context :: struct {
 
 // Entry point — called from checker.odin after type checking.
 analyze_json :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	reg: ^Type_Registry,
+	actx: ^Analysis_Pass_Context,
 	virtual_types: ^map[binder.Symbol_ID]Type_ID,
-	expr_types: ^map[rawptr]Type_ID,
-	file_path: string,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
-	// Build import map for stdlib json detection
-	import_map := make(map[string]string, 8, allocator)
-	for &imp in bind_result.imports {
-		if len(imp.names) == 0 {
-			// "import json" → map "json" → "json"
-			import_map[imp.module_name] = imp.module_name
-		} else {
-			// "from json import dumps" → map "dumps" → "json"
-			for imp_name in imp.names {
-				local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
-				import_map[local] = imp.module_name
-			}
-		}
-	}
-
 	ctx := JSON_Check_Context{
-		reg           = reg,
-		expr_types    = expr_types,
-		file_path     = file_path,
+		reg           = actx.registry,
+		expr_types    = actx.expr_types,
+		file_path     = actx.file_path,
 		diagnostics   = diagnostics,
-		import_map    = import_map,
-		allocator     = allocator,
+		import_map    = actx.import_map,  // shared — no per-pass rebuild
+		allocator     = actx.allocator,
 	}
+	module := actx.module
 
 	visitor := core.AST_Visitor{
 		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
@@ -72,6 +53,32 @@ analyze_json :: proc(
 		ctx = rawptr(&ctx),
 	}
 	core.walk_all_stmts(&visitor, module.body)
+}
+
+// Build a visitor for batched execution
+make_json_visitor :: proc(
+	actx: ^Analysis_Pass_Context,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	out_ctx: ^JSON_Check_Context,
+) -> (core.AST_Visitor, bool) {
+	out_ctx^ = JSON_Check_Context{
+		reg         = actx.registry,
+		expr_types  = actx.expr_types,
+		file_path   = actx.file_path,
+		diagnostics = diagnostics,
+		import_map  = actx.import_map,
+		allocator   = actx.allocator,
+	}
+	return core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			ctx := cast(^JSON_Check_Context)raw_ctx
+			#partial switch e in expr {
+			case ^parser.Call_Expr:
+				check_json_call(ctx, e)
+			}
+		},
+		ctx = rawptr(out_ctx),
+	}, true
 }
 
 // Check if a Call_Expr is a JSON serialization call and validate its argument.

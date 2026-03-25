@@ -15,16 +15,27 @@ import core   "mimir:core"
 //   RT001 — Reference cycle: self-referential assignment (child.parent = self)
 //           suggests weakref to avoid GC pressure
 //   RT002 — Object creation hotspot: constructor call inside loop body
+//   RT003 — Unbounded collection growth in while-True loops
+//   RT004 — Heavy import at module level (slow startup)
+//   RT005 — Unreliable __del__ with side effects
+//   RT006 — Mutable default argument accumulation
 
 analyze_runtime_model :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	file_path: string,
+	actx: ^Analysis_Pass_Context,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
+	module := actx.module
+	bind_result := actx.bind_result
+	file_path := actx.file_path
+	allocator := actx.allocator
 	// RT004: Heavy imports at module level
 	check_heavy_imports(module, bind_result, file_path, diagnostics)
+
+	// RT005: Unreliable __del__ with side effects
+	check_unreliable_del(module.body, file_path, diagnostics)
+
+	// RT006: Mutable default argument accumulation
+	check_mutable_default_growth(module.body, file_path, diagnostics)
 
 	// Walk each function and module-level body
 	check_runtime_in_body(module.body, file_path, diagnostics, allocator)
@@ -369,4 +380,222 @@ _has_prefix_dot :: proc(name: string, prefix: string) -> bool {
 	if len(name) <= len(prefix) { return false }
 	if name[:len(prefix)] != prefix { return false }
 	return name[len(prefix)] == '.'
+}
+
+// ==================== RT005: Unreliable __del__ (§21.2) ====================
+//
+// __del__ is called at an unpredictable time (or never). Side effects in
+// __del__ (file I/O, network, logging) are unreliable. Suggest context
+// managers or explicit close() instead.
+
+DANGEROUS_DEL_CALLS :: [?]string{
+	"close", "write", "flush", "send", "commit", "rollback",
+	"shutdown", "disconnect", "release", "unlink", "remove",
+	"save", "log", "print",
+}
+
+check_unreliable_del :: proc(
+	stmts: []parser.Stmt,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Class_Def:
+			for body_stmt in s.body {
+				#partial switch ms in body_stmt {
+				case ^parser.Func_Def:
+					if ms.name == "__del__" {
+						// Scan __del__ body for side-effect calls
+						if _has_side_effect_calls(ms.body) {
+							append(diagnostics, core.Diagnostic{
+								severity = .Info,
+								location = core.Location{
+									file   = file_path,
+									line   = int(ms.loc.line),
+									column = int(ms.loc.col),
+								},
+								code = "RT005",
+								what = fmt.tprintf("__del__ in class '%s' contains side-effect calls", s.name),
+								why  = "__del__ is called at an unpredictable time (or never if there are reference cycles); side effects may silently fail",
+								fix  = "use a context manager (__enter__/__exit__) or explicit close() method instead",
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+_has_side_effect_calls :: proc(stmts: []parser.Stmt) -> bool {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			if _is_side_effect_call(s.value) { return true }
+		case ^parser.If_Stmt:
+			if _has_side_effect_calls(s.body) { return true }
+			if _has_side_effect_calls(s.orelse) { return true }
+		case ^parser.Try_Stmt:
+			if _has_side_effect_calls(s.body) { return true }
+			for h in s.handlers {
+				if _has_side_effect_calls(h.body) { return true }
+			}
+		}
+	}
+	return false
+}
+
+_is_side_effect_call :: proc(expr: parser.Expr) -> bool {
+	if expr == nil { return false }
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return false }
+
+	// Check for method calls: self.file.close(), self.conn.send(), etc.
+	if attr, aok := call.func.(^parser.Attribute_Expr); aok {
+		for name in DANGEROUS_DEL_CALLS {
+			if attr.attr == name { return true }
+		}
+	}
+	// Check for bare function calls: print(), logging.info(), etc.
+	if name, nok := call.func.(^parser.Name_Expr); nok {
+		for dname in DANGEROUS_DEL_CALLS {
+			if name.id == dname { return true }
+		}
+	}
+	return false
+}
+
+// ==================== RT006: Mutable Default Accumulation (§21.3) ====================
+//
+// def f(items=[]) creates a single list shared across ALL calls.
+// If the function appends to it, memory grows unboundedly.
+
+check_mutable_default_growth :: proc(
+	stmts: []parser.Stmt,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			_check_func_mutable_default(s.name, s.args, s.body, s.loc, file_path, diagnostics)
+		case ^parser.Async_Func_Def:
+			_check_func_mutable_default(s.name, s.args, s.body, s.loc, file_path, diagnostics)
+		case ^parser.Class_Def:
+			for body_stmt in s.body {
+				#partial switch ms in body_stmt {
+				case ^parser.Func_Def:
+					_check_func_mutable_default(ms.name, ms.args, ms.body, ms.loc, file_path, diagnostics)
+				}
+			}
+		}
+	}
+}
+
+_check_func_mutable_default :: proc(
+	func_name: string,
+	args: parser.Arguments,
+	body: []parser.Stmt,
+	loc: parser.Src_Loc,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+) {
+	// Find params with mutable defaults ([], {}, set())
+	mutable_params := make([dynamic]string, 0, 4, context.temp_allocator)
+	n_params := len(args.posonlyargs) + len(args.args)
+	n_defaults := len(args.defaults)
+	for di := 0; di < n_defaults; di += 1 {
+		d := args.defaults[di]
+		if _is_mutable_default(d) {
+			param_idx := di + (n_params - n_defaults)
+			param_name := ""
+			if param_idx < len(args.posonlyargs) {
+				param_name = args.posonlyargs[param_idx].arg
+			} else {
+				idx := param_idx - len(args.posonlyargs)
+				if idx < len(args.args) {
+					param_name = args.args[idx].arg
+				}
+			}
+			if len(param_name) > 0 {
+				append(&mutable_params, param_name)
+			}
+		}
+	}
+
+	if len(mutable_params) == 0 { return }
+
+	// Check if any mutable default param is mutated in body (append, extend, add, update, etc.)
+	for param in mutable_params {
+		if _param_is_mutated(param, body) {
+			append(diagnostics, core.Diagnostic{
+				severity = .Warning,
+				location = core.Location{
+					file   = file_path,
+					line   = int(loc.line),
+					column = int(loc.col),
+				},
+				code = "RT006",
+				what = fmt.tprintf("mutable default '%s' in '%s' is mutated — shared across all calls", param, func_name),
+				why  = "mutable default arguments are created once and shared across all function calls, causing silent accumulation",
+				fix  = "use None as default and create inside the function: `if items is None: items = []`",
+			})
+		}
+	}
+}
+
+_is_mutable_default :: proc(expr: parser.Expr) -> bool {
+	if expr == nil { return false }
+	#partial switch e in expr {
+	case ^parser.List_Expr: return true  // []
+	case ^parser.Dict_Expr: return true  // {}
+	case ^parser.Set_Expr:  return true  // {x}
+	case ^parser.Call_Expr:
+		// set(), list(), dict()
+		if name, ok := e.func.(^parser.Name_Expr); ok {
+			return name.id == "list" || name.id == "dict" || name.id == "set"
+		}
+	}
+	return false
+}
+
+MUTATION_METHODS :: [?]string{
+	"append", "extend", "add", "insert", "update",
+	"pop", "remove", "clear", "sort", "reverse",
+	"__setitem__",
+}
+
+_param_is_mutated :: proc(param_name: string, stmts: []parser.Stmt) -> bool {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			if call, ok := s.value.(^parser.Call_Expr); ok {
+				if attr, aok := call.func.(^parser.Attribute_Expr); aok {
+					if recv, nok := attr.value.(^parser.Name_Expr); nok {
+						if recv.id == param_name {
+							for m in MUTATION_METHODS {
+								if attr.attr == m { return true }
+							}
+						}
+					}
+				}
+			}
+		case ^parser.Assign:
+			// param[key] = value
+			for target in s.targets {
+				if sub, ok := target.(^parser.Subscript_Expr); ok {
+					if name, nok := sub.value.(^parser.Name_Expr); nok {
+						if name.id == param_name { return true }
+					}
+				}
+			}
+		case ^parser.If_Stmt:
+			if _param_is_mutated(param_name, s.body) { return true }
+			if _param_is_mutated(param_name, s.orelse) { return true }
+		case ^parser.For_Stmt:
+			if _param_is_mutated(param_name, s.body) { return true }
+		}
+	}
+	return false
 }

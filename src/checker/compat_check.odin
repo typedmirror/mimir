@@ -36,12 +36,13 @@ Compat_Context :: struct {
 
 // Entry point — called from checker.odin after type checking.
 analyze_compat :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	file_path: string,
+	actx: ^Analysis_Pass_Context,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
+	module := actx.module
+	bind_result := actx.bind_result
+	file_path := actx.file_path
+	allocator := actx.allocator
 	// Find mimir.toml
 	dir := file_path
 	for i := len(dir) - 1; i >= 0; i -= 1 {
@@ -100,10 +101,17 @@ check_stmt_compat :: proc(ctx: ^Compat_Context, stmt: parser.Stmt) {
 	case ^parser.Type_Alias_Stmt:
 		emit_compat(ctx, s.loc, "type alias statement", {3, 12})
 
+	case ^parser.Try_Star:
+		emit_compat(ctx, s.loc, "except* (exception groups)", {3, 11})
+
 	case ^parser.Ann_Assign:
 		check_annotation_compat(ctx, s.annotation)
 
 	case ^parser.Func_Def:
+		// Positional-only params (/) → 3.8+
+		if len(s.args.posonlyargs) > 0 {
+			emit_compat(ctx, s.loc, "positional-only parameters (/)", {3, 8})
+		}
 		// Check return annotation
 		check_annotation_compat(ctx, s.returns)
 		// Check arg annotations
@@ -112,6 +120,9 @@ check_stmt_compat :: proc(ctx: ^Compat_Context, stmt: parser.Stmt) {
 		for &a in s.args.kwonlyargs { check_annotation_compat(ctx, a.annotation) }
 
 	case ^parser.Async_Func_Def:
+		if len(s.args.posonlyargs) > 0 {
+			emit_compat(ctx, s.loc, "positional-only parameters (/)", {3, 8})
+		}
 		check_annotation_compat(ctx, s.returns)
 		for &a in s.args.args { check_annotation_compat(ctx, a.annotation) }
 		for &a in s.args.posonlyargs { check_annotation_compat(ctx, a.annotation) }

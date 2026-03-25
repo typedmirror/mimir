@@ -1,6 +1,7 @@
 package mimir
 
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:time"
@@ -122,6 +123,8 @@ main :: proc() {
 		cmd_docs(args[2:])
 	case "changelog":
 		cmd_changelog(args[2:])
+	case "codemod":
+		cmd_codemod(args[2:])
 	case "version":
 		cmd_version()
 	case "help":
@@ -1185,6 +1188,92 @@ cmd_changelog :: proc(args: []string) {
 	fmt.printfln("  (current implementation: file-level change detection)")
 }
 
+// ==================== Codemod — Type-Aware Source Transformations ====================
+
+cmd_codemod :: proc(args: []string) {
+	if len(args) < 2 {
+		fmt.eprintln("mimir codemod: type-aware source transformations")
+		fmt.eprintln("Usage: mimir codemod <rule> [--apply] <path>")
+		fmt.eprintln("")
+		fmt.eprintln("Rules:")
+		fmt.eprintln("  add-return-types       Insert inferred return type annotations")
+		fmt.eprintln("  remove-unused-imports   Remove imports with no references")
+		fmt.eprintln("  modernize-annotations  List[int] → list[int], Optional[X] → X | None")
+		fmt.eprintln("")
+		fmt.eprintln("Flags:")
+		fmt.eprintln("  --apply   Apply changes (default: dry-run, shows what would change)")
+		os.exit(1)
+	}
+
+	rule_name := args[0]
+	kind: platform.Codemod_Kind
+	switch rule_name {
+	case "add-return-types":
+		kind = .Add_Return_Types
+	case "remove-unused-imports":
+		kind = .Remove_Unused_Imports
+	case "modernize-annotations":
+		kind = .Modernize_Annotations
+	case:
+		fmt.eprintfln("mimir codemod: unknown rule '%s'", rule_name)
+		fmt.eprintfln("Available: add-return-types, remove-unused-imports")
+		os.exit(1)
+	}
+
+	apply := false
+	target := ""
+	for i := 1; i < len(args); i += 1 {
+		if args[i] == "--apply" {
+			apply = true
+		} else if !strings.has_prefix(args[i], "-") {
+			target = args[i]
+		}
+	}
+
+	if target == "" {
+		fmt.eprintln("mimir codemod: no target path specified")
+		os.exit(1)
+	}
+
+	files, find_err := core.find_python_files(target)
+	if find_err != nil {
+		fmt.eprintfln("mimir codemod: error reading '%s': %v", target, find_err)
+		os.exit(1)
+	}
+
+	arena: core.Analysis_Arena
+	arena_err := core.arena_init(&arena)
+	if arena_err != nil {
+		fmt.eprintln("mimir codemod: failed to init arena")
+		os.exit(1)
+	}
+	defer core.arena_destroy(&arena)
+
+	total_edits := 0
+	total_files := 0
+	for file in files {
+		n_edits, ok := platform.run_codemod(kind, file, arena.allocator, dry_run = !apply)
+		if ok && n_edits > 0 {
+			total_edits += n_edits
+			total_files += 1
+		}
+		// Reset arena between files to avoid accumulation
+		core.arena_reset(&arena)
+		arena_err2 := core.arena_init(&arena)
+		if arena_err2 != nil { break }
+	}
+
+	if apply {
+		fmt.printfln("mimir codemod %s: applied %d edit(s) across %d file(s)", rule_name, total_edits, total_files)
+	} else {
+		if total_edits > 0 {
+			fmt.printfln("mimir codemod %s: %d edit(s) across %d file(s) (dry run — use --apply to write)", rule_name, total_edits, total_files)
+		} else {
+			fmt.printfln("mimir codemod %s: no changes needed", rule_name)
+		}
+	}
+}
+
 cmd_generate_schema :: proc(args: []string) {
 	target := "."
 	if len(args) > 0 { target = args[0] }
@@ -1417,6 +1506,8 @@ cmd_check :: proc(args: []string) {
 	// Parse flags
 	sarif_mode := false
 	watch_mode := false
+	show_confidence := false
+	min_confidence := core.Confidence.Unknown  // no filter by default
 	level := Analysis_Level.Strict  // default: everything
 	target := args[0]
 	for i := 0; i < len(args); i += 1 {
@@ -1431,6 +1522,19 @@ cmd_check :: proc(args: []string) {
 			case "strict":    level = .Strict
 			case:
 				fmt.eprintfln("mimir check: unknown level '%s' (use basic, inference, security, or strict)", args[i + 1])
+				os.exit(1)
+			}
+			i += 1
+		} else if args[i] == "--confidence" {
+			show_confidence = true
+		} else if args[i] == "--min-confidence" && i + 1 < len(args) {
+			switch args[i + 1] {
+			case "proven":   min_confidence = .Proven
+			case "high":     min_confidence = .High
+			case "medium":   min_confidence = .Medium
+			case "advisory": min_confidence = .Advisory
+			case:
+				fmt.eprintfln("mimir check: unknown confidence '%s' (use proven, high, medium, or advisory)", args[i + 1])
 				os.exit(1)
 			}
 			i += 1
@@ -1468,13 +1572,41 @@ cmd_check :: proc(args: []string) {
 	sarif_diags: [dynamic]core.Diagnostic
 	if sarif_mode { sarif_diags = make([dynamic]core.Diagnostic, 0, 32, p.arena.allocator) }
 
-	// Single file: fast path (existing behavior)
+	// Single vs multi-file mode selection.
+	// Multi-file when: directory target OR single file in a Python package (__init__.py present).
 	errors := 0
-	if len(p.files) == 1 {
-		errors = cmd_check_single(p.files[0], &p.bridge, &p.arena, sarif_mode ? &sarif_diags : nil, level)
+	use_multi := len(p.files) > 1
+	if len(p.files) == 1 && strings.has_suffix(target, ".py") {
+		// Check if file is in a Python package (has __init__.py sibling)
+		dir := target
+		for i := len(dir) - 1; i >= 0; i -= 1 {
+			if dir[i] == '/' { dir = dir[:i]; break }
+			if i == 0 { dir = "." }
+		}
+		// Only upgrade if __init__.py exists (actual package, not loose scripts)
+		init_path := strings.concatenate({dir, "/__init__.py"}, p.arena.allocator)
+		init_info, init_err := os.stat(init_path, context.temp_allocator)
+		if init_err == nil {
+			os.file_info_delete(init_info, context.temp_allocator)
+			pkg_files, pkg_err := core.find_python_files(dir)
+			if pkg_err == nil && len(pkg_files) > 1 {
+				use_multi = true
+				p.files = pkg_files
+			}
+		}
+	}
+
+	if !use_multi {
+		errors = cmd_check_single(p.files[0], &p.bridge, &p.arena, sarif_mode ? &sarif_diags : nil, level, show_confidence, min_confidence)
 	} else {
-		// Multi-module: shared registry + module graph
-		errors = cmd_check_multi(target, p.files, &p.bridge, &p.arena, level)
+		pkg_root := target
+		if strings.has_suffix(pkg_root, ".py") {
+			for i := len(pkg_root) - 1; i >= 0; i -= 1 {
+				if pkg_root[i] == '/' { pkg_root = pkg_root[:i]; break }
+				if i == 0 { pkg_root = "." }
+			}
+		}
+		errors = cmd_check_multi(pkg_root, p.files, &p.bridge, &p.arena, level, show_confidence, min_confidence)
 	}
 
 	if sarif_mode {
@@ -1562,6 +1694,8 @@ cmd_check_single :: proc(
 	arena: ^core.Analysis_Arena,
 	sarif_diags: ^[dynamic]core.Diagnostic = nil,
 	level: Analysis_Level = .Strict,
+	show_confidence: bool = false,
+	min_confidence: core.Confidence = .Unknown,
 ) -> int {
 	error_count := 0
 
@@ -1582,20 +1716,32 @@ cmd_check_single :: proc(
 	source_data, _ := os.read_entire_file(file, arena.allocator)
 	source_lines := strings.split(string(source_data), "\n")
 
-	_emit_diag :: proc(d: core.Diagnostic, error_count: ^int, sarif_diags: ^[dynamic]core.Diagnostic, level: Analysis_Level, source_lines: []string) {
+	_emit_diag :: proc(d: core.Diagnostic, error_count: ^int, sarif_diags: ^[dynamic]core.Diagnostic, level: Analysis_Level, source_lines: []string, show_confidence: bool, min_confidence: core.Confidence) {
 		if !should_emit_at_level(d.code, level) { return }
 		if is_line_suppressed(d.code, d.location.line, source_lines) { return }
+		// Filter by minimum confidence
+		if min_confidence != .Unknown {
+			conf := d.confidence
+			if conf == .Unknown { conf = core.resolve_confidence(d.code) }
+			// Confidence ordering: Proven > High > Medium > Advisory
+			if u8(conf) > u8(min_confidence) { return }
+			if conf == .Unknown { return } // unclassified filtered when min is set
+		}
 		if sarif_diags != nil {
 			append(sarif_diags, d)
 		} else {
-			core.diagnostic_print(d)
+			if show_confidence {
+				core.diagnostic_print_with_confidence(d)
+			} else {
+				core.diagnostic_print(d)
+			}
 		}
 		if d.severity == .Error { error_count^ += 1 }
 	}
 
 	bind_result := binder.bind(module, file, arena.allocator)
 	for d in bind_result.diagnostics {
-		_emit_diag(d, &error_count, sarif_diags, level, source_lines)
+		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
 	}
 
 	flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
@@ -1614,10 +1760,15 @@ cmd_check_single :: proc(
 			import_types[sym_id] = type_id
 		}
 
-		// Resolve third-party imports from cache
+		// Resolve stdlib + third-party imports
 		mod_scope := binder.result_get_scope(&bind_result, bind_result.module_scope)
 		if mod_scope != nil {
 			parsed_pkgs := make(map[string]modules.Module_Exports, 8, arena.allocator)
+
+			// Resolve typeshed stdlib stubs
+			stubs_dir, stubs_dir_err := platform.stubs_base_dir(arena.allocator)
+			has_stubs := stubs_dir_err == nil && platform.stubs_available(arena.allocator)
+
 			for imp in bind_result.imports {
 				if imp.level > 0 { continue } // skip relative
 				if checker.is_virtual_module(&vreg, imp.module_name) { continue }
@@ -1628,36 +1779,47 @@ cmd_check_single :: proc(
 					if top[k] == '.' { top = top[:k]; break }
 				}
 
-				if _, already := parsed_pkgs[imp.module_name]; !already {
-					pkg_file, found := modules.resolve_package_file(imp.module_name, &pkg_cache, arena.allocator)
-					if found {
-						pkg_exports, extract_ok := modules.extract_package_exports(
-							pkg_file, imp.module_name, bridge, &registry, arena.allocator,
-						)
-						if extract_ok {
-							parsed_pkgs[imp.module_name] = pkg_exports
+				if _, already := parsed_pkgs[imp.module_name]; already { continue }
 
-							// Wire into import_types
-							if len(imp.names) == 0 && !imp.is_star {
-								// "import X" → Module_Type
-								local_name := top
-								if sym_id, ok := mod_scope.symbols[local_name]; ok {
-									mod_type_id := checker.register_type(&registry, checker.Module_Type{
-										name    = imp.module_name,
-										exports = pkg_exports.types,
-									})
-									import_types[sym_id] = mod_type_id
-								}
-							} else if !imp.is_star {
-								// "from X import Y" → look up each name
-								for imp_name in imp.names {
-									local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
-									if sym_id, ok := mod_scope.symbols[local]; ok {
-										if type_id, found2 := pkg_exports.types[imp_name.name]; found2 {
-											import_types[sym_id] = type_id
-										}
-									}
-								}
+				// Try stdlib stubs first
+				pkg_file := ""
+				found := false
+				if has_stubs && platform.is_stdlib_module(imp.module_name) &&
+				   imp.module_name != "typing" && imp.module_name != "typing_extensions" {
+					pkg_file, found = platform.resolve_stdlib_stub(imp.module_name, stubs_dir, arena.allocator)
+				}
+
+				// Fall back to package cache
+				if !found {
+					pkg_file, found = modules.resolve_package_file(imp.module_name, &pkg_cache, arena.allocator)
+				}
+
+				if !found { continue }
+
+				pkg_exports, extract_ok := modules.extract_package_exports(
+					pkg_file, imp.module_name, bridge, &registry, arena.allocator,
+				)
+				if !extract_ok { continue }
+				parsed_pkgs[imp.module_name] = pkg_exports
+
+				// Wire into import_types
+				if len(imp.names) == 0 && !imp.is_star {
+					// "import X" → Module_Type
+					local_name := top
+					if sym_id, ok := mod_scope.symbols[local_name]; ok {
+						mod_type_id := checker.register_type(&registry, checker.Module_Type{
+							name    = imp.module_name,
+							exports = pkg_exports.types,
+						})
+						import_types[sym_id] = mod_type_id
+					}
+				} else if !imp.is_star {
+					// "from X import Y" → look up each name
+					for imp_name in imp.names {
+						local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
+						if sym_id, ok := mod_scope.symbols[local]; ok {
+							if type_id, found2 := pkg_exports.types[imp_name.name]; found2 {
+								import_types[sym_id] = type_id
 							}
 						}
 					}
@@ -1673,16 +1835,16 @@ cmd_check_single :: proc(
 
 	// Emit flow diagnostics AFTER checker (checker may suppress F002 for Never-returning calls)
 	for d in flow_result.diagnostics {
-		_emit_diag(d, &error_count, sarif_diags, level, source_lines)
+		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
 	}
 	for d in check_result.diagnostics {
-		_emit_diag(d, &error_count, sarif_diags, level, source_lines)
+		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
 	}
 
 	// Concurrency analysis (reuse already-read source)
 	conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, string(source_data), file, arena.allocator)
 	for d in conc_diagnostics {
-		_emit_diag(d, &error_count, sarif_diags, level, source_lines)
+		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
 	}
 
 	if sarif_diags == nil {
@@ -1709,6 +1871,8 @@ cmd_check_multi :: proc(
 	bridge: ^parser.Bridge,
 	arena: ^core.Analysis_Arena,
 	level: Analysis_Level = .Strict,
+	show_confidence: bool = false,
+	min_confidence: core.Confidence = .Unknown,
 ) -> int {
 	// 1. Init shared registry + builtins
 	registry := checker.init_registry(arena.allocator)
@@ -1745,9 +1909,18 @@ cmd_check_multi :: proc(
 	graph_diagnostics := make([dynamic]core.Diagnostic, 0, 8, arena.allocator)
 	modules.topological_sort(&graph, &graph_diagnostics)
 
+	// Helper: print diagnostic with confidence support
+	_print_d :: proc(d: core.Diagnostic, show_confidence: bool) {
+		if show_confidence {
+			core.diagnostic_print_with_confidence(d)
+		} else {
+			core.diagnostic_print(d)
+		}
+	}
+
 	// Report module graph diagnostics (e.g., cycle warnings)
 	for d in graph_diagnostics {
-		core.diagnostic_print(d)
+		_print_d(d, show_confidence)
 	}
 
 	// 6. Init resolution context + virtual module registry
@@ -1760,6 +1933,15 @@ cmd_check_multi :: proc(
 		res_ctx.bridge = bridge
 		res_ctx.cache = &pkg_cache
 		res_ctx.parsed_packages = make(map[string]modules.Module_Exports, 16, arena.allocator)
+	}
+
+	// 6c. Wire typeshed stdlib stubs if available
+	{
+		stubs_dir, stubs_err := platform.stubs_base_dir(arena.allocator)
+		if stubs_err == nil && platform.stubs_available(arena.allocator) {
+			res_ctx.stubs_dir = stubs_dir
+			res_ctx.parsed_stdlib = make(map[string]modules.Module_Exports, 32, arena.allocator)
+		}
 	}
 
 	// 7. For each module in topo order: resolve → flow → check → export
@@ -1776,7 +1958,7 @@ cmd_check_multi :: proc(
 		for d in info.bind_result.diagnostics {
 			if !should_emit_at_level(d.code, level) { continue }
 			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-			core.diagnostic_print(d)
+			_print_d(d, show_confidence)
 			if d.severity == .Error { error_count += 1 }
 		}
 
@@ -1788,7 +1970,7 @@ cmd_check_multi :: proc(
 		for d in flow_result.diagnostics {
 			if !should_emit_at_level(d.code, level) { continue }
 			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-			core.diagnostic_print(d)
+			_print_d(d, show_confidence)
 			if d.severity == .Error { error_count += 1 }
 		}
 
@@ -1799,7 +1981,7 @@ cmd_check_multi :: proc(
 		for d in check_result.diagnostics {
 			if !should_emit_at_level(d.code, level) { continue }
 			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-			core.diagnostic_print(d)
+			_print_d(d, show_confidence)
 			if d.severity == .Error { error_count += 1 }
 		}
 
@@ -1810,7 +1992,7 @@ cmd_check_multi :: proc(
 		for d in conc_diagnostics {
 			if !should_emit_at_level(d.code, level) { continue }
 			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-			core.diagnostic_print(d)
+			_print_d(d, show_confidence)
 			if d.severity == .Error { error_count += 1 }
 		}
 
@@ -1878,8 +2060,25 @@ cmd_run :: proc(args: []string) {
 
 	if config.script == "" {
 		fmt.eprintln("mimir run: no script specified")
-		fmt.eprintln("Usage: mimir run [--python <ver>] [--check] [--no-deps] <script> [-- args...]")
+		fmt.eprintln("Usage: mimir run [--python <ver>] [--check] [--no-deps] <script|URL> [-- args...]")
 		os.exit(1)
+	}
+
+	// URL execution: download remote script to temp file
+	is_url := strings.has_prefix(config.script, "http://") || strings.has_prefix(config.script, "https://")
+	if is_url {
+		pid := os.get_pid()
+		tmp_path := fmt.tprintf("/tmp/mimir_url_run_%d.py", pid)
+		fmt.printfln("  downloading %s...", config.script)
+		state, _, stderr_data, exec_err := os.process_exec({
+			command = {"curl", "-fsSL", "-o", tmp_path, config.script},
+		}, context.temp_allocator)
+		if exec_err != nil || state.exit_code != 0 {
+			fmt.eprintfln("mimir run: failed to download '%s': %s", config.script, string(stderr_data))
+			os.exit(1)
+		}
+		config.script = tmp_path
+		defer os.remove(tmp_path)
 	}
 
 	// Run with arena allocator
@@ -2316,6 +2515,7 @@ cmd_test :: proc(args: []string) {
 	}
 
 	// Parse flags
+	affected_mode := false
 	i := 0
 	for i < len(args) {
 		arg := args[i]
@@ -2335,9 +2535,12 @@ cmd_test :: proc(args: []string) {
 		} else if arg == "--coverage" || arg == "--cov" {
 			config.coverage = true
 			i += 1
+		} else if arg == "--affected" {
+			affected_mode = true
+			i += 1
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("mimir test: unknown flag '%s'", arg)
-			fmt.eprintln("Usage: mimir test [-k <pattern>] [--check] [--coverage] [-v] [path]")
+			fmt.eprintln("Usage: mimir test [-k <pattern>] [--check] [--coverage] [--affected] [-v] [path]")
 			os.exit(1)
 		} else {
 			config.target = arg
@@ -2352,6 +2555,28 @@ cmd_test :: proc(args: []string) {
 		os.exit(1)
 	}
 	defer core.arena_destroy(&arena)
+
+	// --affected: only run tests affected by current git changes
+	if affected_mode {
+		changed_funcs := _get_changed_functions(arena.allocator)
+		if len(changed_funcs) == 0 {
+			fmt.println("mimir test --affected: no changed functions detected")
+			return
+		}
+		fmt.printfln("mimir test --affected: %d changed function(s) detected", len(changed_funcs))
+		// Build filter from changed function names — join with "|" doesn't exist,
+		// so use first changed function. For multiple, iterate and combine with " or ".
+		// Simplest approach: set -k filter to each changed name joined by " or "
+		filter_buf := make([dynamic]u8, 0, 256, arena.allocator)
+		for func_name, idx in changed_funcs {
+			if idx > 0 {
+				for c in " or " { append(&filter_buf, u8(c)) }
+			}
+			for c in func_name { append(&filter_buf, u8(c)) }
+		}
+		config.filter = string(filter_buf[:])
+		fmt.printfln("  filter: -k '%s'", config.filter)
+	}
 
 	// --check: type-check test files before running
 	if config.check_first {
@@ -2416,6 +2641,7 @@ cmd_lint :: proc(args: []string) {
 
 	// Parse flags
 	target := "."
+	fix_mode := false
 	i := 0
 	for i < len(args) {
 		arg := args[i]
@@ -2433,9 +2659,12 @@ cmd_lint :: proc(args: []string) {
 			}
 			config.select_only = lint.parse_code_list(args[i + 1])
 			i += 2
+		} else if arg == "--fix" {
+			fix_mode = true
+			i += 1
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("mimir lint: unknown flag '%s'", arg)
-			fmt.eprintln("Usage: mimir lint [--ignore <codes>] [--select <codes>] [path]")
+			fmt.eprintln("Usage: mimir lint [--fix] [--ignore <codes>] [--select <codes>] [path]")
 			os.exit(1)
 		} else {
 			target = arg
@@ -2448,6 +2677,7 @@ cmd_lint :: proc(args: []string) {
 	defer pipeline_stop(&p)
 
 	total_warnings := 0
+	total_fixed := 0
 	files_with_warnings := 0
 
 	for file in p.files {
@@ -2462,16 +2692,36 @@ cmd_lint :: proc(args: []string) {
 		if module == nil { continue }
 
 		bind_result := binder.bind(module, file, p.arena.allocator)
+
+		if fix_mode {
+			// Collect and apply fixes
+			fixes := lint.collect_fixes(module, source, file, &config, p.arena.allocator)
+			if len(fixes) > 0 {
+				n := lint.apply_fixes(source, fixes[:], file, p.arena.allocator)
+				total_fixed += n
+				if n > 0 {
+					fmt.printfln("  fixed %d issue(s) in %s", n, file)
+				}
+			}
+		}
+
 		diagnostics := lint.lint_file(module, &bind_result, source, file, &config, p.arena.allocator)
 
 		if len(diagnostics) > 0 {
 			files_with_warnings += 1
 			total_warnings += len(diagnostics)
-			for d in diagnostics { core.diagnostic_print(d) }
+			if !fix_mode {
+				for d in diagnostics { core.diagnostic_print(d) }
+			} else {
+				// In fix mode, only show unfixable diagnostics
+				for d in diagnostics { core.diagnostic_print(d) }
+			}
 		}
 	}
 
-	if total_warnings > 0 {
+	if fix_mode {
+		fmt.printfln("mimir lint --fix: fixed %d issue(s) across %d file(s)", total_fixed, len(p.files))
+	} else if total_warnings > 0 {
 		fmt.printfln("mimir lint: %d warning(s) in %d file(s)", total_warnings, files_with_warnings)
 		os.exit(1)
 	} else {
@@ -2915,6 +3165,11 @@ cmd_lsp :: proc() {
 }
 
 cmd_repl :: proc(args: []string) {
+	gpu_mode := false
+	for arg in args {
+		if arg == "--gpu" { gpu_mode = true }
+	}
+
 	// Start parser bridge
 	bridge, bridge_err := parser.bridge_start()
 	if bridge_err != nil {
@@ -2937,9 +3192,155 @@ cmd_repl :: proc(args: []string) {
 	}
 	defer core.arena_destroy(&arena)
 
-	// Initialize and run REPL
-	state := platform.init_repl(&bridge, arena.allocator)
-	platform.run_repl(&state)
+	if gpu_mode {
+		cmd_repl_gpu(&bridge, &arena)
+	} else {
+		state := platform.init_repl(&bridge, arena.allocator)
+		platform.run_repl(&state)
+	}
+}
+
+// GPU REPL — compile @gpu functions live, show kernel stats.
+cmd_repl_gpu :: proc(bridge: ^parser.Bridge, arena: ^core.Analysis_Arena) {
+	fmt.println("mimir repl --gpu \u2014 GPU kernel development REPL")
+	fmt.println("Define @gpu functions to see kernel compilation stats.")
+	fmt.println("Type 'exit()' or Ctrl+D to quit.")
+	fmt.println()
+
+	accumulated := strings.builder_make(0, 1024, arena.allocator)
+	in_continuation := false
+	continuation := strings.builder_make(0, 256, arena.allocator)
+	open_brackets := 0
+	prev_func_count := 0
+	pid := os.get_pid()
+	temp_path := fmt.aprintf("/tmp/mimir_gpu_repl_%d.py", pid, allocator = arena.allocator)
+
+	reg := checker.init_registry(arena.allocator)
+	type_ctx := gpu.init_gpu_types(&reg, arena.allocator)
+
+	for {
+		if in_continuation {
+			fmt.print("... ")
+		} else {
+			fmt.print("gpu>>> ")
+		}
+
+		line, ok := platform.repl_read_line(arena.allocator)
+		if !ok {
+			fmt.println()
+			break
+		}
+
+		trimmed := strings.trim_space(line)
+		if !in_continuation && (trimmed == "exit()" || trimmed == "quit()") {
+			break
+		}
+
+		if in_continuation {
+			if trimmed == "" && open_brackets <= 0 {
+				in_continuation = false
+				block := strings.clone(strings.to_string(continuation), arena.allocator)
+				strings.builder_reset(&continuation)
+				open_brackets = 0
+
+				strings.write_string(&accumulated, block)
+				strings.write_byte(&accumulated, '\n')
+			} else {
+				strings.write_string(&continuation, line)
+				strings.write_byte(&continuation, '\n')
+				open_brackets += platform.repl_count_brackets(line)
+				continue
+			}
+		} else if platform.repl_needs_continuation(line) {
+			in_continuation = true
+			open_brackets = 0
+			strings.builder_reset(&continuation)
+			strings.write_string(&continuation, line)
+			strings.write_byte(&continuation, '\n')
+			open_brackets += platform.repl_count_brackets(line)
+			continue
+		} else {
+			if trimmed == "" { continue }
+			strings.write_string(&accumulated, line)
+			strings.write_byte(&accumulated, '\n')
+		}
+
+		// Parse accumulated source
+		source := strings.to_string(accumulated)
+		_ = os.write_entire_file(temp_path, transmute([]byte)source)
+
+		module, parse_err := parser.bridge_parse(bridge, temp_path, arena.allocator)
+		if parse_err != nil {
+			#partial switch e in parse_err {
+			case parser.Syntax_Error:
+				fmt.eprintfln("  syntax error: %s", e.msg)
+			case parser.Bridge_Error:
+				fmt.eprintfln("  error: %s", e.msg)
+			}
+			continue
+		}
+
+		bind_result := binder.bind(module, "<gpu-repl>", arena.allocator)
+
+		// Find @gpu functions
+		gpu_config := gpu.default_gpu_config()
+		diagnostics, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, "<gpu-repl>", &gpu_config, arena.allocator)
+
+		// Show diagnostics for new code
+		for d in diagnostics {
+			platform.repl_print_diagnostic(d)
+		}
+
+		// Process new @gpu functions
+		if len(gpu_funcs) > prev_func_count {
+			for fi := prev_func_count; fi < len(gpu_funcs); fi += 1 {
+				func := gpu_funcs[fi]
+
+				// Extract compute graph
+				graph, graph_diags := gpu.extract_graph(func, &bind_result, &type_ctx, "<gpu-repl>", arena.allocator)
+
+				for d in graph_diags {
+					platform.repl_print_diagnostic(d)
+				}
+
+				if len(graph_diags) == 0 {
+					// Show kernel compilation stats
+					elem, mm, red, _ := gpu.count_ops(&graph)
+					fmt.printfln("  \u2713 @gpu %s compiled successfully", func.name)
+					fmt.printfln("    nodes: %d (%d elementwise, %d matmul, %d reduction)",
+						len(graph.nodes), elem, mm, red)
+
+					// Show parameters
+					for arg in func.args.args {
+						if arg.annotation != nil {
+							tid := gpu.resolve_gpu_annotation(arg.annotation, &type_ctx)
+							if tid != checker.INVALID_TYPE {
+								fmt.printfln("    param %s: %s", arg.arg, checker.type_to_string(&reg, tid))
+							}
+						}
+					}
+
+					// Show output type
+					if len(graph.outputs) > 0 {
+						out_node := gpu.get_node(&graph, graph.outputs[0])
+						if out_node != nil && out_node.output_type != checker.INVALID_TYPE {
+							fmt.printfln("    output: %s", checker.type_to_string(&reg, out_node.output_type))
+						}
+					}
+
+					// Generate WGSL preview
+					bindings := gpu.assign_bindings(&graph, arena.allocator)
+					wgsl := gpu.emit_wgsl(&graph, &type_ctx, &bindings, arena.allocator)
+					wgsl_lines := strings.count(wgsl, "\n")
+					fmt.printfln("    WGSL: %d lines generated", wgsl_lines)
+				}
+				fmt.println()
+			}
+			prev_func_count = len(gpu_funcs)
+		}
+	}
+
+	os.remove(temp_path)
 }
 
 cmd_python :: proc(args: []string) {
@@ -3406,6 +3807,27 @@ cmd_import_config :: proc(args: []string) {
 // ==================== stubs command ====================
 
 cmd_stubs :: proc(args: []string) {
+	// Subcommand: mimir stubs fetch — download typeshed stdlib stubs
+	if len(args) > 0 && args[0] == "fetch" {
+		cmd_stubs_fetch()
+		return
+	}
+
+	// Subcommand: mimir stubs status — check if stubs are installed
+	if len(args) > 0 && args[0] == "status" {
+		arena: core.Analysis_Arena
+		core.arena_init(&arena)
+		defer core.arena_destroy(&arena)
+		if platform.stubs_available(arena.allocator) {
+			base, _ := platform.stubs_base_dir(arena.allocator)
+			fmt.printfln("typeshed stdlib stubs: installed at %s/stdlib", base)
+		} else {
+			fmt.println("typeshed stdlib stubs: not installed")
+			fmt.println("  run 'mimir stubs fetch' to download")
+		}
+		return
+	}
+
 	target := ""
 	output_dir := ""
 
@@ -3422,6 +3844,8 @@ cmd_stubs :: proc(args: []string) {
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("mimir stubs: unknown flag '%s'", arg)
 			fmt.eprintln("Usage: mimir stubs <path> [--output-dir <dir>]")
+			fmt.eprintln("       mimir stubs fetch    — download typeshed stdlib stubs")
+			fmt.eprintln("       mimir stubs status   — check if stubs are installed")
 			os.exit(1)
 		} else {
 			target = arg
@@ -3432,6 +3856,8 @@ cmd_stubs :: proc(args: []string) {
 	if target == "" {
 		fmt.eprintln("mimir stubs: no input path specified")
 		fmt.eprintln("Usage: mimir stubs <path> [--output-dir <dir>]")
+		fmt.eprintln("       mimir stubs fetch    — download typeshed stdlib stubs")
+		fmt.eprintln("       mimir stubs status   — check if stubs are installed")
 		os.exit(1)
 	}
 
@@ -3470,6 +3896,26 @@ cmd_stubs :: proc(args: []string) {
 	}
 
 	fmt.printfln("mimir stubs: generated %d stub file(s)", generated)
+}
+
+// ==================== stubs fetch command ====================
+
+cmd_stubs_fetch :: proc() {
+	arena: core.Analysis_Arena
+	core.arena_init(&arena)
+	defer core.arena_destroy(&arena)
+
+	if platform.stubs_available(arena.allocator) {
+		base, _ := platform.stubs_base_dir(arena.allocator)
+		fmt.printfln("typeshed stdlib stubs already installed at %s/stdlib", base)
+		fmt.println("  re-downloading to update...")
+	}
+
+	err := platform.fetch_typeshed(arena.allocator)
+	if err != nil {
+		fmt.eprintfln("mimir stubs fetch: %s", platform.error_msg(err))
+		os.exit(1)
+	}
 }
 
 // ==================== generate-contracts command ====================
@@ -3667,18 +4113,28 @@ cmd_gpu :: proc(args: []string) {
 
 		bind_result := binder.bind(module, file, p.arena.allocator)
 
-		// GPU validation
+		// GPU validation — single-kernel rules (GPU001-GPU011)
 		diagnostics, gpu_funcs := gpu.validate_file(module, &bind_result, &type_ctx, file, &config, p.arena.allocator)
+
+		// Multi-GPU analysis — host-level rules (GPU012-GPU013)
+		multigpu_diags := make([dynamic]core.Diagnostic, 0, 4, p.arena.allocator)
+		gpu.analyze_multigpu(module, &bind_result, file, &multigpu_diags, p.arena.allocator)
 
 		if len(gpu_funcs) > 0 {
 			fmt.printfln("GPU analysis: %s", file)
 			fmt.println()
 		}
 
-		// Print diagnostics
+		// Print diagnostics (single-kernel + multi-GPU)
 		if len(diagnostics) > 0 {
 			total_errors += len(diagnostics)
 			for d in diagnostics {
+				core.diagnostic_print(d)
+			}
+		}
+		if len(multigpu_diags) > 0 {
+			total_errors += len(multigpu_diags)
+			for d in multigpu_diags {
 				core.diagnostic_print(d)
 			}
 		}
@@ -3987,6 +4443,73 @@ emit_gpu_output :: proc(
 		}
 		fmt.println()
 	}
+}
+
+// ==================== test --affected helper ====================
+
+// Get function names from changed Python files via git diff.
+// Uses git diff to find changed .py files, then scans diff hunks
+// for `def function_name` patterns to identify changed functions.
+_get_changed_functions :: proc(allocator: mem.Allocator) -> []string {
+	// Run git diff --unified=0 to get changed lines
+	state, stdout, _, exec_err := os.process_exec({
+		command = {"git", "diff", "--unified=0", "--diff-filter=ACMR", "HEAD"},
+	}, allocator)
+	if exec_err != nil || state.exit_code != 0 {
+		// Try unstaged changes
+		state2, stdout2, _, exec_err2 := os.process_exec({
+			command = {"git", "diff", "--unified=0", "--diff-filter=ACMR"},
+		}, allocator)
+		if exec_err2 != nil || state2.exit_code != 0 { return nil }
+		stdout = stdout2
+	}
+
+	if len(stdout) == 0 { return nil }
+
+	// Parse diff output for `def ` lines in added hunks
+	funcs := make([dynamic]string, 0, 16, allocator)
+	seen := make(map[string]bool, 16, allocator)
+	in_py_file := false
+	in_add_hunk := false
+
+	diff_lines := strings.split(string(stdout), "\n", allocator)
+	for line in diff_lines {
+		if strings.has_prefix(line, "diff --git") {
+			in_py_file = strings.has_suffix(line, ".py")
+			in_add_hunk = false
+		} else if strings.has_prefix(line, "@@") {
+			in_add_hunk = true
+		} else if in_py_file && in_add_hunk && strings.has_prefix(line, "+") {
+			// Added line — check for function definition
+			content := strings.trim_left_space(line[1:])
+			if strings.has_prefix(content, "def ") {
+				// Extract function name: "def func_name(..." → "func_name"
+				rest := content[4:]
+				paren_idx := strings.index(rest, "(")
+				if paren_idx > 0 {
+					func_name := strings.trim_space(rest[:paren_idx])
+					if len(func_name) > 0 && func_name not_in seen {
+						seen[func_name] = true
+						append(&funcs, func_name)
+					}
+				}
+			} else if strings.has_prefix(content, "async def ") {
+				rest := content[10:]
+				paren_idx := strings.index(rest, "(")
+				if paren_idx > 0 {
+					func_name := strings.trim_space(rest[:paren_idx])
+					if len(func_name) > 0 && func_name not_in seen {
+						seen[func_name] = true
+						append(&funcs, func_name)
+					}
+				}
+			}
+		} else if !strings.has_prefix(line, "+") && !strings.has_prefix(line, "-") {
+			in_add_hunk = false
+		}
+	}
+
+	return funcs[:]
 }
 
 // ==================== bench command ====================

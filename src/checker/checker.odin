@@ -219,38 +219,48 @@ check :: proc(
 		analyze_api_contracts(module, discovered_routes, file_path, &result.diagnostics, allocator)
 	}
 
-	// JSON analysis pass — validate JSON serializability
-	analyze_json(module, bind_result, &result.registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+	// ==================== Shared Analysis Context ====================
+	// Built once, shared across all post-inference passes.
+	// Eliminates 15+ duplicate import detection loops.
+	actx := build_analysis_pass_context(
+		module, bind_result, file_path, allocator,
+		&result.expr_types, &result.registry,
+	)
 
-	// DB analysis pass — detect unsafe SQL construction in mimir.db calls
-	analyze_db(module, bind_result, &result.registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+	// All passes below use shared actx for import detection
 
-	// Crypt analysis pass — detect cryptographic misuse in mimir.crypt calls
-	analyze_crypt(module, bind_result, &result.registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+	// Batched AST walk: json + db + crypt in one traversal
+	{
+		batch_visitors := make([dynamic]core.AST_Visitor, 0, 3, allocator)
+		json_ctx: JSON_Check_Context
+		db_ctx: DB_Check_Context
+		crypt_ctx: Crypt_Check_Context
 
-	// Regex analysis pass — validate group references
-	analyze_regex(module, bind_result, file_path, &result.diagnostics, allocator)
+		if v, ok := make_json_visitor(&actx, &result.diagnostics, &json_ctx); ok {
+			append(&batch_visitors, v)
+		}
+		if v, ok := make_db_visitor(&actx, &virtual_imports, &result.diagnostics, &db_ctx); ok {
+			append(&batch_visitors, v)
+		}
+		if v, ok := make_crypt_visitor(&actx, &result.diagnostics, &crypt_ctx); ok {
+			append(&batch_visitors, v)
+		}
+		if len(batch_visitors) > 0 {
+			core.walk_all_stmts_multi(batch_visitors[:], module.body)
+		}
+	}
 
-	// Time & encoding analysis pass — datetime mixing, bytes/str confusion
-	analyze_time_encoding(module, bind_result, &result.expr_types, file_path, &result.diagnostics, allocator)
+	analyze_regex(&actx, &result.diagnostics)
+	analyze_time_encoding(&actx, &result.diagnostics)
+	analyze_compat(&actx, &result.diagnostics)
+	analyze_serialization(&actx, &result.diagnostics)
+	analyze_ml(&actx, &result.diagnostics)
+	analyze_typestate(module, bind_result, file_path, &result.diagnostics, allocator) // not yet migrated
+	analyze_crossproc(&actx, &result.diagnostics)
+	analyze_runtime_model(&actx, &result.diagnostics)
 
-	// Compat + dependency analysis — Python version checks, unused/missing deps
-	analyze_compat(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// Serialization safety — tainted pickle, shelve, __dict__ dumps
-	analyze_serialization(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// ML pipeline analysis — data leakage, pipeline ordering
-	analyze_ml(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// §4.2: Context manager typestate — use-after-close
-	analyze_typestate(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// §22: Cross-process analysis — shared mutable state in multiprocessing
-	analyze_crossproc(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// §21: Runtime model analysis — reference cycles, allocation hotspots
-	analyze_runtime_model(module, bind_result, file_path, &result.diagnostics, allocator)
+	// §12: DataFrame unnecessary copy detection
+	check_unnecessary_copy(module.body, file_path, &result.diagnostics)
 
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
@@ -494,38 +504,46 @@ check_with_imports :: proc(
 		analyze_api_contracts(module, discovered_routes, file_path, &result.diagnostics, allocator)
 	}
 
-	// JSON analysis pass — validate JSON serializability
-	analyze_json(module, bind_result, registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+	// ==================== Shared Analysis Context (multi-module) ====================
+	actx_multi := build_analysis_pass_context(
+		module, bind_result, file_path, allocator,
+		&result.expr_types, registry,
+	)
 
-	// DB analysis pass — detect unsafe SQL construction in mimir.db calls
-	analyze_db(module, bind_result, registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+	// All passes below use shared actx_multi for import detection
 
-	// Crypt analysis pass — detect cryptographic misuse in mimir.crypt calls
-	analyze_crypt(module, bind_result, registry, &virtual_imports, &result.expr_types, file_path, &result.diagnostics, allocator)
+	// Batched AST walk: json + db + crypt in one traversal
+	{
+		batch_visitors_m := make([dynamic]core.AST_Visitor, 0, 3, allocator)
+		json_ctx_m: JSON_Check_Context
+		db_ctx_m: DB_Check_Context
+		crypt_ctx_m: Crypt_Check_Context
 
-	// Regex analysis pass — validate group references
-	analyze_regex(module, bind_result, file_path, &result.diagnostics, allocator)
+		if v, ok := make_json_visitor(&actx_multi, &result.diagnostics, &json_ctx_m); ok {
+			append(&batch_visitors_m, v)
+		}
+		if v, ok := make_db_visitor(&actx_multi, &virtual_imports, &result.diagnostics, &db_ctx_m); ok {
+			append(&batch_visitors_m, v)
+		}
+		if v, ok := make_crypt_visitor(&actx_multi, &result.diagnostics, &crypt_ctx_m); ok {
+			append(&batch_visitors_m, v)
+		}
+		if len(batch_visitors_m) > 0 {
+			core.walk_all_stmts_multi(batch_visitors_m[:], module.body)
+		}
+	}
 
-	// Time & encoding analysis pass — datetime mixing, bytes/str confusion
-	analyze_time_encoding(module, bind_result, &result.expr_types, file_path, &result.diagnostics, allocator)
+	analyze_regex(&actx_multi, &result.diagnostics)
+	analyze_time_encoding(&actx_multi, &result.diagnostics)
+	analyze_compat(&actx_multi, &result.diagnostics)
+	analyze_serialization(&actx_multi, &result.diagnostics)
+	analyze_ml(&actx_multi, &result.diagnostics)
+	analyze_typestate(module, bind_result, file_path, &result.diagnostics, allocator) // not yet migrated
+	analyze_crossproc(&actx_multi, &result.diagnostics)
+	analyze_runtime_model(&actx_multi, &result.diagnostics)
 
-	// Compat + dependency analysis — Python version checks, unused/missing deps
-	analyze_compat(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// Serialization safety — tainted pickle, shelve, __dict__ dumps
-	analyze_serialization(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// ML pipeline analysis — data leakage, pipeline ordering
-	analyze_ml(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// §4.2: Context manager typestate — use-after-close
-	analyze_typestate(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// §22: Cross-process analysis — shared mutable state in multiprocessing
-	analyze_crossproc(module, bind_result, file_path, &result.diagnostics, allocator)
-
-	// §21: Runtime model analysis — reference cycles, allocation hotspots
-	analyze_runtime_model(module, bind_result, file_path, &result.diagnostics, allocator)
+	// §12: DataFrame unnecessary copy detection
+	check_unnecessary_copy(module.body, file_path, &result.diagnostics)
 
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
@@ -576,20 +594,33 @@ check_scope :: proc(
 		}
 	}
 
-	// Determine enclosing class for super() support
+	// Determine enclosing class for super() support and self type resolution
 	current_class := INVALID_TYPE
 	if scope != nil && scope.kind == .Function {
 		parent := binder.result_get_scope(bind_result, scope.parent_id)
 		if parent != nil && parent.kind == .Class {
-			for _, ct_id in reg.class_types {
-				ct := get_type(reg, ct_id)
-				#partial switch cls_info in ct.info {
-				case Class_Type:
-					if cls_info.scope_id == parent.id {
-						current_class = ct_id
-					}
+			// Primary: look up the class symbol by name in the module scope,
+			// then use class_types[sym_id] for reliable resolution.
+			// (scope_id matching is unreliable when stubs are loaded — scope_ids
+			// from typeshed and user code can collide)
+			class_sym := find_symbol_for_name(parent.name, parent.loc, bind_result)
+			if class_sym != binder.INVALID_SYMBOL {
+				if ct_id, found := reg.class_types[class_sym]; found {
+					current_class = ct_id
 				}
-				if current_class != INVALID_TYPE { break }
+			}
+			// Fallback: match by scope_id (pre-stub behavior)
+			if current_class == INVALID_TYPE {
+				for _, ct_id in reg.class_types {
+					ct := get_type(reg, ct_id)
+					#partial switch cls_info in ct.info {
+					case Class_Type:
+						if cls_info.scope_id == parent.id {
+							current_class = ct_id
+						}
+					}
+					if current_class != INVALID_TYPE { break }
+				}
 			}
 		}
 	}
@@ -1144,8 +1175,8 @@ check_stmt :: proc(
 			ret_type := infer_expr(s.value, ctx, declared_return)
 			append(return_types, ret_type)
 
-			if declared_return != TYPE_UNKNOWN && declared_return != TYPE_ANY &&
-			   ret_type != TYPE_UNKNOWN && ret_type != TYPE_ANY {
+			if declared_return != TYPE_UNKNOWN && !_is_any_type(declared_return, ctx.reg) &&
+			   ret_type != TYPE_UNKNOWN && !_is_any_type(ret_type, ctx.reg) {
 				if !is_assignable(ctx.reg, ret_type, declared_return) {
 					emit_diagnostic(ctx, s.loc, "T003", .Error,
 						"Incompatible return value type",
@@ -1290,6 +1321,20 @@ merge_envs :: proc(
 				env.types[sym_id] = type_id
 			}
 		}
+		// Merge attribute narrowing types
+		for key, type_id in pred_env.attr_types {
+			if existing, ok := env.attr_types[key]; ok {
+				if existing != type_id {
+					members := [2]Type_ID{existing, type_id}
+					env.attr_types[key] = make_union_type(reg, members[:])
+				}
+			} else {
+				if env.attr_types == nil {
+					env.attr_types = make(map[u64]Type_ID, 4, reg.allocator)
+				}
+				env.attr_types[key] = type_id
+			}
+		}
 		pred_count += 1
 	}
 
@@ -1307,6 +1352,12 @@ apply_guards :: proc(
 	builtins: ^Builtin_Names,
 ) {
 	for &guard in guards {
+		// Lazily init attr_types when an attribute guard needs it
+		if len(guard.attr_name) > 0 && env.attr_types == nil {
+			if guard.true_block == block_id || guard.false_block == block_id {
+				env.attr_types = make(map[u64]Type_ID, 4, reg.allocator)
+			}
+		}
 		if guard.true_block == block_id {
 			apply_positive_guard(env, &guard, reg, bind_result, builtins)
 		} else if guard.false_block == block_id {
@@ -1322,25 +1373,55 @@ apply_positive_guard :: proc(
 	bind_result: ^binder.Bind_Result,
 	builtins: ^Builtin_Names,
 ) {
+	is_attr := len(guard.attr_name) > 0
 	#partial switch guard.kind {
 	case .Is_Instance, .Is_Not_Instance, .Type_Is, .Type_Is_Not:
 		// Narrow to the guard type. Inverted kinds (Is_Not_Instance) come from
 		// unary `not` with block swap — double inversion cancels, same semantics.
 		narrow_type := resolve_isinstance_type(guard.type_expr, reg, bind_result, builtins)
 		if narrow_type != TYPE_UNKNOWN {
-			env.types[guard.symbol_id] = narrow_type
+			if is_attr {
+				key := attr_narrow_key(guard.symbol_id, guard.attr_name)
+				env.attr_types[key] = narrow_type
+			} else {
+				env.types[guard.symbol_id] = narrow_type
+			}
 		}
 	case .Is_None, .Is_Not_None:
-		env.types[guard.symbol_id] = TYPE_NONE
-	case .Is_Truthy, .Is_Falsy:
-		current, ok := env.types[guard.symbol_id]
-		if ok {
-			env.types[guard.symbol_id] = remove_none(reg, current)
+		if is_attr {
+			key := attr_narrow_key(guard.symbol_id, guard.attr_name)
+			env.attr_types[key] = TYPE_NONE
+		} else {
+			env.types[guard.symbol_id] = TYPE_NONE
 		}
-	case .Type_Guard:
-		// TypeGuard function call — look up target type from registry
+	case .Is_Truthy, .Is_Falsy:
+		if is_attr {
+			key := attr_narrow_key(guard.symbol_id, guard.attr_name)
+			current, ok := env.attr_types[key]
+			if !ok {
+				// Get static attribute type from object
+				obj_type, obj_ok := env.types[guard.symbol_id]
+				if obj_ok {
+					current = lookup_attribute(obj_type, guard.attr_name, reg)
+					ok = current != TYPE_UNKNOWN
+				}
+			}
+			if ok {
+				env.attr_types[key] = remove_none(reg, current)
+			}
+		} else {
+			current, ok := env.types[guard.symbol_id]
+			if ok {
+				env.types[guard.symbol_id] = remove_none(reg, current)
+			}
+		}
+	case .Type_Guard, .Type_Is_Guard:
+		// TypeGuard/TypeIs function call — look up target type from registry
 		func_sym := binder.Symbol_ID(guard.resolved_type)
 		if target, has_target := reg.typeguard_targets[func_sym]; has_target {
+			env.types[guard.symbol_id] = target
+		}
+		if target, has_target := reg.typeis_targets[func_sym]; has_target {
 			env.types[guard.symbol_id] = target
 		}
 	}
@@ -1353,24 +1434,63 @@ apply_negative_guard :: proc(
 	bind_result: ^binder.Bind_Result,
 	builtins: ^Builtin_Names,
 ) {
+	is_attr := len(guard.attr_name) > 0
 	#partial switch guard.kind {
 	case .Is_Instance, .Is_Not_Instance, .Type_Is, .Type_Is_Not:
 		// Subtract the guard type. Inverted kinds come from unary `not`
 		// with block swap — double inversion cancels, same semantics.
 		narrow_type := resolve_isinstance_type(guard.type_expr, reg, bind_result, builtins)
-		current, ok := env.types[guard.symbol_id]
-		if ok && narrow_type != TYPE_UNKNOWN {
-			env.types[guard.symbol_id] = subtract_type(reg, current, narrow_type)
+		if is_attr {
+			key := attr_narrow_key(guard.symbol_id, guard.attr_name)
+			current, ok := env.attr_types[key]
+			if !ok {
+				obj_type, obj_ok := env.types[guard.symbol_id]
+				if obj_ok {
+					current = lookup_attribute(obj_type, guard.attr_name, reg)
+					ok = current != TYPE_UNKNOWN
+				}
+			}
+			if ok && narrow_type != TYPE_UNKNOWN {
+				env.attr_types[key] = subtract_type(reg, current, narrow_type)
+			}
+		} else {
+			current, ok := env.types[guard.symbol_id]
+			if ok && narrow_type != TYPE_UNKNOWN {
+				env.types[guard.symbol_id] = subtract_type(reg, current, narrow_type)
+			}
 		}
 	case .Is_None, .Is_Not_None:
-		current, ok := env.types[guard.symbol_id]
-		if ok {
-			env.types[guard.symbol_id] = remove_none(reg, current)
+		if is_attr {
+			key := attr_narrow_key(guard.symbol_id, guard.attr_name)
+			// Get static attribute type and remove None
+			obj_type, obj_ok := env.types[guard.symbol_id]
+			if obj_ok {
+				attr_type := lookup_attribute(obj_type, guard.attr_name, reg)
+				if attr_type != TYPE_UNKNOWN {
+					env.attr_types[key] = remove_none(reg, attr_type)
+				}
+			}
+		} else {
+			current, ok := env.types[guard.symbol_id]
+			if ok {
+				env.types[guard.symbol_id] = remove_none(reg, current)
+			}
 		}
 	case .Is_Truthy, .Is_Falsy:
 		// In false branch of truthiness — could be None/False/0/empty
 		// Conservative: don't narrow
 		break
+	case .Type_Guard, .Type_Is_Guard:
+		// TypeGuard: no narrowing in false branch (by spec)
+		// TypeIs (PEP 742): subtract the target type in false branch
+		func_sym := binder.Symbol_ID(guard.resolved_type)
+		if target, has_target := reg.typeis_targets[func_sym]; has_target {
+			current, ok := env.types[guard.symbol_id]
+			if ok && target != TYPE_UNKNOWN {
+				env.types[guard.symbol_id] = subtract_type(reg, current, target)
+			}
+		}
+		// TypeGuard functions (not in typeis_targets): no narrowing — falls through
 	}
 }
 
@@ -1509,19 +1629,22 @@ build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 	ctx.reg.current_resolve_class = saved_resolve_class
 
-	// Detect TypeGuard[T] return annotation → store target for guard narrowing
+	// Detect TypeGuard[T] / TypeIs[T] return annotation → store target for guard narrowing
 	if fd.returns != nil {
 		if sub, sub_ok := fd.returns.(^parser.Subscript_Expr); sub_ok {
 			base_name := get_annotation_name(sub.value)
 			if orig, orig_ok := ctx.bind_result.typing_names[base_name]; orig_ok {
-				if orig == "TypeGuard" {
+				if orig == "TypeGuard" || orig == "TypeIs" {
 					target := resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 					if target != TYPE_UNKNOWN {
-						// Find function symbol to key the registry entry
 						scope := binder.result_get_scope(ctx.bind_result, ctx.scope_id)
 						if scope != nil {
 							if func_sym, has_sym := scope.symbols[fd.name]; has_sym {
-								ctx.reg.typeguard_targets[func_sym] = target
+								if orig == "TypeIs" {
+									ctx.reg.typeis_targets[func_sym] = target
+								} else {
+									ctx.reg.typeguard_targets[func_sym] = target
+								}
 							}
 						}
 					}

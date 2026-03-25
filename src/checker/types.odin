@@ -57,6 +57,7 @@ Type_Info :: union {
 	Tensor_Type,
 	DataFrame_Type,
 	Series_Type,
+	TypeVarTuple_Type,
 }
 
 Primitive_Kind :: enum u8 {
@@ -122,6 +123,13 @@ TypeVar_Type :: struct {
 	constraints: []Type_ID,
 }
 
+// PEP 646: TypeVarTuple — variadic type variable.
+// Ts = TypeVarTuple('Ts')
+// Used in Tuple[int, *Ts] and Generic[*Ts] for variadic generics.
+TypeVarTuple_Type :: struct {
+	name: string,
+}
+
 TypedDict_Type :: struct {
 	name:            string,
 	fields:          map[string]Type_ID,
@@ -153,7 +161,20 @@ Series_Type :: struct {
 // ==================== Type Environment ====================
 
 Type_Env :: struct {
-	types: map[binder.Symbol_ID]Type_ID,
+	types:      map[binder.Symbol_ID]Type_ID,
+	attr_types: map[u64]Type_ID,  // Narrowed attribute types: key = attr_narrow_key(sym_id, attr)
+}
+
+// Compute hash key for attribute narrowing: packs (symbol_id, attr_name_hash) into u64.
+// Uses FNV-1a for better bit distribution than djb2. Collision probability for
+// different attr names on the same symbol is ~1/2^32 — acceptable for narrowing.
+attr_narrow_key :: proc(sym: binder.Symbol_ID, attr: string) -> u64 {
+	h: u64 = 14695981039346656037 // FNV offset basis
+	for i in 0..<len(attr) {
+		h ~= u64(attr[i])
+		h *= 1099511628211 // FNV prime
+	}
+	return (u64(sym) << 32) | (h & 0xFFFFFFFF)
 }
 
 // ==================== Type Registry ====================
@@ -197,6 +218,7 @@ Type_Registry :: struct {
 	actor_ref_class:         Type_ID,  // ActorRef Class_Type (for specialization)
 	actor_ref_cache:         map[[2]Type_ID]Type_ID,  // [msg_type, ret_type] → specialized ActorRef Instance_Type
 	typeguard_targets:       map[binder.Symbol_ID]Type_ID,  // func sym → TypeGuard[T] target type
+	typeis_targets:          map[binder.Symbol_ID]Type_ID,  // func sym → TypeIs[T] target type (PEP 742)
 	current_resolve_class:   Type_ID,  // Set during class scope processing for Self resolution
 	allocator:      mem.Allocator,
 }
@@ -407,10 +429,18 @@ make_series_type :: proc(reg: ^Type_Registry, element: Type_ID, name: string = "
 
 is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> bool {
 	if source == target { return true }
+	if source == target { return true } // same type
 	if target == TYPE_ANY || target == TYPE_UNKNOWN { return true }
 	if source == TYPE_ANY || source == TYPE_UNKNOWN { return true }
 	if source == TYPE_NEVER { return true } // bottom type
 	if target == TYPE_OBJECT { return true } // top type
+
+	// Handle Any_Type variants that aren't the canonical TYPE_ANY
+	// (can happen when typeshed stubs register their own Any types)
+	src_type := get_type(reg, source)
+	tgt_type := get_type(reg, target)
+	if _, src_any := src_type.info.(Any_Type); src_any { return true }
+	if _, tgt_any := tgt_type.info.(Any_Type); tgt_any { return true }
 
 	// bool <: int
 	if source == TYPE_BOOL && target == TYPE_INT { return true }
@@ -419,12 +449,11 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	// bool <: float (transitive)
 	if source == TYPE_BOOL && target == TYPE_FLOAT { return true }
 
-	src_type := get_type(reg, source)
-	tgt_type := get_type(reg, target)
-
-	// TypeVar types are permissive (resolved via substitution at call sites)
+	// TypeVar/TypeVarTuple types are permissive (resolved via substitution at call sites)
 	if _, src_is_tv := src_type.info.(TypeVar_Type); src_is_tv { return true }
 	if _, tgt_is_tv := tgt_type.info.(TypeVar_Type); tgt_is_tv { return true }
+	if _, src_is_tvt := src_type.info.(TypeVarTuple_Type); src_is_tvt { return true }
+	if _, tgt_is_tvt := tgt_type.info.(TypeVarTuple_Type); tgt_is_tvt { return true }
 
 	// Literal <: base type, Literal <: matching Literal
 	#partial switch src_lit in src_type.info {
@@ -479,6 +508,18 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		case Dict_Type:
 			return (is_assignable(reg, src.key, tgt.key) && is_assignable(reg, tgt.key, src.key)) &&
 			       (is_assignable(reg, src.value, tgt.value) && is_assignable(reg, tgt.value, src.value))
+		case TypedDict_Type:
+			// Dict[str, V] → TypedDict: allow when dict has string keys
+			if src.key == TYPE_STR || src.key == TYPE_ANY {
+				return true
+			}
+		case Instance_Type, Class_Type:
+			// Dict[str, V] → Instance/Class: allow when dict has string keys
+			// Covers TypedDict class syntax (pre-registered as Class_Type before
+			// being converted to TypedDict_Type during check_scope)
+			if src.key == TYPE_STR || src.key == TYPE_ANY {
+				return true
+			}
 		}
 	}
 
@@ -496,6 +537,41 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	case Tuple_Type:
 		#partial switch tgt in tgt_type.info {
 		case Tuple_Type:
+			// Check if target has a TypeVarTuple element (variadic)
+			has_tvt := false
+			for te in tgt.elements {
+				tt := get_type(reg, te)
+				if _, is_tvt := tt.info.(TypeVarTuple_Type); is_tvt {
+					has_tvt = true
+					break
+				}
+			}
+			if has_tvt {
+				// Variadic tuple: target has *Ts — source can be any length >= fixed elements
+				fixed_count := 0
+				for te in tgt.elements {
+					tt := get_type(reg, te)
+					if _, is_tvt := tt.info.(TypeVarTuple_Type); !is_tvt {
+						fixed_count += 1
+					}
+				}
+				if len(src.elements) < fixed_count { return false }
+				// Check fixed elements match (before and after *Ts)
+				si := 0
+				for te in tgt.elements {
+					tt := get_type(reg, te)
+					if _, is_tvt := tt.info.(TypeVarTuple_Type); is_tvt {
+						// Skip variadic elements in source
+						skip := len(src.elements) - fixed_count
+						si += skip
+					} else {
+						if si >= len(src.elements) { return false }
+						if !is_assignable(reg, src.elements[si], te) { return false }
+						si += 1
+					}
+				}
+				return true
+			}
 			if len(src.elements) != len(tgt.elements) { return false }
 			for e, i in src.elements {
 				if !is_assignable(reg, e, tgt.elements[i]) { return false }
@@ -525,6 +601,14 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		case Instance_Type:
 			return is_class_subtype(reg, src.class_type, tgt.class_type)
 		}
+		// NewType → primitive base: Instance_Type(NewType_class) assignable to its primitive base
+		// is_class_subtype can't traverse primitive bases, so check directly
+		cls := get_type(reg, src.class_type)
+		if ci, ci_ok := cls.info.(Class_Type); ci_ok {
+			for base in ci.bases {
+				if base == target { return true }
+			}
+		}
 	}
 
 	// Class object subtyping: type[Dog] <: type[Animal] when Dog inherits Animal
@@ -536,17 +620,44 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		}
 	}
 
-	// TypedDict subtyping: source TypedDict must have all target TypedDict fields
+	// Instance/Class → TypedDict: compatible if same name (TypedDict class defined via class syntax)
+	#partial switch tgt in tgt_type.info {
+	case TypedDict_Type:
+		#partial switch src_inst in src_type.info {
+		case Instance_Type:
+			cls := get_type(reg, src_inst.class_type)
+			#partial switch ci in cls.info {
+			case Class_Type:
+				if ci.name == tgt.name { return true }
+			}
+		case Class_Type:
+			if src_inst.name == tgt.name { return true }
+		}
+	}
+
+	// TypedDict subtyping
 	#partial switch src in src_type.info {
 	case TypedDict_Type:
 		#partial switch tgt in tgt_type.info {
 		case TypedDict_Type:
+			// Same-name TypedDicts from different resolution contexts are compatible
+			if src.name == tgt.name && len(src.name) > 0 { return true }
 			for name, tgt_field_type in tgt.fields {
 				src_field_type, ok := src.fields[name]
 				if !ok { return false }
 				if !is_assignable(reg, src_field_type, tgt_field_type) { return false }
 			}
 			return true
+		case Instance_Type:
+			// TypedDict → Instance_Type(Class with same name): compatible
+			cls := get_type(reg, tgt.class_type)
+			#partial switch ci in cls.info {
+			case Class_Type:
+				if ci.name == src.name { return true }
+			}
+		case Class_Type:
+			// TypedDict → Class with same name: compatible
+			if tgt.name == src.name { return true }
 		case Dict_Type:
 			// TypedDict is a dict subtype
 			if tgt.key != TYPE_STR && tgt.key != TYPE_ANY && tgt.key != TYPE_UNKNOWN { return false }
@@ -788,6 +899,8 @@ type_to_string :: proc(reg: ^Type_Registry, id: Type_ID) -> string {
 		return "<module>"
 	case TypeVar_Type:
 		return info.name
+	case TypeVarTuple_Type:
+		return fmt.aprintf("*%s", info.name, allocator = reg.allocator)
 	case TypedDict_Type:
 		return fmt.aprintf("TypedDict('%s')", info.name, allocator = reg.allocator)
 	case Protocol_Type:
@@ -835,14 +948,18 @@ type_to_string :: proc(reg: ^Type_Registry, id: Type_ID) -> string {
 
 is_typevar :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
 	typ := get_type(reg, t)
-	_, ok := typ.info.(TypeVar_Type)
-	return ok
+	#partial switch _ in typ.info {
+	case TypeVar_Type:      return true
+	case TypeVarTuple_Type: return true
+	}
+	return false
 }
 
 contains_typevar :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
 	typ := get_type(reg, t)
 	#partial switch info in typ.info {
-	case TypeVar_Type: return true
+	case TypeVar_Type:      return true
+	case TypeVarTuple_Type: return true
 	case List_Type:    return contains_typevar(reg, info.element)
 	case Dict_Type:    return contains_typevar(reg, info.key) || contains_typevar(reg, info.value)
 	case Set_Type:     return contains_typevar(reg, info.element)
@@ -893,6 +1010,14 @@ match_type :: proc(reg: ^Type_Registry, pattern: Type_ID, concrete: Type_ID, sub
 		}
 		subs[pattern] = concrete
 		return true
+	case TypeVarTuple_Type:
+		// TypeVarTuple matches any type (variadic placeholder)
+		// In tuple context it captures multiple elements; in isolation, treat like TypeVar
+		if existing, ok := subs[pattern]; ok {
+			return existing == concrete || is_assignable(reg, concrete, existing)
+		}
+		subs[pattern] = concrete
+		return true
 	}
 
 	#partial switch p_info in pt.info {
@@ -922,6 +1047,45 @@ match_type :: proc(reg: ^Type_Registry, pattern: Type_ID, concrete: Type_ID, sub
 		ct := get_type(reg, concrete)
 		#partial switch c_info in ct.info {
 		case Tuple_Type:
+			// Check for TypeVarTuple in pattern
+			tvt_idx := -1
+			for pe, pi in p_info.elements {
+				pt := get_type(reg, pe)
+				if _, is_tvt := pt.info.(TypeVarTuple_Type); is_tvt {
+					tvt_idx = pi
+					break
+				}
+			}
+			if tvt_idx >= 0 {
+				// Variadic match: elements before *Ts, then *Ts captures middle, then after
+				fixed_before := tvt_idx
+				fixed_after := len(p_info.elements) - tvt_idx - 1
+				if len(c_info.elements) < fixed_before + fixed_after { return false }
+				// Match elements before *Ts
+				for i := 0; i < fixed_before; i += 1 {
+					if !match_type(reg, p_info.elements[i], c_info.elements[i], subs) { return false }
+				}
+				// Match elements after *Ts
+				for i := 0; i < fixed_after; i += 1 {
+					pi := len(p_info.elements) - fixed_after + i
+					ci := len(c_info.elements) - fixed_after + i
+					if !match_type(reg, p_info.elements[pi], c_info.elements[ci], subs) { return false }
+				}
+				// Bind *Ts to the captured middle elements as a Tuple
+				tvt_id := p_info.elements[tvt_idx]
+				captured_start := fixed_before
+				captured_end := len(c_info.elements) - fixed_after
+				if captured_end > captured_start {
+					captured := make([]Type_ID, captured_end - captured_start, reg.allocator)
+					for i := captured_start; i < captured_end; i += 1 {
+						captured[i - captured_start] = c_info.elements[i]
+					}
+					subs[tvt_id] = make_tuple_type(reg, captured, false)
+				} else {
+					subs[tvt_id] = make_tuple_type(reg, {}, false)
+				}
+				return true
+			}
 			if len(p_info.elements) != len(c_info.elements) { return false }
 			for e, i in p_info.elements {
 				if !match_type(reg, e, c_info.elements[i], subs) { return false }
@@ -946,6 +1110,8 @@ substitute_type :: proc(reg: ^Type_Registry, type_id: Type_ID, subs: map[Type_ID
 	#partial switch info in t.info {
 	case TypeVar_Type:
 		return TYPE_ANY // Unresolved TypeVar fallback
+	case TypeVarTuple_Type:
+		return TYPE_ANY // Unresolved TypeVarTuple fallback
 	case List_Type:
 		new_elem := substitute_type(reg, info.element, subs)
 		if new_elem == info.element { return type_id }

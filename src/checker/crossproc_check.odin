@@ -20,33 +20,29 @@ import core   "mimir:core"
 PROC_TARGET_METHODS :: [?]string{"map", "apply", "apply_async", "starmap", "imap", "map_async"}
 
 analyze_crossproc :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	file_path: string,
+	actx: ^Analysis_Pass_Context,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
-	// Check for multiprocessing / celery imports
-	has_mp := false
-	has_celery := false
-	for &imp in bind_result.imports {
-		if imp.module_name == "multiprocessing" || imp.module_name == "concurrent.futures" {
-			has_mp = true
-		}
-		if imp.module_name == "celery" || imp.module_name == "celery.app" {
-			has_celery = true
-		}
-	}
+	module := actx.module
+	bind_result := actx.bind_result
+	file_path := actx.file_path
+	allocator := actx.allocator
+
+	has_mp := actx.has_import["multiprocessing"] || actx.has_import["concurrent.futures"]
+	has_celery := actx.has_import["celery"] || actx.has_import["celery.app"]
 
 	// §22.2: Celery task validation
 	if has_celery {
 		check_celery_tasks(module, bind_result, file_path, diagnostics, allocator)
 	}
 
+	// §22.4: Subprocess shell injection (always check — not just multiprocessing)
+	analyze_subprocess(module, actx.has_import["subprocess"], file_path, diagnostics, allocator)
+
 	if !has_mp { return }
 
 	// §22.3: Check for unpicklable targets (lambda, nested functions)
-	check_unpicklable_targets(module, bind_result, file_path, diagnostics, allocator)
+	check_unpicklable_targets(module, has_mp, file_path, diagnostics, allocator)
 
 	// Phase 1: collect module-level mutable variables (dict, list, set literals)
 	module_mutables := make(map[string]parser.Src_Loc, 8, allocator)
@@ -205,19 +201,11 @@ _check_mp_call :: proc(
 // §22.3: PROC002 — detect unpicklable objects as multiprocessing targets
 check_unpicklable_targets :: proc(
 	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
+	has_mp: bool,
 	file_path: string,
 	diagnostics: ^[dynamic]core.Diagnostic,
 	allocator: mem.Allocator,
 ) {
-	// Check for multiprocessing import
-	has_mp := false
-	for &imp in bind_result.imports {
-		if imp.module_name == "multiprocessing" || imp.module_name == "concurrent.futures" {
-			has_mp = true
-			break
-		}
-	}
 	if !has_mp { return }
 
 	// Collect nested function names (defined inside other functions)
@@ -463,4 +451,136 @@ _check_lazy_access :: proc(expr: parser.Expr, orm_vars: map[string]bool, task_na
 		_check_lazy_access(e.left, orm_vars, task_name, file_path, diagnostics)
 		_check_lazy_access(e.right, orm_vars, task_name, file_path, diagnostics)
 	}
+}
+
+// ==================== §22.4 PROC005: Subprocess Shell Injection ====================
+//
+// Detect subprocess.run/call/Popen with shell=True where the command
+// includes dynamic content (f-strings, string concatenation, variables).
+
+SUBPROCESS_FUNCS :: [?]string{"run", "call", "check_output", "check_call", "Popen"}
+
+analyze_subprocess :: proc(
+	module: ^parser.Module,
+	has_subprocess: bool,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	allocator: mem.Allocator,
+) {
+	if !has_subprocess { return }
+
+	_scan_subprocess(module.body, file_path, diagnostics, allocator)
+}
+
+@(private = "file")
+_scan_subprocess :: proc(
+	stmts: []parser.Stmt,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	allocator: mem.Allocator,
+) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			_check_subprocess_call(s.value, file_path, diagnostics)
+		case ^parser.Assign:
+			if s.value != nil { _check_subprocess_call(s.value, file_path, diagnostics) }
+		case ^parser.Func_Def:
+			_scan_subprocess(s.body, file_path, diagnostics, allocator)
+		case ^parser.Async_Func_Def:
+			_scan_subprocess(s.body, file_path, diagnostics, allocator)
+		case ^parser.If_Stmt:
+			_scan_subprocess(s.body, file_path, diagnostics, allocator)
+			_scan_subprocess(s.orelse, file_path, diagnostics, allocator)
+		case ^parser.For_Stmt:
+			_scan_subprocess(s.body, file_path, diagnostics, allocator)
+		case ^parser.While_Stmt:
+			_scan_subprocess(s.body, file_path, diagnostics, allocator)
+		case ^parser.Class_Def:
+			_scan_subprocess(s.body, file_path, diagnostics, allocator)
+		}
+	}
+}
+
+@(private = "file")
+_check_subprocess_call :: proc(
+	expr: parser.Expr,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+) {
+	if expr == nil { return }
+	call, ok := expr.(^parser.Call_Expr)
+	if !ok { return }
+
+	// Match subprocess.run(...), subprocess.call(...), etc.
+	is_subprocess := false
+	#partial switch f in call.func {
+	case ^parser.Attribute_Expr:
+		if recv, nok := f.value.(^parser.Name_Expr); nok {
+			if recv.id == "subprocess" {
+				for sf in SUBPROCESS_FUNCS {
+					if f.attr == sf { is_subprocess = true; break }
+				}
+			}
+		}
+	case ^parser.Name_Expr:
+		// Direct import: from subprocess import run
+		for sf in SUBPROCESS_FUNCS {
+			if f.id == sf { is_subprocess = true; break }
+		}
+	}
+	if !is_subprocess { return }
+
+	// Check for shell=True keyword
+	has_shell_true := false
+	for kw in call.keywords {
+		if kw.arg == "shell" {
+			if c, cok := kw.value.(^parser.Constant_Expr); cok {
+				if b, bok := c.value.(bool); bok && b {
+					has_shell_true = true
+				}
+			}
+			if n, nok := kw.value.(^parser.Name_Expr); nok {
+				if n.id == "True" { has_shell_true = true }
+			}
+		}
+	}
+	if !has_shell_true { return }
+
+	// Check if first positional arg is dynamic (f-string, concatenation, variable)
+	if len(call.args) < 1 { return }
+	cmd_arg := call.args[0]
+	if _is_dynamic_string(cmd_arg) {
+		append(diagnostics, core.Diagnostic{
+			severity = .Error,
+			location = core.Location{
+				file   = file_path,
+				line   = int(call.loc.line),
+				column = int(call.loc.col),
+			},
+			code = "PROC005",
+			what = "subprocess with shell=True and dynamic command string",
+			why  = "shell=True with user-controlled input enables shell injection attacks",
+			fix  = "use shell=False with a list of arguments, or use shlex.quote() to escape",
+		})
+	}
+}
+
+@(private = "file")
+_is_dynamic_string :: proc(expr: parser.Expr) -> bool {
+	if expr == nil { return false }
+	#partial switch e in expr {
+	case ^parser.Joined_Str: return true              // f-string
+	case ^parser.Bin_Op_Expr:
+		if e.op == .Add { return true }               // string concatenation
+	case ^parser.Name_Expr: return true               // variable
+	case ^parser.Call_Expr:
+		// format() or .format()
+		if attr, ok := e.func.(^parser.Attribute_Expr); ok {
+			if attr.attr == "format" { return true }
+		}
+	case ^parser.Subscript_Expr: return true          // dict/list lookup
+	case ^parser.Attribute_Expr: return true          // obj.attr
+	}
+	return false
 }

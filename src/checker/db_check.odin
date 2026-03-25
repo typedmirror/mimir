@@ -27,18 +27,19 @@ DB_Check_Context :: struct {
 
 // Entry point — called from checker.odin after type checking.
 analyze_db :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	reg: ^Type_Registry,
+	actx: ^Analysis_Pass_Context,
 	virtual_types: ^map[binder.Symbol_ID]Type_ID,
-	expr_types: ^map[rawptr]Type_ID,
-	file_path: string,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
-	// Build import map for mimir.db detection
-	import_map := make(map[string]string, 8, allocator)
-	for &imp in bind_result.imports {
+	reg := actx.registry
+	// Quick check: skip if no mimir.db imports and no virtual db types
+	has_db_import := actx.has_import["mimir.db"]
+	has_db_virtual := reg != nil && reg.db_query_type != 0
+	if !has_db_import && !has_db_virtual { return }
+
+	// Build domain-specific import map (only mimir.db names)
+	import_map := make(map[string]string, 8, actx.allocator)
+	for &imp in actx.bind_result.imports {
 		if imp.module_name != "mimir.db" { continue }
 		if len(imp.names) == 0 {
 			import_map[imp.module_name] = imp.module_name
@@ -50,11 +51,10 @@ analyze_db :: proc(
 		}
 	}
 
-	// Skip if no mimir.db imports
-	has_db_import := len(import_map) > 0
-	// Also check for virtual module imports (expr_types will have db types)
-	has_db_virtual := reg.db_query_type != 0
-	if !has_db_import && !has_db_virtual { return }
+	module := actx.module
+	file_path := actx.file_path
+	expr_types := actx.expr_types
+	allocator := actx.allocator
 
 	ctx := DB_Check_Context{
 		reg           = reg,
@@ -76,6 +76,52 @@ analyze_db :: proc(
 		ctx = rawptr(&ctx),
 	}
 	core.walk_all_stmts(&visitor, module.body)
+}
+
+// Build a visitor for batched execution (returns nil visitor if pass should be skipped)
+make_db_visitor :: proc(
+	actx: ^Analysis_Pass_Context,
+	virtual_types: ^map[binder.Symbol_ID]Type_ID,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	out_ctx: ^DB_Check_Context,
+) -> (core.AST_Visitor, bool) {
+	reg := actx.registry
+	has_db_import := actx.has_import["mimir.db"]
+	has_db_virtual := reg != nil && reg.db_query_type != 0
+	if !has_db_import && !has_db_virtual { return {}, false }
+
+	import_map := make(map[string]string, 8, actx.allocator)
+	for &imp in actx.bind_result.imports {
+		if imp.module_name != "mimir.db" { continue }
+		if len(imp.names) == 0 {
+			import_map[imp.module_name] = imp.module_name
+		} else {
+			for imp_name in imp.names {
+				local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
+				import_map[local] = imp.module_name
+			}
+		}
+	}
+
+	out_ctx^ = DB_Check_Context{
+		reg         = reg,
+		expr_types  = actx.expr_types,
+		file_path   = actx.file_path,
+		diagnostics = diagnostics,
+		import_map  = import_map,
+		allocator   = actx.allocator,
+	}
+
+	return core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			ctx := cast(^DB_Check_Context)raw_ctx
+			#partial switch e in expr {
+			case ^parser.Call_Expr:
+				check_db_call(ctx, e)
+			}
+		},
+		ctx = rawptr(out_ctx),
+	}, true
 }
 
 // Check if a Call_Expr is a mimir.db query/execute call and validate its SQL argument.

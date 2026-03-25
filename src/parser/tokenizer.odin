@@ -547,6 +547,17 @@ _scan_string :: proc(t: ^Tokenizer, is_raw: bool, is_special: bool) -> Parse_Err
 			continue
 		}
 
+		// Raw strings: backslash before a quote prevents string termination
+		// (the backslash is kept in the string, but the quote doesn't end it)
+		if c == '\\' && is_raw && t.pos + 1 < len(t.source) {
+			next_ch := t.source[t.pos + 1]
+			if next_ch == quote {
+				// Skip both \ and the quote — they're part of the string
+				t.pos += 2; t.col += 2
+				continue
+			}
+		}
+
 		if c == '\n' {
 			if !triple {
 				return Syntax_Error{

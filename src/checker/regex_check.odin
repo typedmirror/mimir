@@ -33,22 +33,15 @@ Regex_Check_Context :: struct {
 }
 
 // Entry point — called from checker.odin after type checking.
+// Accepts shared Analysis_Pass_Context for import detection.
 analyze_regex :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	file_path: string,
+	actx: ^Analysis_Pass_Context,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
-	// Check if re is imported
-	has_re := false
-	for &imp in bind_result.imports {
-		if imp.module_name == "re" {
-			has_re = true
-			break
-		}
-	}
-	if !has_re { return }
+	if !actx.has_import["re"] { return }
+	module := actx.module
+	file_path := actx.file_path
+	allocator := actx.allocator
 
 	// Analyze each function body independently (variable names are function-scoped)
 	for stmt in module.body {

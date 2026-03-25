@@ -194,9 +194,10 @@ resolve_annotation :: proc(
 				if env_type, env_found := env.types[sym_id]; env_found {
 					et := get_type(reg, env_type)
 					#partial switch info in et.info {
-					case TypeVar_Type:    return env_type
-					case TypedDict_Type:  return env_type
-					case Protocol_Type:   return env_type
+					case TypeVar_Type:      return env_type
+					case TypeVarTuple_Type: return env_type
+					case TypedDict_Type:    return env_type
+					case Protocol_Type:     return env_type
 					case Callable_Type:
 						// Type alias: MyInt = int → Callable returns int → use return type
 						if info.return_type != TYPE_UNKNOWN && info.return_type != TYPE_ANY {
@@ -293,6 +294,10 @@ resolve_annotation :: proc(
 			// The target type T is stored on the registry by the Func_Def handler
 			resolve_annotation(e.slice, reg, bind_result, builtins, env)
 			return TYPE_BOOL
+		case "TypeIs":
+			// TypeIs[T] (PEP 742) — like TypeGuard but narrows in both branches
+			resolve_annotation(e.slice, reg, bind_result, builtins, env)
+			return TYPE_BOOL
 		case "Final":
 			// Final[T] — immutable variable with type T
 			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
@@ -313,6 +318,9 @@ resolve_annotation :: proc(
 			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
 		case "NotRequired":
 			// NotRequired[T] — field is optional even in total=True TypedDict
+			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
+		case "Unpack":
+			// Unpack[Ts] — unpack a TypeVarTuple in annotation context
 			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
 		case "Literal":
 			// Literal["read", "write"] or Literal[1, 2] → union of literal types
@@ -356,6 +364,10 @@ resolve_annotation :: proc(
 			return make_union_type(reg, members[:])
 		}
 		return TYPE_UNKNOWN
+
+	case ^parser.Starred_Expr:
+		// *Ts — PEP 646 TypeVarTuple unpacking in annotations (Python 3.11+)
+		return resolve_annotation(e.value, reg, bind_result, builtins, env)
 
 	case ^parser.Constant_Expr:
 		// None as annotation

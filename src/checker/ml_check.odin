@@ -49,21 +49,19 @@ ML_Check_Context :: struct {
 
 // Entry point — called from checker.odin after type checking.
 analyze_ml :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	file_path: string,
+	actx: ^Analysis_Pass_Context,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
-	// Check for sklearn imports
+	// Check for sklearn imports (prefix match)
 	has_sklearn := false
-	for &imp in bind_result.imports {
-		if len(imp.module_name) >= 7 && imp.module_name[:7] == "sklearn" {
-			has_sklearn = true
-			break
-		}
+	for mod_name in actx.has_import {
+		if len(mod_name) >= 7 && mod_name[:7] == "sklearn" { has_sklearn = true; break }
 	}
 	if !has_sklearn { return }
+
+	module := actx.module
+	file_path := actx.file_path
+	allocator := actx.allocator
 
 	// Analyze each function body independently
 	for stmt in module.body {

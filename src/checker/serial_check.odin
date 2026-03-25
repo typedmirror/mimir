@@ -21,29 +21,19 @@ import core   "mimir:core"
 
 // Entry point — called from checker.odin after type checking.
 analyze_serialization :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	file_path: string,
+	actx: ^Analysis_Pass_Context,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
-	has_pickle := false
-	has_shelve := false
-	has_marshal := false
-	has_json := false
-	has_yaml := false
-	has_toml := false
-
-	for &imp in bind_result.imports {
-		if imp.module_name == "pickle"  { has_pickle = true }
-		if imp.module_name == "shelve"  { has_shelve = true }
-		if imp.module_name == "marshal" { has_marshal = true }
-		if imp.module_name == "json"    { has_json = true }
-		if imp.module_name == "yaml" || imp.module_name == "pyyaml" { has_yaml = true }
-		if imp.module_name == "toml" || imp.module_name == "tomllib" || imp.module_name == "tomli" { has_toml = true }
-	}
-
+	has_pickle  := actx.has_import["pickle"]
+	has_shelve  := actx.has_import["shelve"]
+	has_marshal := actx.has_import["marshal"]
+	has_json    := actx.has_import["json"]
+	has_yaml    := actx.has_import["yaml"] || actx.has_import["pyyaml"]
+	has_toml    := actx.has_import["toml"] || actx.has_import["tomllib"] || actx.has_import["tomli"]
 	if !has_pickle && !has_shelve && !has_marshal && !has_json && !has_yaml && !has_toml { return }
+
+	file_path := actx.file_path
+	module := actx.module
 
 	ctx := Serial_Context{
 		file_path   = file_path,

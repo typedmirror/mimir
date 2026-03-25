@@ -140,14 +140,39 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			}
 		}
 		receiver := infer_expr(e.value, ctx)
+		// Check for narrowed attribute type from guard (e.g., after `if obj.attr is not None:`)
+		if name, is_name := e.value.(^parser.Name_Expr); is_name {
+			sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name))
+			if ref_ok {
+				key := attr_narrow_key(sym_id, e.attr)
+				if narrowed, has := ctx.env.attr_types[key]; has {
+					return narrowed
+				}
+			}
+		}
 		result := lookup_attribute(receiver, e.attr, ctx.reg)
 		// T007: flag undefined attributes on user-defined types
 		if result == TYPE_UNKNOWN && receiver != TYPE_UNKNOWN && receiver != TYPE_ANY {
 			rt := get_type(ctx.reg, receiver)
 			should_flag := false
-			#partial switch _ in rt.info {
-			case Instance_Type, Class_Type, Module_Type, Protocol_Type, TypedDict_Type,
-		     DataFrame_Type, Series_Type, Tensor_Type:
+			#partial switch ri in rt.info {
+			case Instance_Type:
+				// Only flag if class has known attrs (skip placeholders from unresolved imports)
+				cls := get_type(ctx.reg, ri.class_type)
+				if ci, ci_ok := cls.info.(Class_Type); ci_ok {
+					should_flag = len(ci.attrs) > 0
+				}
+			case Class_Type:
+				// Class object attribute resolution is incomplete (no classmethods, class vars).
+				// Only flag on classes with enough attrs to be confident.
+				should_flag = len(ri.attrs) > 2
+			case Module_Type:
+				should_flag = len(ri.exports) > 0
+			case Protocol_Type:
+				should_flag = len(ri.methods) > 0 || len(ri.attrs) > 0
+			case TypedDict_Type:
+				should_flag = len(ri.fields) > 0
+			case DataFrame_Type, Series_Type, Tensor_Type:
 				should_flag = true
 			}
 			// Skip dunder attrs — implicit object methods not tracked yet
@@ -335,6 +360,58 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 
 	case ^parser.If_Expr:
 		infer_expr(e.test, ctx)
+
+		// Extract guards from test condition for ternary narrowing
+		temp_guards := make([dynamic]flow.Guard, 0, 4, ctx.reg.allocator)
+		TERNARY_TRUE  := flow.Block_ID(max(u32))
+		TERNARY_FALSE := flow.Block_ID(max(u32) - 1)
+		flow.analyze_condition(e.test, ctx.bind_result, ctx.scope_id,
+			flow.Block_ID(0), TERNARY_TRUE, TERNARY_FALSE,
+			e.loc, &temp_guards, ctx.reg.allocator)
+
+		if len(temp_guards) > 0 {
+			// Save env state
+			saved := make(map[binder.Symbol_ID]Type_ID, len(ctx.env.types), ctx.reg.allocator)
+			for k, v in ctx.env.types { saved[k] = v }
+			saved_attr: map[u64]Type_ID
+			if ctx.env.attr_types != nil {
+				saved_attr = make(map[u64]Type_ID, len(ctx.env.attr_types), ctx.reg.allocator)
+				for k, v in ctx.env.attr_types { saved_attr[k] = v }
+			}
+
+			// Apply positive guards → infer body (true branch)
+			apply_guards(ctx.env, TERNARY_TRUE, temp_guards[:], ctx.reg, ctx.bind_result, ctx.builtins)
+			body_type := infer_expr(e.body, ctx, expected)
+
+			// Restore → apply negative guards → infer else (false branch)
+			for k in ctx.env.types { delete_key(&ctx.env.types, k) }
+			for k, v in saved { ctx.env.types[k] = v }
+			if ctx.env.attr_types != nil {
+				for k in ctx.env.attr_types { delete_key(&ctx.env.attr_types, k) }
+			}
+			if saved_attr != nil {
+				if ctx.env.attr_types == nil {
+					ctx.env.attr_types = make(map[u64]Type_ID, 4, ctx.reg.allocator)
+				}
+				for k, v in saved_attr { ctx.env.attr_types[k] = v }
+			}
+			apply_guards(ctx.env, TERNARY_FALSE, temp_guards[:], ctx.reg, ctx.bind_result, ctx.builtins)
+			else_type := infer_expr(e.orelse, ctx, expected)
+
+			// Restore original env
+			for k in ctx.env.types { delete_key(&ctx.env.types, k) }
+			for k, v in saved { ctx.env.types[k] = v }
+			if ctx.env.attr_types != nil {
+				for k in ctx.env.attr_types { delete_key(&ctx.env.attr_types, k) }
+			}
+			if saved_attr != nil {
+				for k, v in saved_attr { ctx.env.attr_types[k] = v }
+			}
+
+			members := [2]Type_ID{body_type, else_type}
+			return make_union_type(ctx.reg, members[:])
+		}
+
 		body_type := infer_expr(e.body, ctx, expected)
 		else_type := infer_expr(e.orelse, ctx, expected)
 		members := [2]Type_ID{body_type, else_type}
@@ -750,6 +827,36 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			return infer_generic_call(e, &info, ctx)
 		}
 		check_call_args(e, &info, ctx)
+
+		// Builtin container-aware return type refinement:
+		// min(list[T]) -> T, max(list[T]) -> T, sum(list[T]) -> T, sorted(list[T]) -> list[T]
+		if len(e.args) >= 1 {
+			if name_expr, is_name := e.func.(^parser.Name_Expr); is_name {
+				arg_type := infer_expr(e.args[0], ctx)
+				arg_t := get_type(ctx.reg, arg_type)
+				elem_type := TYPE_UNKNOWN
+				#partial switch ai in arg_t.info {
+				case List_Type: elem_type = ai.element
+				case Set_Type:  elem_type = ai.element
+				case Tuple_Type:
+					if len(ai.elements) > 0 { elem_type = ai.elements[0] }
+				}
+				if elem_type != TYPE_UNKNOWN {
+					switch name_expr.id {
+					case "min", "max":
+						return elem_type
+					case "sum":
+						if elem_type == TYPE_FLOAT { return TYPE_FLOAT }
+						return TYPE_INT
+					case "sorted", "list":
+						return make_list_type(ctx.reg, elem_type)
+					case "reversed":
+						return make_list_type(ctx.reg, elem_type)
+					}
+				}
+			}
+		}
+
 		// mimir.json typed parse/read — override return type with schema argument
 		if ctx.reg.json_parse_type != 0 &&
 		   (func_type == ctx.reg.json_parse_type || func_type == ctx.reg.json_read_type) {
@@ -968,6 +1075,28 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 		if len(info.type_params) > 0 {
 			return infer_generic_constructor(e, &info, func_type, ctx, expected)
 		}
+
+		// Builtin container constructors: list(iterable) → list[T], etc.
+		if len(e.args) >= 1 && (info.name == "list" || info.name == "dict" || info.name == "set" || info.name == "tuple" || info.name == "frozenset") {
+			arg_type := infer_expr(e.args[0], ctx)
+			arg_t := get_type(ctx.reg, arg_type)
+			elem_type := TYPE_UNKNOWN
+			#partial switch ai in arg_t.info {
+			case List_Type: elem_type = ai.element
+			case Set_Type:  elem_type = ai.element
+			case Tuple_Type:
+				if len(ai.elements) > 0 { elem_type = ai.elements[0] }
+			}
+			if elem_type != TYPE_UNKNOWN {
+				switch info.name {
+				case "list":      return make_list_type(ctx.reg, elem_type)
+				case "set":       return make_set_type(ctx.reg, elem_type)
+				case "frozenset": return make_set_type(ctx.reg, elem_type)
+				case "tuple":     return make_tuple_type(ctx.reg, {elem_type}, true)
+				}
+			}
+		}
+
 		// Calling a class = constructor → check __init__ args
 		if init_type_id, ok := info.attrs["__init__"]; ok {
 			init_t := get_type(ctx.reg, init_type_id)
@@ -992,6 +1121,16 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 }
 
 check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^Infer_Context) {
+	// Skip arg count checking if all params are TYPE_ANY (stub/unresolved function)
+	// These are placeholder signatures from typeshed or unresolved imports — arg count is unknown
+	if len(func_info.params) > 0 {
+		all_any := true
+		for p in func_info.params {
+			if p.type_id != TYPE_ANY && !_is_any_type(p.type_id, ctx.reg) { all_any = false; break }
+		}
+		if all_any { return }
+	}
+
 	// Count required params (no default)
 	required := 0
 	for p in func_info.params {
@@ -1056,14 +1195,14 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 	for i := 0; i < min(n_args, n_params); i += 1 {
 		param_type := func_info.params[i].type_id
 		arg_type := infer_expr(e.args[i], ctx, param_type)
-		if param_type != TYPE_ANY && param_type != TYPE_UNKNOWN &&
-		   arg_type != TYPE_UNKNOWN && arg_type != TYPE_ANY {
-			if !is_assignable(ctx.reg, arg_type, param_type) {
-				emit_diagnostic(ctx, e.loc, "T002", .Error,
-					"Incompatible argument type",
-					fmt_type_mismatch(arg_type, param_type, ctx.reg),
-					"Use the correct type")
-			}
+		if _is_any_type(param_type, ctx.reg) || param_type == TYPE_UNKNOWN ||
+		   arg_type == TYPE_UNKNOWN || _is_any_type(arg_type, ctx.reg) {
+			// Skip — Any accepts/produces anything
+		} else if !is_assignable(ctx.reg, arg_type, param_type) {
+			emit_diagnostic(ctx, e.loc, "T002", .Error,
+				"Incompatible argument type",
+				fmt_type_mismatch(arg_type, param_type, ctx.reg),
+				"Use the correct type")
 		}
 	}
 
@@ -1072,14 +1211,14 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		kw_type := infer_expr(kw.value, ctx)
 		for p in func_info.params {
 			if p.name == kw.arg {
-				if p.type_id != TYPE_ANY && p.type_id != TYPE_UNKNOWN &&
-				   kw_type != TYPE_UNKNOWN && kw_type != TYPE_ANY {
-					if !is_assignable(ctx.reg, kw_type, p.type_id) {
-						emit_diagnostic(ctx, e.loc, "T002", .Error,
-							"Incompatible argument type",
-							fmt_type_mismatch(kw_type, p.type_id, ctx.reg),
-							"Use the correct type")
-					}
+				if _is_any_type(p.type_id, ctx.reg) || p.type_id == TYPE_UNKNOWN ||
+				   kw_type == TYPE_UNKNOWN || _is_any_type(kw_type, ctx.reg) {
+					// Skip
+				} else if !is_assignable(ctx.reg, kw_type, p.type_id) {
+					emit_diagnostic(ctx, e.loc, "T002", .Error,
+						"Incompatible argument type",
+						fmt_type_mismatch(kw_type, p.type_id, ctx.reg),
+						"Use the correct type")
 				}
 				break
 			}
@@ -1796,6 +1935,15 @@ bind_match_pattern :: proc(
 }
 
 // Look up a symbol by name in the current scope (for match pattern variables).
+// Check if a Type_ID resolves to an Any_Type (canonical or non-canonical from stubs)
+_is_any_type :: proc(t: Type_ID, reg: ^Type_Registry) -> bool {
+	if t == TYPE_ANY { return true }
+	typ := get_type(reg, t)
+	if typ == nil { return false }
+	_, ok := typ.info.(Any_Type)
+	return ok
+}
+
 _match_lookup_sym :: proc(name: string, ctx: ^Infer_Context) -> binder.Symbol_ID {
 	scope := binder.result_get_scope(ctx.bind_result, ctx.scope_id)
 	if scope == nil { return 0 }
@@ -1866,13 +2014,16 @@ try_typing_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> (Type_ID, 
 		case "ParamSpec":
 			// ParamSpec('P') — captures parameter signatures for decorators.
 			// Minimal support: treat as TYPE_ANY (any parameter list).
-			// When used in Callable[P, R], P = ANY means any params accepted.
 			for arg in e.args { infer_expr(arg, ctx) }
 			return TYPE_ANY, true
+		case "TypeVarTuple":
+			return handle_typevartuple(e, ctx), true
 		case "TypedDict":
 			return handle_typeddict_call(e, ctx), true
 		case "NamedTuple":
 			return handle_namedtuple_call(e, ctx), true
+		case "NewType":
+			return handle_newtype_call(e, ctx), true
 		case:
 			// Unknown typing form — infer args, don't error
 			for arg in e.args { infer_expr(arg, ctx) }
@@ -2086,6 +2237,25 @@ handle_typevar :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
 	})
 }
 
+// ==================== TypeVarTuple Handling (PEP 646) ====================
+
+handle_typevartuple :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	name := ""
+	// First arg is the name (string constant)
+	if len(e.args) >= 1 {
+		#partial switch arg in e.args[0] {
+		case ^parser.Constant_Expr:
+			if s, ok := arg.value.(string); ok {
+				name = s
+			}
+		}
+	}
+
+	return register_type(ctx.reg, TypeVarTuple_Type{
+		name = name,
+	})
+}
+
 // ==================== TypedDict Functional Syntax ====================
 
 handle_typeddict_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
@@ -2203,6 +2373,74 @@ handle_namedtuple_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Typ
 	})
 
 	return class_type_id
+}
+
+// ==================== NewType (typing.NewType) ====================
+//
+// NewType('UserId', int) → creates a nominal type that's a distinct subtype of int.
+// UserId(42) is the constructor. UserId is assignable TO int (subtype),
+// but int is NOT assignable to UserId (requires explicit constructor).
+
+handle_newtype_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type_ID {
+	name := ""
+	base_type := TYPE_UNKNOWN
+
+	// First arg: name string
+	if len(e.args) >= 1 {
+		#partial switch arg in e.args[0] {
+		case ^parser.Constant_Expr:
+			if s, ok := arg.value.(string); ok {
+				name = s
+			}
+		}
+	}
+
+	// Second arg: base type
+	if len(e.args) >= 2 {
+		base_type = resolve_annotation(e.args[1], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+	}
+
+	if len(name) == 0 || base_type == TYPE_UNKNOWN {
+		return TYPE_UNKNOWN
+	}
+
+	// Create a Class_Type that inherits from the base type.
+	// This gives us nominal subtyping: NewType IS-A base, but base IS-NOT-A NewType.
+	bases := make([]Type_ID, 1, ctx.reg.allocator)
+
+	// Wrap primitive base types in a Class_Type for inheritance to work
+	base_class := base_type
+	bt := get_type(ctx.reg, base_type)
+	#partial switch _ in bt.info {
+	case Primitive_Type:
+		// Primitives aren't Class_Types — create a synthetic class for the base
+		// so is_class_subtype can traverse the chain.
+		// Actually, just store the base — is_assignable handles primitive→primitive directly.
+		// The NewType instance will use a special check in is_assignable.
+		base_class = base_type
+	case Instance_Type:
+		base_class = bt.info.(Instance_Type).class_type
+	}
+	bases[0] = base_class
+
+	// Constructor: takes base_type, returns NewType instance
+	ctor_params := make([]Param_Type, 1, ctx.reg.allocator)
+	ctor_params[0] = Param_Type{name = "val", type_id = base_type}
+
+	attrs := make(map[string]Type_ID, 2, ctx.reg.allocator)
+
+	class_type_id := register_type(ctx.reg, Class_Type{
+		name      = name,
+		symbol_id = binder.INVALID_SYMBOL,
+		scope_id  = binder.INVALID_SCOPE,
+		bases     = bases,
+		attrs     = attrs,
+	})
+
+	instance_type := make_instance_type(ctx.reg, class_type_id)
+
+	// The result of NewType() is a callable: (base_type) -> NewType_instance
+	return make_callable_type(ctx.reg, ctor_params, instance_type)
 }
 
 // ==================== Generic Call Inference ====================

@@ -26,38 +26,35 @@ Crypt_Check_Context :: struct {
 
 // Entry point — called from checker.odin after type checking.
 analyze_crypt :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	reg: ^Type_Registry,
+	actx: ^Analysis_Pass_Context,
 	virtual_types: ^map[binder.Symbol_ID]Type_ID,
-	expr_types: ^map[rawptr]Type_ID,
-	file_path: string,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
-	// Build import map for mimir.crypt detection
-	import_map := make(map[string]string, 8, allocator)
-	for &imp in bind_result.imports {
+	if !actx.has_import["mimir.crypt"] { return }
+
+	// Domain-specific import map: local → original function name (hash, encrypt, etc.)
+	import_map := make(map[string]string, 8, actx.allocator)
+	for &imp in actx.bind_result.imports {
 		if imp.module_name != "mimir.crypt" { continue }
 		if len(imp.names) == 0 {
 			import_map[imp.module_name] = imp.module_name
 		} else {
 			for imp_name in imp.names {
 				local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
-				import_map[local] = imp_name.name  // local → original name (hash, encrypt, etc.)
+				import_map[local] = imp_name.name
 			}
 		}
 	}
 
-	if len(import_map) == 0 { return }
+	module := actx.module
 
 	ctx := Crypt_Check_Context{
-		reg           = reg,
-		expr_types    = expr_types,
-		file_path     = file_path,
+		reg           = actx.registry,
+		expr_types    = actx.expr_types,
+		file_path     = actx.file_path,
 		diagnostics   = diagnostics,
 		import_map    = import_map,
-		allocator     = allocator,
+		allocator     = actx.allocator,
 	}
 
 	visitor := core.AST_Visitor{
@@ -71,6 +68,47 @@ analyze_crypt :: proc(
 		ctx = rawptr(&ctx),
 	}
 	core.walk_all_stmts(&visitor, module.body)
+}
+
+// Build a visitor for batched execution
+make_crypt_visitor :: proc(
+	actx: ^Analysis_Pass_Context,
+	diagnostics: ^[dynamic]core.Diagnostic,
+	out_ctx: ^Crypt_Check_Context,
+) -> (core.AST_Visitor, bool) {
+	if !actx.has_import["mimir.crypt"] { return {}, false }
+
+	import_map := make(map[string]string, 8, actx.allocator)
+	for &imp in actx.bind_result.imports {
+		if imp.module_name != "mimir.crypt" { continue }
+		if len(imp.names) == 0 {
+			import_map[imp.module_name] = imp.module_name
+		} else {
+			for imp_name in imp.names {
+				local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
+				import_map[local] = imp_name.name
+			}
+		}
+	}
+
+	out_ctx^ = Crypt_Check_Context{
+		reg         = actx.registry,
+		expr_types  = actx.expr_types,
+		file_path   = actx.file_path,
+		diagnostics = diagnostics,
+		import_map  = import_map,
+		allocator   = actx.allocator,
+	}
+	return core.AST_Visitor{
+		visit_expr = proc(expr: parser.Expr, raw_ctx: rawptr) {
+			ctx := cast(^Crypt_Check_Context)raw_ctx
+			#partial switch e in expr {
+			case ^parser.Call_Expr:
+				check_crypt_call(ctx, e)
+			}
+		},
+		ctx = rawptr(out_ctx),
+	}, true
 }
 
 // Check if a Call_Expr is a mimir.crypt call and validate for misuse.

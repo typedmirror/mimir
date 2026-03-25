@@ -36,24 +36,18 @@ Time_Enc_Context :: struct {
 
 // Entry point — called from checker.odin after type checking.
 analyze_time_encoding :: proc(
-	module: ^parser.Module,
-	bind_result: ^binder.Bind_Result,
-	expr_types: ^map[rawptr]Type_ID,
-	file_path: string,
+	actx: ^Analysis_Pass_Context,
 	diagnostics: ^[dynamic]core.Diagnostic,
-	allocator: mem.Allocator,
 ) {
-	has_datetime := false
-	has_hashlib := false
-	has_hmac := false
-
-	for &imp in bind_result.imports {
-		if imp.module_name == "datetime" { has_datetime = true }
-		if imp.module_name == "hashlib"  { has_hashlib = true }
-		if imp.module_name == "hmac"     { has_hmac = true }
-	}
-
+	has_datetime := actx.has_import["datetime"]
+	has_hashlib  := actx.has_import["hashlib"]
+	has_hmac     := actx.has_import["hmac"]
 	if !has_datetime && !has_hashlib && !has_hmac { return }
+
+	module := actx.module
+	file_path := actx.file_path
+	expr_types := actx.expr_types
+	allocator := actx.allocator
 
 	// Analyze module-level body
 	analyze_te_in_body(module.body, file_path, diagnostics, expr_types, has_datetime, has_hashlib, has_hmac, allocator)

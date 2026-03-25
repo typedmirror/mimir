@@ -16,11 +16,13 @@ Guard_Kind :: enum u8 {
 	Type_Is,
 	Type_Is_Not,
 	Type_Guard,       // TypeGuard function call — resolved_type has target
+	Type_Is_Guard,    // TypeIs (PEP 742) — narrows in BOTH branches (subtract in false)
 }
 
 Guard :: struct {
 	kind:          Guard_Kind,
 	symbol_id:     binder.Symbol_ID,
+	attr_name:     string,        // Non-empty for attribute narrowing (e.g., "attr" for obj.attr)
 	type_expr:     parser.Expr,
 	branch_block:  Block_ID,
 	true_block:    Block_ID,
@@ -88,9 +90,25 @@ analyze_condition :: proc(
 
 	#partial switch e in expr {
 	case ^parser.Call_Expr:
-		// isinstance(x, T)
+		// isinstance(x, T) or isinstance(obj.attr, T)
 		if is_isinstance_call(e, bind_result) {
 			if len(e.args) >= 2 {
+				// Try attribute pattern first: isinstance(obj.attr, T)
+				if attr, is_attr := e.args[0].(^parser.Attribute_Expr); is_attr {
+					base_sym := expr_to_symbol(attr.value, bind_result, scope_id)
+					if base_sym != binder.INVALID_SYMBOL {
+						append(guards, Guard{
+							kind         = .Is_Instance,
+							symbol_id    = base_sym,
+							attr_name    = attr.attr,
+							type_expr    = e.args[1],
+							branch_block = branch_block,
+							true_block   = true_block,
+							false_block  = false_block,
+							loc          = loc,
+						})
+					}
+				}
 				sym_id := expr_to_symbol(e.args[0], bind_result, scope_id)
 				if sym_id != binder.INVALID_SYMBOL {
 					append(guards, Guard{
@@ -129,8 +147,25 @@ analyze_condition :: proc(
 
 	case ^parser.Compare_Expr:
 		if len(e.ops) == 1 && len(e.comparators) == 1 {
-			// x is None / x is not None
+			// x is None / x is not None / obj.attr is None / obj.attr is not None
 			if is_none_compare(e) {
+				// Try attribute pattern: obj.attr is None
+				if attr, is_attr := e.left.(^parser.Attribute_Expr); is_attr {
+					base_sym := expr_to_symbol(attr.value, bind_result, scope_id)
+					if base_sym != binder.INVALID_SYMBOL {
+						tb := e.ops[0] == .Is ? true_block : false_block
+						fb := e.ops[0] == .Is ? false_block : true_block
+						append(guards, Guard{
+							kind         = .Is_None,
+							symbol_id    = base_sym,
+							attr_name    = attr.attr,
+							branch_block = branch_block,
+							true_block   = tb,
+							false_block  = fb,
+							loc          = loc,
+						})
+					}
+				}
 				sym_id := expr_to_symbol(e.left, bind_result, scope_id)
 				if sym_id != binder.INVALID_SYMBOL {
 					// For "is not", use Is_None with swapped blocks (consistent with unary inversion)
@@ -146,8 +181,24 @@ analyze_condition :: proc(
 					})
 				}
 			}
-			// None is x / None is not x (reversed)
+			// None is x / None is not x (reversed) — also handle None is obj.attr
 			if is_none_compare_reversed(e) {
+				if attr, is_attr := e.comparators[0].(^parser.Attribute_Expr); is_attr {
+					base_sym := expr_to_symbol(attr.value, bind_result, scope_id)
+					if base_sym != binder.INVALID_SYMBOL {
+						tb := e.ops[0] == .Is ? true_block : false_block
+						fb := e.ops[0] == .Is ? false_block : true_block
+						append(guards, Guard{
+							kind         = .Is_None,
+							symbol_id    = base_sym,
+							attr_name    = attr.attr,
+							branch_block = branch_block,
+							true_block   = tb,
+							false_block  = fb,
+							loc          = loc,
+						})
+					}
+				}
 				sym_id := expr_to_symbol(e.comparators[0], bind_result, scope_id)
 				if sym_id != binder.INVALID_SYMBOL {
 					tb := e.ops[0] == .Is ? true_block : false_block
@@ -206,6 +257,21 @@ analyze_condition :: proc(
 			append(guards, Guard{
 				kind         = .Is_Truthy,
 				symbol_id    = sym_id,
+				branch_block = branch_block,
+				true_block   = true_block,
+				false_block  = false_block,
+				loc          = loc,
+			})
+		}
+
+	case ^parser.Attribute_Expr:
+		// if obj.attr: (attribute truthiness)
+		base_sym := expr_to_symbol(e.value, bind_result, scope_id)
+		if base_sym != binder.INVALID_SYMBOL {
+			append(guards, Guard{
+				kind         = .Is_Truthy,
+				symbol_id    = base_sym,
+				attr_name    = e.attr,
 				branch_block = branch_block,
 				true_block   = true_block,
 				false_block  = false_block,
@@ -348,6 +414,7 @@ invert_guard_kind :: proc(kind: Guard_Kind) -> Guard_Kind {
 	case .Type_Is:         return .Type_Is_Not
 	case .Type_Is_Not:     return .Type_Is
 	case .Type_Guard:      return .Type_Guard  // TypeGuard inversion: no narrowing in false branch
+	case .Type_Is_Guard:   return .Type_Is_Guard // TypeIs: narrowing in both branches
 	}
 	return kind
 }
