@@ -144,10 +144,13 @@ extract_package_exports :: proc(
 	parsed_subs := make(map[string]bool, 16, allocator)
 	parsed_subs[file_path] = true // mark self
 
+	// Track sub-module exports for star import propagation
+	sub_exports := make(map[string]Module_Exports, 8, allocator)
+
 	// Recursively resolve relative imports within the package
 	_resolve_pkg_imports(
 		&bind_result, mod_scope, pkg_root, &import_types,
-		bridge, registry, &builtins, &parsed_subs, allocator, 0,
+		bridge, registry, &builtins, &parsed_subs, &sub_exports, allocator, 0,
 	)
 
 	// Flow analysis on main file
@@ -171,6 +174,23 @@ extract_package_exports :: proc(
 		}
 	}
 
+	// Propagate star imports: "from .sub import *" merges sub's exports
+	for imp in bind_result.imports {
+		if !imp.is_star { continue }
+		if imp.level == 0 { continue } // only relative star imports
+
+		sub_file := _resolve_relative_import(pkg_root, imp.module_name, allocator)
+		if len(sub_file) == 0 { continue }
+
+		if star_exp, has := sub_exports[sub_file]; has {
+			for name, type_id in star_exp.types {
+				if name not_in exports.types {
+					exports.types[name] = type_id
+				}
+			}
+		}
+	}
+
 	return exports, true
 }
 
@@ -189,6 +209,7 @@ _resolve_pkg_imports :: proc(
 	registry: ^checker.Type_Registry,
 	builtins: ^checker.Builtin_Names,
 	parsed_subs: ^map[string]bool,
+	sub_exports: ^map[string]Module_Exports,
 	allocator: mem.Allocator,
 	depth: int,
 ) {
@@ -221,7 +242,7 @@ _resolve_pkg_imports :: proc(
 
 		_resolve_pkg_imports(
 			&sub_bind, sub_scope, sub_pkg_root, &sub_import_types,
-			bridge, registry, builtins, parsed_subs, allocator, depth + 1,
+			bridge, registry, builtins, parsed_subs, sub_exports, allocator, depth + 1,
 		)
 
 		// Check sub-module with its resolved imports
@@ -241,6 +262,13 @@ _resolve_pkg_imports :: proc(
 					}
 				}
 			}
+		}
+
+		// Cache sub-module exports for star import propagation
+		if sub_exports != nil {
+			se: Module_Exports
+			se.types = sub_type_map
+			sub_exports[sub_file] = se
 		}
 
 		// Wire imported names into caller's import_types

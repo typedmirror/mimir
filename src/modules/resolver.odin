@@ -67,6 +67,21 @@ collect_exports :: proc(
 		}
 	}
 
+	// Propagate star imports: "from .B import *" merges B's exports into this module
+	n_edges := min(len(info.bind_result.imports), len(info.imports))
+	for i := 0; i < n_edges; i += 1 {
+		edge := info.imports[i]
+		if !edge.is_star { continue }
+		if star_exports, has := ctx.exports[edge.target_module]; has {
+			for name, type_id in star_exports.types {
+				// Don't overwrite explicitly defined exports
+				if name not_in exports.types {
+					exports.types[name] = type_id
+				}
+			}
+		}
+	}
+
 	ctx.exports[info.qualified_name] = exports
 }
 
