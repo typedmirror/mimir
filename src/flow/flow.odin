@@ -64,13 +64,15 @@ analyze :: proc(module: ^parser.Module, bind_result: ^binder.Bind_Result, file_p
 		has_any_return := false
 		returns_none := false
 		is_stub := false
+		is_generator := false
 
 		// Check if function has return annotation or explicit returns
-		check_function_returns(module.body, scope, &has_return_ann, &has_any_return, &returns_none, &is_stub)
+		check_function_returns(module.body, scope, &has_return_ann, &has_any_return, &returns_none, &is_stub, &is_generator)
 
 		// Only flag F002 for functions with non-None return annotations
 		// Skip stub bodies (Protocol methods, abstract methods with ... or pass)
-		if !has_return_ann || returns_none || is_stub { continue }
+		// Skip generator functions (yield doesn't need explicit return)
+		if !has_return_ann || returns_none || is_stub || is_generator { continue }
 
 		check_missing_return(&cfg, cfg.scope_name, has_return_ann, has_any_return, file_path, scope.loc, &result.diagnostics)
 	}
@@ -265,7 +267,7 @@ returns_is_none :: proc(returns: parser.Expr) -> bool {
 	return is_none
 }
 
-check_function_returns :: proc(stmts: []parser.Stmt, target_scope: ^binder.Scope, has_return_ann: ^bool, has_any_return: ^bool, returns_none: ^bool, is_stub: ^bool) {
+check_function_returns :: proc(stmts: []parser.Stmt, target_scope: ^binder.Scope, has_return_ann: ^bool, has_any_return: ^bool, returns_none: ^bool, is_stub: ^bool, is_generator: ^bool) {
 	for stmt in stmts {
 		#partial switch s in stmt {
 		case ^parser.Func_Def:
@@ -274,10 +276,11 @@ check_function_returns :: proc(stmts: []parser.Stmt, target_scope: ^binder.Scope
 				returns_none^ = returns_is_none(s.returns)
 				is_stub^ = body_is_stub(s.body)
 				scan_for_returns(s.body, has_any_return)
+				is_generator^ = _has_yield(s.body)
 				return
 			}
 			// Recurse to find nested
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 
 		case ^parser.Async_Func_Def:
 			if s.name == target_scope.name && s.loc.line == target_scope.loc.line {
@@ -285,30 +288,67 @@ check_function_returns :: proc(stmts: []parser.Stmt, target_scope: ^binder.Scope
 				returns_none^ = returns_is_none(s.returns)
 				is_stub^ = body_is_stub(s.body)
 				scan_for_returns(s.body, has_any_return)
+				is_generator^ = _has_yield(s.body)
 				return
 			}
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 
 		case ^parser.Class_Def:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 		case ^parser.If_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
-			check_function_returns(s.orelse, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
+			check_function_returns(s.orelse, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 		case ^parser.While_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 		case ^parser.For_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 		case ^parser.Try_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 			for handler in s.handlers {
-				check_function_returns(handler.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+				check_function_returns(handler.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 			}
-			check_function_returns(s.orelse, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
-			check_function_returns(s.finalbody, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.orelse, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
+			check_function_returns(s.finalbody, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 		case ^parser.With_Stmt:
-			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub)
+			check_function_returns(s.body, target_scope, has_return_ann, has_any_return, returns_none, is_stub, is_generator)
 		}
 	}
+}
+
+// Check if a function body contains yield (is a generator).
+// Only checks top-level statements — nested function defs have their own scope.
+@(private = "file")
+_has_yield :: proc(stmts: []parser.Stmt) -> bool {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			#partial switch _ in s.value {
+			case ^parser.Yield_Expr, ^parser.Yield_From_Expr:
+				return true
+			}
+		case ^parser.Assign:
+			if s.value != nil {
+				#partial switch _ in s.value {
+				case ^parser.Yield_Expr, ^parser.Yield_From_Expr:
+					return true
+				}
+			}
+		case ^parser.If_Stmt:
+			if _has_yield(s.body) || _has_yield(s.orelse) { return true }
+		case ^parser.For_Stmt:
+			if _has_yield(s.body) { return true }
+		case ^parser.While_Stmt:
+			if _has_yield(s.body) { return true }
+		case ^parser.Try_Stmt:
+			if _has_yield(s.body) { return true }
+			for handler in s.handlers {
+				if _has_yield(handler.body) { return true }
+			}
+		case ^parser.With_Stmt:
+			if _has_yield(s.body) { return true }
+		}
+	}
+	return false
 }
 
 scan_for_returns :: proc(stmts: []parser.Stmt, has_any_return: ^bool) {
