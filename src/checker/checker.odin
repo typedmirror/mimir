@@ -2023,6 +2023,53 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 	}
 }
 
+// Resolve a name to a param annotation type in __init__.
+@(private = "file")
+_resolve_param_type :: proc(name: string, fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
+	// Check args (regular params)
+	for arg in fd.args.args {
+		if arg.arg == name && arg.annotation != nil {
+			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		}
+	}
+	// Check posonlyargs
+	for arg in fd.args.posonlyargs {
+		if arg.arg == name && arg.annotation != nil {
+			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		}
+	}
+	// Check kwonlyargs
+	for arg in fd.args.kwonlyargs {
+		if arg.arg == name && arg.annotation != nil {
+			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		}
+	}
+	return TYPE_UNKNOWN
+}
+
+// Try to resolve RHS type from param usage: param.method(), Constructor(param), etc.
+@(private = "file")
+_resolve_rhs_from_param :: proc(value: parser.Expr, fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
+	if value == nil { return TYPE_UNKNOWN }
+	// param.method() — the base of a method call is a param
+	#partial switch call in value {
+	case ^parser.Call_Expr:
+		if attr, ok := call.func.(^parser.Attribute_Expr); ok {
+			if name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
+				return _resolve_param_type(name.id, fd, ctx)
+			}
+		}
+	}
+	// Attribute access on param: param.attr
+	#partial switch attr in value {
+	case ^parser.Attribute_Expr:
+		if name, ok := attr.value.(^parser.Name_Expr); ok {
+			return _resolve_param_type(name.id, fd, ctx)
+		}
+	}
+	return TYPE_UNKNOWN
+}
+
 // Scan __init__ body for self.attr = value patterns
 scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[string]Type_ID) {
 	for stmt in fd.body {
@@ -2037,17 +2084,20 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 							if s.value != nil {
 								// First try: self.x = x where x is a parameter
 								if name, ok3 := s.value.(^parser.Name_Expr); ok3 {
-									for arg in fd.args.args {
-										if arg.arg == name.id {
-											val_type = resolve_annotation(
-												arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
-											break
-										}
-									}
+									val_type = _resolve_param_type(name.id, fd, ctx)
 								}
-								// Fallback: infer from RHS expression (handles literals, constructors, etc.)
+								// Second try: self.x = param.method() — use param's type
+								if val_type == TYPE_UNKNOWN {
+									val_type = _resolve_rhs_from_param(s.value, fd, ctx)
+								}
+								// Fallback: infer from RHS expression
 								if val_type == TYPE_UNKNOWN {
 									val_type = infer_expr(s.value, ctx)
+								}
+								// Last resort for same-named param: self.method = method.upper()
+								// Attr name matches a param → use param type
+								if val_type == TYPE_UNKNOWN {
+									val_type = _resolve_param_type(attr.attr, fd, ctx)
 								}
 							}
 							attrs[attr.attr] = val_type
