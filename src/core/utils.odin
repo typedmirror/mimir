@@ -69,3 +69,51 @@ _is_ignored :: proc(name: string) -> bool {
 	}
 	return false
 }
+
+// Project root markers — presence of any of these indicates a project root directory.
+PROJECT_MARKERS :: [?]string{
+	".git",
+	"mimir.toml",
+	"pyproject.toml",
+	"setup.py",
+	"setup.cfg",
+}
+
+// Walk up from a file path to find the project root.
+// Returns the project root directory, or "" if no markers found.
+// Stops at filesystem root or after 20 levels.
+find_project_root :: proc(start_path: string, allocator := context.allocator) -> string {
+	// Get the directory containing the starting file
+	dir := start_path
+	if strings.has_suffix(start_path, ".py") || strings.has_suffix(start_path, ".pyi") {
+		for i := len(dir) - 1; i >= 0; i -= 1 {
+			if dir[i] == '/' { dir = dir[:i]; break }
+			if i == 0 { dir = "." }
+		}
+	}
+
+	// Walk up, checking for project markers at each level
+	for level := 0; level < 20; level += 1 {
+		if len(dir) == 0 || dir == "/" { break }
+
+		for marker in PROJECT_MARKERS {
+			marker_path := strings.concatenate({dir, "/", marker}, context.temp_allocator)
+			if os.exists(marker_path) {
+				return strings.clone(dir, allocator)
+			}
+		}
+
+		// Go up one level
+		found_slash := false
+		for i := len(dir) - 1; i >= 0; i -= 1 {
+			if dir[i] == '/' {
+				dir = dir[:i]
+				found_slash = true
+				break
+			}
+		}
+		if !found_slash { break }
+	}
+
+	return ""
+}

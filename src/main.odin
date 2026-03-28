@@ -1573,25 +1573,37 @@ cmd_check :: proc(args: []string) {
 	if sarif_mode { sarif_diags = make([dynamic]core.Diagnostic, 0, 32, p.arena.allocator) }
 
 	// Single vs multi-file mode selection.
-	// Multi-file when: directory target OR single file in a Python package (__init__.py present).
+	// Multi-file when: directory target, project root found, or single file in a Python package.
 	errors := 0
 	use_multi := len(p.files) > 1
 	if len(p.files) == 1 && strings.has_suffix(target, ".py") {
-		// Check if file is in a Python package (has __init__.py sibling)
-		dir := target
-		for i := len(dir) - 1; i >= 0; i -= 1 {
-			if dir[i] == '/' { dir = dir[:i]; break }
-			if i == 0 { dir = "." }
-		}
-		// Only upgrade if __init__.py exists (actual package, not loose scripts)
-		init_path := strings.concatenate({dir, "/__init__.py"}, p.arena.allocator)
-		init_info, init_err := os.stat(init_path, context.temp_allocator)
-		if init_err == nil {
-			os.file_info_delete(init_info, context.temp_allocator)
-			pkg_files, pkg_err := core.find_python_files(dir)
-			if pkg_err == nil && len(pkg_files) > 1 {
+		// B2: Auto-detect project root by walking up to .git/pyproject.toml/mimir.toml/setup.py
+		project_root := core.find_project_root(target, p.arena.allocator)
+		if len(project_root) > 0 {
+			root_files, root_err := core.find_python_files(project_root)
+			if root_err == nil && len(root_files) > 1 {
 				use_multi = true
-				p.files = pkg_files
+				p.files = root_files
+				target = project_root
+			}
+		}
+
+		// Fallback: check if file is in a Python package (has __init__.py sibling)
+		if !use_multi {
+			dir := target
+			for i := len(dir) - 1; i >= 0; i -= 1 {
+				if dir[i] == '/' { dir = dir[:i]; break }
+				if i == 0 { dir = "." }
+			}
+			init_path := strings.concatenate({dir, "/__init__.py"}, p.arena.allocator)
+			init_info, init_err := os.stat(init_path, context.temp_allocator)
+			if init_err == nil {
+				os.file_info_delete(init_info, context.temp_allocator)
+				pkg_files, pkg_err := core.find_python_files(dir)
+				if pkg_err == nil && len(pkg_files) > 1 {
+					use_multi = true
+					p.files = pkg_files
+				}
 			}
 		}
 	}
@@ -1769,6 +1781,9 @@ cmd_check_single :: proc(
 			stubs_dir, stubs_dir_err := platform.stubs_base_dir(arena.allocator)
 			has_stubs := stubs_dir_err == nil && platform.stubs_available(arena.allocator)
 
+			// Discover site-packages once (outside loop)
+			sp_dirs := modules.discover_site_packages(arena.allocator)
+
 			for imp in bind_result.imports {
 				if imp.level > 0 { continue } // skip relative
 				if checker.is_virtual_module(&vreg, imp.module_name) { continue }
@@ -1792,6 +1807,14 @@ cmd_check_single :: proc(
 				// Fall back to package cache
 				if !found {
 					pkg_file, found = modules.resolve_package_file(imp.module_name, &pkg_cache, arena.allocator)
+				}
+
+				// Fall back to system site-packages
+				if !found {
+					for sp_dir in sp_dirs {
+						pkg_file, found = modules.find_module_in_site_packages(imp.module_name, sp_dir, arena.allocator)
+						if found { break }
+					}
 				}
 
 				if !found { continue }
@@ -1941,6 +1964,19 @@ cmd_check_multi :: proc(
 		if stubs_err == nil && platform.stubs_available(arena.allocator) {
 			res_ctx.stubs_dir = stubs_dir
 			res_ctx.parsed_stdlib = make(map[string]modules.Module_Exports, 32, arena.allocator)
+		}
+	}
+
+	// 6d. Wire system site-packages for third-party import resolution
+	{
+		sp_dirs := modules.discover_site_packages(arena.allocator)
+		if len(sp_dirs) > 0 {
+			res_ctx.site_packages_dirs = sp_dirs
+			res_ctx.parsed_site_packages = make(map[string]modules.Module_Exports, 32, arena.allocator)
+			// Ensure bridge is set for extract_package_exports
+			if res_ctx.bridge == nil {
+				res_ctx.bridge = bridge
+			}
 		}
 	}
 
