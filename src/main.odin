@@ -1887,6 +1887,95 @@ cmd_check_single :: proc(
 	return error_count
 }
 
+// Check a module silently (no diagnostic emission) — collect exports only.
+_check_module_silent :: proc(
+	info: ^modules.Module_Info,
+	res_ctx: ^modules.Resolution_Context,
+	vreg: ^checker.Virtual_Registry,
+	registry: ^checker.Type_Registry,
+	builtins: ^checker.Builtin_Names,
+	allocator: mem.Allocator,
+) {
+	import_types := modules.resolve_imports(info, res_ctx, vreg)
+	flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, allocator)
+	check_result := checker.check_with_imports(
+		info.parse_result, &info.bind_result, &flow_result,
+		info.file_path, registry, builtins, import_types, allocator)
+	modules.collect_exports(info, &check_result, res_ctx)
+}
+
+// Check a module and emit diagnostics. Returns error count.
+_check_module_emit :: proc(
+	info: ^modules.Module_Info,
+	res_ctx: ^modules.Resolution_Context,
+	vreg: ^checker.Virtual_Registry,
+	registry: ^checker.Type_Registry,
+	builtins: ^checker.Builtin_Names,
+	allocator: mem.Allocator,
+	level: Analysis_Level,
+	show_confidence: bool,
+	min_confidence: core.Confidence,
+) -> int {
+	errors := 0
+	mod_source, _ := os.read_entire_file(info.file_path, allocator)
+	mod_lines := strings.split(string(mod_source), "\n")
+
+	_pd :: proc(d: core.Diagnostic, show_confidence: bool) {
+		if show_confidence {
+			core.diagnostic_print_with_confidence(d)
+		} else {
+			core.diagnostic_print(d)
+		}
+	}
+
+	// Binder diagnostics
+	for d in info.bind_result.diagnostics {
+		if !should_emit_at_level(d.code, level) { continue }
+		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
+		_pd(d, show_confidence)
+		if d.severity == .Error { errors += 1 }
+	}
+
+	// Resolve + flow + check
+	import_types := modules.resolve_imports(info, res_ctx, vreg)
+	flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, allocator)
+	for d in flow_result.diagnostics {
+		if !should_emit_at_level(d.code, level) { continue }
+		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
+		_pd(d, show_confidence)
+		if d.severity == .Error { errors += 1 }
+	}
+
+	check_result := checker.check_with_imports(
+		info.parse_result, &info.bind_result, &flow_result,
+		info.file_path, registry, builtins, import_types, allocator)
+	for d in check_result.diagnostics {
+		if !should_emit_at_level(d.code, level) { continue }
+		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
+		_pd(d, show_confidence)
+		if d.severity == .Error { errors += 1 }
+	}
+
+	// Concurrency
+	conc_diagnostics := concurrency.analyze_concurrency(
+		info.parse_result, &info.bind_result, string(mod_source), info.file_path, allocator)
+	for d in conc_diagnostics {
+		if !should_emit_at_level(d.code, level) { continue }
+		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
+		_pd(d, show_confidence)
+		if d.severity == .Error { errors += 1 }
+	}
+
+	modules.collect_exports(info, &check_result, res_ctx)
+
+	fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d types)",
+		info.file_path, len(info.parse_result.body),
+		len(info.bind_result.symbols), len(info.bind_result.scopes),
+		len(registry.types))
+
+	return errors
+}
+
 // Multi-module check — shared registry, import resolution
 cmd_check_multi :: proc(
 	root_path: string,
@@ -1985,61 +2074,7 @@ cmd_check_multi :: proc(
 	for name in graph.topo_order {
 		info, ok := graph.modules[name]
 		if !ok || info.parse_result == nil { continue }
-
-		// Read source for inline suppression
-		mod_source, _ := os.read_entire_file(info.file_path, arena.allocator)
-		mod_lines := strings.split(string(mod_source), "\n")
-
-		// Report binder diagnostics
-		for d in info.bind_result.diagnostics {
-			if !should_emit_at_level(d.code, level) { continue }
-			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-			_print_d(d, show_confidence)
-			if d.severity == .Error { error_count += 1 }
-		}
-
-		// a. Resolve imports
-		import_types := modules.resolve_imports(info, &res_ctx, &vreg)
-
-		// b. Flow analysis
-		flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, arena.allocator)
-		for d in flow_result.diagnostics {
-			if !should_emit_at_level(d.code, level) { continue }
-			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-			_print_d(d, show_confidence)
-			if d.severity == .Error { error_count += 1 }
-		}
-
-		// c. Type check with imports
-		check_result := checker.check_with_imports(
-			info.parse_result, &info.bind_result, &flow_result,
-			info.file_path, &registry, &builtins, import_types, arena.allocator)
-		for d in check_result.diagnostics {
-			if !should_emit_at_level(d.code, level) { continue }
-			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-			_print_d(d, show_confidence)
-			if d.severity == .Error { error_count += 1 }
-		}
-
-		// d. Concurrency analysis (reuse already-read source)
-		conc_source := string(mod_source)
-		conc_diagnostics := concurrency.analyze_concurrency(
-			info.parse_result, &info.bind_result, conc_source, info.file_path, arena.allocator)
-		for d in conc_diagnostics {
-			if !should_emit_at_level(d.code, level) { continue }
-			if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-			_print_d(d, show_confidence)
-			if d.severity == .Error { error_count += 1 }
-		}
-
-		// e. Collect exports
-		modules.collect_exports(info, &check_result, &res_ctx)
-
-		// f. Print summary
-		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d types)",
-			info.file_path, len(info.parse_result.body),
-			len(info.bind_result.symbols), len(info.bind_result.scopes),
-			len(registry.types))
+		error_count += _check_module_emit(info, &res_ctx, &vreg, &registry, &builtins, arena.allocator, level, show_confidence, min_confidence)
 	}
 
 	if error_count > 0 {
