@@ -120,6 +120,7 @@ extract_package_exports :: proc(
 	bridge: ^parser.Bridge,
 	registry: ^checker.Type_Registry,
 	allocator: mem.Allocator,
+	res_ctx: ^Resolution_Context = nil,
 ) -> (exports: Module_Exports, ok: bool) {
 	// Determine package root directory from file path
 	// e.g., /path/flask/__init__.py → /path/flask/
@@ -150,8 +151,13 @@ extract_package_exports :: proc(
 	// Recursively resolve relative imports within the package
 	_resolve_pkg_imports(
 		&bind_result, mod_scope, pkg_root, &import_types,
-		bridge, registry, &builtins, &parsed_subs, &sub_exports, allocator, 0,
+		bridge, registry, &builtins, &parsed_subs, &sub_exports, allocator, 0, res_ctx,
 	)
+
+	// Resolve absolute imports (stdlib + site-packages) when context available
+	if res_ctx != nil && mod_scope != nil {
+		_resolve_absolute_imports(&bind_result, mod_scope, &import_types, registry, res_ctx, allocator)
+	}
 
 	// Flow analysis on main file
 	flow_result := flow.analyze(module, &bind_result, file_path, allocator)
@@ -198,6 +204,71 @@ extract_package_exports :: proc(
 	return exports, true
 }
 
+// Resolve absolute imports (stdlib + site-packages) for a parsed module.
+// Wires resolved types into import_types so __init__ bodies can access them.
+@(private = "file")
+_resolve_absolute_imports :: proc(
+	bind_result: ^binder.Bind_Result,
+	mod_scope: ^binder.Scope,
+	import_types: ^map[binder.Symbol_ID]checker.Type_ID,
+	registry: ^checker.Type_Registry,
+	res_ctx: ^Resolution_Context,
+	allocator: mem.Allocator,
+) {
+	for imp in bind_result.imports {
+		if imp.level > 0 { continue }
+		if imp.module_name == "typing" || imp.module_name == "typing_extensions" { continue }
+
+		target_exports: Module_Exports
+		has_exports := false
+
+		// Try stdlib stubs
+		if len(res_ctx.stubs_dir) > 0 && platform.is_stdlib_module(imp.module_name) {
+			stdlib_exp, stdlib_ok := resolve_from_stdlib_stubs(imp.module_name, res_ctx)
+			if stdlib_ok {
+				target_exports = stdlib_exp
+				has_exports = true
+			}
+		}
+
+		// Try site-packages
+		if !has_exports && len(res_ctx.site_packages_dirs) > 0 {
+			sp_exp, sp_ok := resolve_from_site_packages(imp.module_name, res_ctx)
+			if sp_ok {
+				target_exports = sp_exp
+				has_exports = true
+			}
+		}
+
+		if !has_exports { continue }
+
+		if len(imp.names) == 0 && !imp.is_star {
+			// "import X" → Module_Type
+			top := imp.module_name
+			for j := 0; j < len(top); j += 1 {
+				if top[j] == '.' { top = top[:j]; break }
+			}
+			if sym_id, ok := mod_scope.symbols[top]; ok {
+				mod_type_id := checker.register_type(registry, checker.Module_Type{
+					name    = imp.module_name,
+					exports = target_exports.types,
+				})
+				import_types[sym_id] = mod_type_id
+			}
+		} else if !imp.is_star {
+			// "from X import Y, Z"
+			for imp_name in imp.names {
+				local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
+				if sym_id, ok := mod_scope.symbols[local]; ok {
+					if type_id, found := target_exports.types[imp_name.name]; found {
+						import_types[sym_id] = type_id
+					}
+				}
+			}
+		}
+	}
+}
+
 // Recursively resolve relative imports for a package file.
 // Parses each sub-module, extracts types, wires into import_types.
 // Max depth prevents runaway recursion in deeply nested packages.
@@ -216,6 +287,7 @@ _resolve_pkg_imports :: proc(
 	sub_exports: ^map[string]Module_Exports,
 	allocator: mem.Allocator,
 	depth: int,
+	res_ctx: ^Resolution_Context = nil,
 ) {
 	if depth >= MAX_PKG_DEPTH { return }
 	if mod_scope == nil { return }
@@ -246,8 +318,13 @@ _resolve_pkg_imports :: proc(
 
 		_resolve_pkg_imports(
 			&sub_bind, sub_scope, sub_pkg_root, &sub_import_types,
-			bridge, registry, builtins, parsed_subs, sub_exports, allocator, depth + 1,
+			bridge, registry, builtins, parsed_subs, sub_exports, allocator, depth + 1, res_ctx,
 		)
+
+		// Resolve absolute imports (stdlib + site-packages) for this sub-module
+		if res_ctx != nil && sub_scope != nil {
+			_resolve_absolute_imports(&sub_bind, sub_scope, &sub_import_types, registry, res_ctx, allocator)
+		}
 
 		// Check sub-module with its resolved imports
 		sub_flow := flow.analyze(sub_module, &sub_bind, sub_file, allocator)

@@ -197,7 +197,6 @@ resolve_imports :: proc(
 // Resolve a stdlib module from typeshed .pyi stubs.
 // Lazily parses the stub file and caches the result.
 // Also checks/writes disk cache for cross-session persistence.
-@(private = "file")
 resolve_from_stdlib_stubs :: proc(
 	module_name: string,
 	ctx: ^Resolution_Context,
@@ -279,7 +278,7 @@ resolve_from_package_cache :: proc(
 		cached_path, cached_found := read_stub_cache(module_name, cache_dir, cache_key, ctx.allocator)
 		if cached_found {
 			pkg_exports, extract_ok := extract_package_exports(
-				cached_path, module_name, ctx.bridge, ctx.registry, ctx.allocator,
+				cached_path, module_name, ctx.bridge, ctx.registry, ctx.allocator, ctx,
 			)
 			if extract_ok {
 				ctx.parsed_packages[module_name] = pkg_exports
@@ -295,7 +294,7 @@ resolve_from_package_cache :: proc(
 
 	// Parse + extract types
 	pkg_exports, extract_ok := extract_package_exports(
-		file_path, module_name, ctx.bridge, ctx.registry, ctx.allocator,
+		file_path, module_name, ctx.bridge, ctx.registry, ctx.allocator, ctx,
 	)
 	if !extract_ok { return {}, false }
 
@@ -409,7 +408,6 @@ _glob_site_packages :: proc(base: string, subdir: string, dirs: ^[dynamic]string
 
 // Resolve a module from system site-packages.
 // Same pattern as resolve_from_package_cache: lazy parse + disk cache.
-@(private = "file")
 resolve_from_site_packages :: proc(
 	module_name: string,
 	ctx: ^Resolution_Context,
@@ -426,7 +424,7 @@ resolve_from_site_packages :: proc(
 		cached_path, cached_found := read_stub_cache(module_name, cache_dir, cache_key, ctx.allocator)
 		if cached_found {
 			sp_exports, extract_ok := extract_package_exports(
-				cached_path, module_name, ctx.bridge, ctx.registry, ctx.allocator,
+				cached_path, module_name, ctx.bridge, ctx.registry, ctx.allocator, ctx,
 			)
 			if extract_ok {
 				_cache_site_packages(ctx, module_name, sp_exports)
@@ -448,7 +446,7 @@ resolve_from_site_packages :: proc(
 
 	// Parse + extract types through existing pipeline
 	sp_exports, extract_ok := extract_package_exports(
-		file_path, module_name, ctx.bridge, ctx.registry, ctx.allocator,
+		file_path, module_name, ctx.bridge, ctx.registry, ctx.allocator, ctx,
 	)
 	if !extract_ok { return {}, false }
 
