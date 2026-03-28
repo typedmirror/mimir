@@ -170,6 +170,10 @@ extract_package_exports :: proc(
 		if type_id, has := check_result.symbol_types[sym_id]; has {
 			if type_id != checker.TYPE_UNKNOWN {
 				exports.types[name] = type_id
+			} else {
+				// Fall back to TYPE_ANY for unresolved exports (complex stub types)
+				// Prevents T007 false positives on valid module attributes
+				exports.types[name] = checker.TYPE_ANY
 			}
 		}
 	}
