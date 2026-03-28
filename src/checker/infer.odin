@@ -1245,6 +1245,58 @@ make_params :: proc(reg: ^Type_Registry, types: []Type_ID, defaults: []bool = {}
 	return ps
 }
 
+// Check if a class inherits from a dict-like base (Mapping, MutableMapping, dict).
+@(private = "file")
+_has_mapping_base :: proc(reg: ^Type_Registry, cls: ^Class_Type) -> bool {
+	for base_id in cls.bases {
+		bt := get_type(reg, base_id)
+		#partial switch bi in bt.info {
+		case Class_Type:
+			if bi.name == "Mapping" || bi.name == "MutableMapping" || bi.name == "dict" {
+				return true
+			}
+		case Instance_Type:
+			ct := get_type(reg, bi.class_type)
+			#partial switch ci in ct.info {
+			case Class_Type:
+				if ci.name == "Mapping" || ci.name == "MutableMapping" || ci.name == "dict" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// Return dict method types for Mapping/MutableMapping subclasses.
+@(private = "file")
+_lookup_dict_method :: proc(attr: string, reg: ^Type_Registry) -> Type_ID {
+	no_params := make([]Param_Type, 0, reg.allocator)
+	switch attr {
+	case "get":
+		return make_callable_type(reg, make_params(reg, {TYPE_STR, TYPE_ANY}, {false, true}), TYPE_ANY)
+	case "pop":
+		return make_callable_type(reg, make_params(reg, {TYPE_STR, TYPE_ANY}, {false, true}), TYPE_ANY)
+	case "setdefault":
+		return make_callable_type(reg, make_params(reg, {TYPE_STR, TYPE_ANY}, {false, true}), TYPE_ANY)
+	case "keys":
+		return make_callable_type(reg, no_params, TYPE_ANY)
+	case "values":
+		return make_callable_type(reg, no_params, TYPE_ANY)
+	case "items":
+		return make_callable_type(reg, no_params, TYPE_ANY)
+	case "update":
+		return make_callable_type(reg, make_params(reg, {TYPE_ANY}, {true}), TYPE_NONE)
+	case "copy":
+		return make_callable_type(reg, no_params, TYPE_ANY)
+	case "__contains__":
+		return make_callable_type(reg, make_params(reg, {TYPE_ANY}), TYPE_BOOL)
+	case "__len__":
+		return make_callable_type(reg, no_params, TYPE_INT)
+	}
+	return TYPE_UNKNOWN
+}
+
 lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -> Type_ID {
 	if receiver == TYPE_UNKNOWN || receiver == TYPE_ANY { return TYPE_UNKNOWN }
 
@@ -1393,10 +1445,15 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 	#partial switch &info in t.info {
 	case Instance_Type:
 		cls := get_type(reg, info.class_type)
-		#partial switch cls_info in cls.info {
+		#partial switch &cls_info in cls.info {
 		case Class_Type:
 			if attr_type, ok := cls_info.attrs[attr]; ok {
 				return attr_type
+			}
+			// Fallback: dict methods for classes inheriting from Mapping/MutableMapping/dict
+			if _has_mapping_base(reg, &cls_info) {
+				dict_result := _lookup_dict_method(attr, reg)
+				if dict_result != TYPE_UNKNOWN { return dict_result }
 			}
 		}
 	case Class_Type:
