@@ -311,20 +311,41 @@ topological_sort :: proc(graph: ^Module_Graph, diagnostics: ^[dynamic]core.Diagn
 	// Check for cycles
 	if processed < len(graph.modules) {
 		graph.has_cycles = true
-		// Add remaining cycle members in sorted order (deterministic)
-		remaining := make([dynamic]string, 0, len(graph.modules), graph.allocator)
+		// Add remaining cycle members sorted by import count (most-imported first).
+		// Modules that export types consumed by others should be checked first.
+		// Tie-break alphabetically for determinism.
+		Weighted_Name :: struct { name: string, weight: int }
+		remaining := make([dynamic]Weighted_Name, 0, len(graph.modules), graph.allocator)
+		remaining_set := make(map[string]bool, len(graph.modules), graph.allocator)
 		for name, _ in graph.modules {
 			found := false
 			for ordered in graph.topo_order {
 				if ordered == name { found = true; break }
 			}
 			if !found {
-				append(&remaining, name)
+				append(&remaining, Weighted_Name{name = name, weight = 0})
+				remaining_set[name] = true
 			}
 		}
-		slice.sort(remaining[:])
+		// Count how many other cycle members import each module
+		for &r in remaining {
+			for name in remaining_set {
+				info := graph.modules[name]
+				if info == nil { continue }
+				for edge in info.imports {
+					if edge.target_module == r.name {
+						r.weight += 1
+					}
+				}
+			}
+		}
+		// Sort: most-imported first (highest weight), alphabetical tie-break
+		slice.sort_by(remaining[:], proc(a, b: Weighted_Name) -> bool {
+			if a.weight != b.weight { return a.weight > b.weight }
+			return a.name < b.name
+		})
 		for r in remaining {
-			append(&graph.topo_order, r)
+			append(&graph.topo_order, r.name)
 		}
 
 		if diagnostics != nil {
