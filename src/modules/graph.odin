@@ -1,5 +1,6 @@
 package modules
 
+import "core:slice"
 import "core:strings"
 import "core:mem"
 
@@ -266,13 +267,14 @@ topological_sort :: proc(graph: ^Module_Graph, diagnostics: ^[dynamic]core.Diagn
 		}
 	}
 
-	// Initialize queue with zero-dependency modules
+	// Initialize queue with zero-dependency modules (sorted for determinism)
 	queue := make([dynamic]string, 0, len(graph.modules), graph.allocator)
 	for name, deg in in_degree {
 		if deg == 0 {
 			append(&queue, name)
 		}
 	}
+	slice.sort(queue[:])
 
 	// Process
 	clear(&graph.topo_order)
@@ -286,32 +288,43 @@ topological_sort :: proc(graph: ^Module_Graph, diagnostics: ^[dynamic]core.Diagn
 		processed += 1
 
 		// For each module that depends on 'name', reduce in-degree
+		// Collect newly ready modules, then sort for deterministic ordering
+		newly_ready := make([dynamic]string, 0, 4, graph.allocator)
 		for other_name, other_info in graph.modules {
 			for edge in other_info.imports {
 				if edge.target_module == name {
 					if deg, ok := in_degree[other_name]; ok {
 						in_degree[other_name] = deg - 1
 						if deg - 1 == 0 {
-							append(&queue, other_name)
+							append(&newly_ready, other_name)
 						}
 					}
 				}
 			}
+		}
+		slice.sort(newly_ready[:])
+		for nr in newly_ready {
+			append(&queue, nr)
 		}
 	}
 
 	// Check for cycles
 	if processed < len(graph.modules) {
 		graph.has_cycles = true
-		// Add remaining modules in arbitrary order
+		// Add remaining cycle members in sorted order (deterministic)
+		remaining := make([dynamic]string, 0, len(graph.modules), graph.allocator)
 		for name, _ in graph.modules {
 			found := false
 			for ordered in graph.topo_order {
 				if ordered == name { found = true; break }
 			}
 			if !found {
-				append(&graph.topo_order, name)
+				append(&remaining, name)
 			}
+		}
+		slice.sort(remaining[:])
+		for r in remaining {
+			append(&graph.topo_order, r)
 		}
 
 		if diagnostics != nil {
