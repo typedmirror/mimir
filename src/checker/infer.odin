@@ -114,6 +114,39 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		for v in e.values {
 			append(&types, infer_expr(v, ctx, expected))
 		}
+		// For `or`: None from non-last operands can be removed.
+		// `x or y` where x: T|None → if x is None (falsy), result is y, never None.
+		if e.op == .Or && len(types) > 1 {
+			filtered := make([dynamic]Type_ID, 0, len(types), ctx.reg.allocator)
+			for t, i in types {
+				if i < len(types) - 1 {
+					// Non-last operand: strip None from union types
+					tt := get_type(ctx.reg, t)
+					if ut, is_union := tt.info.(Union_Type); is_union {
+						non_none := make([dynamic]Type_ID, 0, len(ut.members), ctx.reg.allocator)
+						for m in ut.members {
+							if m != TYPE_NONE { append(&non_none, m) }
+						}
+						if len(non_none) > 0 && len(non_none) < len(ut.members) {
+							if len(non_none) == 1 {
+								append(&filtered, non_none[0])
+							} else {
+								append(&filtered, make_union_type(ctx.reg, non_none[:]))
+							}
+							continue
+						}
+					}
+					if t != TYPE_NONE {
+						append(&filtered, t)
+					}
+				} else {
+					append(&filtered, t) // Last operand kept as-is
+				}
+			}
+			if len(filtered) > 0 {
+				return make_union_type(ctx.reg, filtered[:])
+			}
+		}
 		return make_union_type(ctx.reg, types[:])
 
 	case ^parser.Call_Expr:

@@ -337,6 +337,8 @@ _has_yield :: proc(stmts: []parser.Stmt) -> bool {
 			if _has_yield(s.body) || _has_yield(s.orelse) { return true }
 		case ^parser.For_Stmt:
 			if _has_yield(s.body) { return true }
+		case ^parser.Async_For:
+			if _has_yield(s.body) { return true }
 		case ^parser.While_Stmt:
 			if _has_yield(s.body) { return true }
 		case ^parser.Try_Stmt:
@@ -345,6 +347,8 @@ _has_yield :: proc(stmts: []parser.Stmt) -> bool {
 				if _has_yield(handler.body) { return true }
 			}
 		case ^parser.With_Stmt:
+			if _has_yield(s.body) { return true }
+		case ^parser.Async_With:
 			if _has_yield(s.body) { return true }
 		}
 	}
