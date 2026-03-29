@@ -2066,6 +2066,33 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 			if s.name == "__init__" {
 				scan_init_attrs(s, ctx, attrs)
 			}
+		case ^parser.Async_Func_Def:
+			ft := build_async_func_type(s, ctx)
+			// Same property/setter handling as sync methods
+			is_property := false
+			is_setter_or_deleter := false
+			for dec in s.decorator_list {
+				#partial switch d in dec {
+				case ^parser.Name_Expr:
+					if d.id == "property" { is_property = true }
+				case ^parser.Attribute_Expr:
+					if d.attr == "property" { is_property = true }
+					if d.attr == "setter" || d.attr == "deleter" { is_setter_or_deleter = true }
+				}
+			}
+			if is_setter_or_deleter {
+				// skip
+			} else if is_property {
+				ft_info := get_type(ctx.reg, ft)
+				#partial switch callable in ft_info.info {
+				case Callable_Type:
+					attrs[s.name] = callable.return_type
+				case:
+					attrs[s.name] = ft
+				}
+			} else {
+				attrs[s.name] = ft
+			}
 		case ^parser.Ann_Assign:
 			declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 			if name_expr, ok := s.target.(^parser.Name_Expr); ok {

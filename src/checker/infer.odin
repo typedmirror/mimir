@@ -158,10 +158,14 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			should_flag := false
 			#partial switch ri in rt.info {
 			case Instance_Type:
-				// Only flag if class has known attrs (skip placeholders from unresolved imports)
+				// Only flag if class has known attrs AND attr is not in the map
+				// (attrs with TYPE_UNKNOWN value exist but couldn't be resolved — not a T007)
 				cls := get_type(ctx.reg, ri.class_type)
 				if ci, ci_ok := cls.info.(Class_Type); ci_ok {
-					should_flag = len(ci.attrs) > 0
+					if len(ci.attrs) > 0 {
+						_, attr_exists := ci.attrs[e.attr]
+						should_flag = !attr_exists
+					}
 				}
 			case Class_Type:
 				// Class object attribute resolution is incomplete (no classmethods, class vars).
@@ -541,7 +545,11 @@ infer_name :: proc(e: ^parser.Name_Expr, ctx: ^Infer_Context) -> Type_ID {
 			}
 		}
 		if class_type, found := ctx.reg.class_types[sym_id]; found {
-			return class_type
+			// Verify name matches to prevent cross-file Symbol_ID collision
+			ct := get_type(ctx.reg, class_type)
+			if ci, ci_ok := ct.info.(Class_Type); ci_ok && ci.name == e.id {
+				return class_type
+			}
 		}
 		// Fallback: check module-level symbol types (LEGB "G" — global scope)
 		// Only for functions/classes — variables may have stale flow-sensitive types

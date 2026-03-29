@@ -191,8 +191,12 @@ resolve_annotation :: proc(
 			}
 			if !found_class {
 				if ct, f := reg.class_types[sym_id]; f {
-					class_type_id = ct
-					found_class = true
+					// Verify name matches to prevent cross-file Symbol_ID collision
+					ct_type := get_type(reg, ct)
+					if ci, ci_ok := ct_type.info.(Class_Type); ci_ok && ci.name == e.id {
+						class_type_id = ct
+						found_class = true
+					}
 				}
 			}
 			if found_class {
