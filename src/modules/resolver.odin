@@ -241,13 +241,71 @@ resolve_from_stdlib_stubs :: proc(
 	return stub_exports, true
 }
 
+// Patch known stdlib re-exports from C extension modules (_hashlib, _io, _warnings, etc.)
+// These are re-export chains that typeshed stubs reference but mimir can't resolve
+// because the underlying modules are C extensions without parseable source.
+@(private = "file")
+_patch_stdlib_reexports :: proc(exports: ^Module_Exports, module_name: string, reg: ^checker.Type_Registry) {
+	switch module_name {
+	case "hashlib":
+		_ensure_export(exports, "sha1", reg)
+		_ensure_export(exports, "sha256", reg)
+		_ensure_export(exports, "sha512", reg)
+		_ensure_export(exports, "md5", reg)
+		_ensure_export(exports, "sha224", reg)
+		_ensure_export(exports, "sha384", reg)
+		_ensure_export(exports, "sha3_224", reg)
+		_ensure_export(exports, "sha3_256", reg)
+		_ensure_export(exports, "sha3_384", reg)
+		_ensure_export(exports, "sha3_512", reg)
+		_ensure_export(exports, "blake2b", reg)
+		_ensure_export(exports, "blake2s", reg)
+		_ensure_export(exports, "pbkdf2_hmac", reg)
+		_ensure_export(exports, "new", reg)
+	case "io":
+		_ensure_export(exports, "BytesIO", reg)
+		_ensure_export(exports, "StringIO", reg)
+		_ensure_export(exports, "BufferedReader", reg)
+		_ensure_export(exports, "BufferedWriter", reg)
+		_ensure_export(exports, "TextIOWrapper", reg)
+		_ensure_export(exports, "FileIO", reg)
+		_ensure_export(exports, "open", reg)
+	case "warnings":
+		_ensure_export(exports, "warn", reg)
+		_ensure_export(exports, "warn_explicit", reg)
+		_ensure_export(exports, "filterwarnings", reg)
+		_ensure_export(exports, "simplefilter", reg)
+	case "os":
+		_ensure_export(exports, "SEEK_SET", reg)
+		_ensure_export(exports, "SEEK_CUR", reg)
+		_ensure_export(exports, "SEEK_END", reg)
+	case "codecs":
+		_ensure_export(exports, "lookup", reg)
+		_ensure_export(exports, "encode", reg)
+		_ensure_export(exports, "decode", reg)
+		_ensure_export(exports, "getencoder", reg)
+		_ensure_export(exports, "getdecoder", reg)
+	}
+}
+
+@(private = "file")
+_ensure_export :: proc(exports: ^Module_Exports, name: string, reg: ^checker.Type_Registry) {
+	if name not_in exports.types {
+		exports.types[name] = checker.TYPE_ANY
+	}
+}
+
 @(private = "file")
 _cache_stdlib :: proc(ctx: ^Resolution_Context, module_name: string, exports: Module_Exports) {
+	// Patch known re-exports from C extension modules before caching
+	patched := exports
+	_patch_stdlib_reexports(&patched, module_name, ctx.registry)
+
 	if ctx.parsed_stdlib == nil {
 		ctx.parsed_stdlib = make(map[string]Module_Exports, 16, ctx.allocator)
 	}
-	ctx.parsed_stdlib[module_name] = exports
-	ctx.exports[module_name] = exports
+	ctx.parsed_stdlib[module_name] = patched
+	ctx.exports[module_name] = patched
 }
 
 @(private = "file")

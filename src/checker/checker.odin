@@ -348,7 +348,7 @@ check_with_imports :: proc(
 	// Per-file class_types to avoid Symbol_ID collision across files
 	local_class_types := make(map[binder.Symbol_ID]Type_ID, 16, allocator)
 
-	// Register imported class types in BOTH global (for cross-file) and local (for this file)
+	// Register imported class types in BOTH global (for infer_name fallback) and local (for this file)
 	for sym_id, type_id in import_types {
 		t := get_type(registry, type_id)
 		#partial switch _ in t.info {
@@ -1748,7 +1748,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
 	class_type_id: Type_ID
 	if sym_id != binder.INVALID_SYMBOL {
-		// Check local first (per-file), then global (imports)
+		// Check local first (per-file), then global with name verification
 		found_existing := false
 		if ctx.local_class_types != nil {
 			if existing, found := ctx.local_class_types[sym_id]; found {
@@ -1758,8 +1758,13 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		}
 		if !found_existing {
 			if existing, found := ctx.reg.class_types[sym_id]; found {
-				class_type_id = existing
-				found_existing = true
+				// Verify name matches to prevent cross-file Symbol_ID collision
+				// (stub files can have same sym_id as project classes)
+				et := get_type(ctx.reg, existing)
+				if ci, ci_ok := et.info.(Class_Type); ci_ok && ci.name == cd.name {
+					class_type_id = existing
+					found_existing = true
+				}
 			}
 		}
 		if !found_existing {
@@ -1786,6 +1791,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	// Resolve base classes, detecting Generic[T] for type_params
 	bases_dyn := make([dynamic]Type_ID, 0, len(cd.bases), ctx.reg.allocator)
 	type_params_dyn := make([dynamic]Type_ID, 0, 4, ctx.reg.allocator)
+	has_mapping_base := false
 	for base in cd.bases {
 		// Check for Generic[T, U, ...] in bases
 		if sub, ok := base.(^parser.Subscript_Expr); ok {
@@ -1809,6 +1815,20 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 				}
 				continue // Don't add Generic to bases
 			}
+		}
+		// Detect Mapping/MutableMapping/dict base by AST name
+		// (typing.MutableMapping resolves to TYPE_UNKNOWN since typing module isn't fully modeled)
+		base_name_str := ""
+		#partial switch bn in base {
+		case ^parser.Name_Expr:
+			base_name_str = bn.id
+		case ^parser.Subscript_Expr:
+			base_name_str = get_annotation_name(bn.value)
+		case ^parser.Attribute_Expr:
+			base_name_str = bn.attr
+		}
+		if base_name_str == "Mapping" || base_name_str == "MutableMapping" || base_name_str == "dict" {
+			has_mapping_base = true
 		}
 		append(&bases_dyn, infer_expr(base, ctx))
 	}
@@ -1845,6 +1865,14 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 			}
 		}
 	}
+
+	// Inject dict methods for classes inheriting from Mapping/MutableMapping/dict
+	// This handles the case where the base type resolves to TYPE_UNKNOWN
+	// (e.g., typing.MutableMapping not fully modeled)
+	if has_mapping_base {
+		_inject_dict_methods(&attrs, ctx.reg)
+	}
+	// (debug removed)
 
 	// @dataclass: auto-generate __init__, __repr__, __eq__
 	if is_dataclass {
@@ -2067,6 +2095,28 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 	}
 }
 
+// Inject dict/mapping methods into a class's attrs map.
+// Used when a class inherits from Mapping/MutableMapping/dict but the base type
+// resolves to TYPE_UNKNOWN (e.g., typing.MutableMapping not fully modeled).
+@(private = "file")
+_inject_dict_methods :: proc(attrs: ^map[string]Type_ID, reg: ^Type_Registry) {
+	no_params := make([]Param_Type, 0, reg.allocator)
+	if "get" not_in attrs^ { attrs["get"] = make_callable_type(reg, make_params(reg, {TYPE_STR, TYPE_ANY}, {false, true}), TYPE_ANY) }
+	if "pop" not_in attrs^ { attrs["pop"] = make_callable_type(reg, make_params(reg, {TYPE_STR, TYPE_ANY}, {false, true}), TYPE_ANY) }
+	if "setdefault" not_in attrs^ { attrs["setdefault"] = make_callable_type(reg, make_params(reg, {TYPE_STR, TYPE_ANY}, {false, true}), TYPE_ANY) }
+	if "keys" not_in attrs^ { attrs["keys"] = make_callable_type(reg, no_params, TYPE_ANY) }
+	if "values" not_in attrs^ { attrs["values"] = make_callable_type(reg, no_params, TYPE_ANY) }
+	if "items" not_in attrs^ { attrs["items"] = make_callable_type(reg, no_params, TYPE_ANY) }
+	if "update" not_in attrs^ { attrs["update"] = make_callable_type(reg, make_params(reg, {TYPE_ANY}, {true}), TYPE_NONE) }
+	if "copy" not_in attrs^ { attrs["copy"] = make_callable_type(reg, no_params, TYPE_ANY) }
+	if "__contains__" not_in attrs^ { attrs["__contains__"] = make_callable_type(reg, make_params(reg, {TYPE_ANY}), TYPE_BOOL) }
+	if "__len__" not_in attrs^ { attrs["__len__"] = make_callable_type(reg, no_params, TYPE_INT) }
+	if "__getitem__" not_in attrs^ { attrs["__getitem__"] = make_callable_type(reg, make_params(reg, {TYPE_ANY}), TYPE_ANY) }
+	if "__setitem__" not_in attrs^ { attrs["__setitem__"] = make_callable_type(reg, make_params(reg, {TYPE_ANY, TYPE_ANY}), TYPE_NONE) }
+	if "__delitem__" not_in attrs^ { attrs["__delitem__"] = make_callable_type(reg, make_params(reg, {TYPE_ANY}), TYPE_NONE) }
+	if "clear" not_in attrs^ { attrs["clear"] = make_callable_type(reg, no_params, TYPE_NONE) }
+}
+
 // Resolve a name to a param annotation type in __init__.
 @(private = "file")
 _resolve_param_type :: proc(name: string, fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
@@ -2144,7 +2194,10 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 									val_type = _resolve_param_type(attr.attr, fd, ctx)
 								}
 							}
-							attrs[attr.attr] = val_type
+							// Don't overwrite a known type with TYPE_UNKNOWN
+							if val_type != TYPE_UNKNOWN || attr.attr not_in attrs^ {
+								attrs[attr.attr] = val_type
+							}
 						}
 					}
 				}
@@ -2187,8 +2240,25 @@ scan_init_attrs_stmts :: proc(fd: ^parser.Func_Def, stmts: []parser.Stmt, ctx: ^
 				if attr, ok := target.(^parser.Attribute_Expr); ok {
 					if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
 						if self_name.id == "self" && s.value != nil {
-							val_type := infer_expr(s.value, ctx)
-							attrs[attr.attr] = val_type
+							val_type := TYPE_UNKNOWN
+							// Try param resolution first for Name_Expr values
+							if name, ok3 := s.value.(^parser.Name_Expr); ok3 {
+								val_type = _resolve_param_type(name.id, fd, ctx)
+							}
+							if val_type == TYPE_UNKNOWN {
+								val_type = _resolve_rhs_from_param(s.value, fd, ctx)
+							}
+							if val_type == TYPE_UNKNOWN {
+								val_type = infer_expr(s.value, ctx)
+							}
+							if val_type == TYPE_UNKNOWN {
+								val_type = _resolve_param_type(attr.attr, fd, ctx)
+							}
+							// Don't overwrite a known type with TYPE_UNKNOWN.
+							// Multiple branches may set the same attr — keep the resolved one.
+							if val_type != TYPE_UNKNOWN || attr.attr not_in attrs^ {
+								attrs[attr.attr] = val_type
+							}
 						}
 					}
 				}
@@ -2331,14 +2401,20 @@ pre_register_classes :: proc(stmts: []parser.Stmt, bind_result: ^binder.Bind_Res
 		#partial switch s in stmt {
 		case ^parser.Class_Def:
 			sym_id := find_symbol_for_name(s.name, s.loc, bind_result)
-			// Skip if already registered (e.g., from imports) — check local first, then global
+			// Skip if already registered (e.g., from imports) — check local first, then global with name match
 			if sym_id != binder.INVALID_SYMBOL {
 				already := false
 				if local_ct != nil {
 					if _, a := local_ct[sym_id]; a { already = true }
 				}
 				if !already {
-					if _, a := reg.class_types[sym_id]; a { already = true }
+					if existing, a := reg.class_types[sym_id]; a {
+						// Only skip if same name — prevents cross-file Symbol_ID collision
+						et := get_type(reg, existing)
+						if ci, ci_ok := et.info.(Class_Type); ci_ok && ci.name == s.name {
+							already = true
+						}
+					}
 				}
 				if already { continue }
 			}
