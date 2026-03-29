@@ -1949,9 +1949,16 @@ _check_module_emit :: proc(
 	check_result := checker.check_with_imports(
 		info.parse_result, &info.bind_result, &flow_result,
 		info.file_path, registry, builtins, import_types, allocator)
+	// Deduplicate checker diagnostics — convergence loop can emit duplicates
+	check_seen := make(map[u64]bool, len(check_result.diagnostics), allocator)
 	for d in check_result.diagnostics {
 		if !should_emit_at_level(d.code, level) { continue }
 		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
+		// Hash by (line, col, code) to detect duplicates
+		key := u64(d.location.line) * 100003 + u64(d.location.column) * 31
+		for i := 0; i < len(d.code); i += 1 { key = key * 131 + u64(d.code[i]) }
+		if key in check_seen { continue }
+		check_seen[key] = true
 		_pd(d, show_confidence)
 		if d.severity == .Error { errors += 1 }
 	}

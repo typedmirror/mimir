@@ -439,6 +439,11 @@ process_with :: proc(b: ^CFG_Builder, s: ^parser.With_Stmt, stmt: parser.Stmt) -
 		add_edge(b.cfg, body_block_id, after, .Exception)
 	}
 
+	// If body terminates (return/raise), the with block doesn't fall through
+	if body_end == INVALID_BLOCK {
+		return INVALID_BLOCK
+	}
+
 	return after
 }
 
@@ -541,12 +546,14 @@ process_try :: proc(b: ^CFG_Builder, s: ^parser.Try_Stmt, stmt: parser.Stmt) -> 
 		}
 	}
 
-	// Process each handler
+	// Process each handler, track if all handlers terminate
+	all_handlers_terminate := len(s.handlers) > 0
 	for handler, i in s.handlers {
 		hb := handler_blocks[i]
 		b.current = hb
 		handler_end := process_stmts(b, handler.body)
 		if handler_end != INVALID_BLOCK {
+			all_handlers_terminate = false
 			if has_finally {
 				add_edge(b.cfg, handler_end, finally_block, .Finally_Entry)
 			} else {
@@ -562,6 +569,13 @@ process_try :: proc(b: ^CFG_Builder, s: ^parser.Try_Stmt, stmt: parser.Stmt) -> 
 		if finally_end != INVALID_BLOCK {
 			add_edge(b.cfg, finally_end, after, .Fallthrough)
 		}
+	}
+
+	// If try body terminates (return/raise) AND all handlers terminate,
+	// no path reaches 'after'. Return INVALID_BLOCK to prevent false F002.
+	// Pattern: try: return X; except E: return Y
+	if try_end == INVALID_BLOCK && all_handlers_terminate && !has_finally {
+		return INVALID_BLOCK
 	}
 
 	return after
@@ -697,6 +711,15 @@ compute_reachability :: proc(cfg: ^CFG) {
 emit_unreachable :: proc(b: ^CFG_Builder, stmt: parser.Stmt) {
 	loc := stmt_loc(stmt)
 	if loc.line == 0 { return }
+
+	// Suppress for yield/yield_from after raise — common generator idiom
+	// (yield makes the function a generator even though it's unreachable)
+	if expr_stmt, ok := stmt.(^parser.Expr_Stmt); ok {
+		#partial switch _ in expr_stmt.value {
+		case ^parser.Yield_Expr, ^parser.Yield_From_Expr:
+			return
+		}
+	}
 
 	append(b.diagnostics, core.Diagnostic{
 		severity = .Error,

@@ -1489,6 +1489,9 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 		if attr_type, ok := info.fields[attr]; ok {
 			return attr_type
 		}
+		// TypedDict supports dict methods (get, pop, items, keys, values, etc.)
+		dict_result := _lookup_dict_method(attr, reg)
+		if dict_result != TYPE_UNKNOWN { return dict_result }
 	case DataFrame_Type:
 		return resolve_dataframe_attr(reg, &info, attr)
 	case Series_Type:
