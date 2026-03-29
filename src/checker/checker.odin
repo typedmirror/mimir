@@ -345,17 +345,21 @@ check_with_imports :: proc(
 	result.diagnostics = make([dynamic]core.Diagnostic, 0, 32, allocator)
 	result.inferred_returns = make(map[binder.Scope_ID]Type_ID, 16, allocator)
 
-	// Register imported class types in the shared registry's class_types cache
+	// Per-file class_types to avoid Symbol_ID collision across files
+	local_class_types := make(map[binder.Symbol_ID]Type_ID, 16, allocator)
+
+	// Register imported class types in BOTH global (for cross-file) and local (for this file)
 	for sym_id, type_id in import_types {
 		t := get_type(registry, type_id)
 		#partial switch _ in t.info {
 		case Class_Type:
 			registry.class_types[sym_id] = type_id
+			local_class_types[sym_id] = type_id
 		}
 	}
 
-	// Pre-register all classes so return type annotations can reference them
-	pre_register_classes(module.body, bind_result, registry)
+	// Pre-register all classes into local map (not global — avoids cross-file collision)
+	pre_register_classes(module.body, bind_result, registry, &local_class_types)
 
 	return_type_map := make(map[binder.Scope_ID]Type_ID, 16, allocator)
 	func_args_map := make(map[binder.Scope_ID]^parser.Arguments, 16, allocator)
@@ -572,6 +576,7 @@ check_scope :: proc(
 	const_map: ^flow.Const_Map = nil,
 	caller_param_types: map[int]Type_ID = nil,
 	fixture_types: ^map[string]Type_ID = nil,
+	local_class_types: ^map[binder.Symbol_ID]Type_ID = nil,
 ) {
 	// Use shared registry if provided, otherwise use result's own
 	reg := reg_override if reg_override != nil else &result.registry
@@ -605,8 +610,16 @@ check_scope :: proc(
 			// from typeshed and user code can collide)
 			class_sym := find_symbol_for_name(parent.name, parent.loc, bind_result)
 			if class_sym != binder.INVALID_SYMBOL {
-				if ct_id, found := reg.class_types[class_sym]; found {
-					current_class = ct_id
+				// Check local class_types first (per-file), then global (imports)
+				if local_class_types != nil {
+					if ct_id, found := local_class_types[class_sym]; found {
+						current_class = ct_id
+					}
+				}
+				if current_class == INVALID_TYPE {
+					if ct_id, found := reg.class_types[class_sym]; found {
+						current_class = ct_id
+					}
 				}
 			}
 			// Fallback: match by scope_id (pre-stub behavior)
@@ -720,6 +733,7 @@ check_scope :: proc(
 			groupby_sources  = &groupby_sources,
 			closed_vars      = &closed_vars,
 			final_vars       = &final_vars,
+			local_class_types = local_class_types,
 		}
 
 		// Process each statement in the block
@@ -849,6 +863,7 @@ check_scope :: proc(
 					groupby_sources  = &groupby_sources,
 					final_vars       = &final_vars,
 					resolved_types   = &resolved,
+					local_class_types = local_class_types,
 				}
 
 				for stmt in block.stmts {
@@ -1030,7 +1045,11 @@ check_stmt :: proc(
 					rt := get_type(ctx.reg, rhs_type)
 					if rt != nil {
 						if _, is_class := rt.info.(Class_Type); is_class {
-							ctx.reg.class_types[sym_id] = rhs_type
+							if ctx.local_class_types != nil {
+								ctx.local_class_types[sym_id] = rhs_type
+							} else {
+								ctx.reg.class_types[sym_id] = rhs_type
+							}
 						}
 					}
 				}
@@ -1135,7 +1154,7 @@ check_stmt :: proc(
 		}
 
 	case ^parser.Ann_Assign:
-		declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 		// Set the declared type on the symbol
 		set_target_type(s.target, declared, ctx)
 
@@ -1626,7 +1645,7 @@ build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 			}
 		}
 	}
-	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 	ctx.reg.current_resolve_class = saved_resolve_class
 
 	// Detect TypeGuard[T] / TypeIs[T] return annotation → store target for guard narrowing
@@ -1635,7 +1654,7 @@ build_func_type :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context) -> Type_ID {
 			base_name := get_annotation_name(sub.value)
 			if orig, orig_ok := ctx.bind_result.typing_names[base_name]; orig_ok {
 				if orig == "TypeGuard" || orig == "TypeIs" {
-					target := resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					target := resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 					if target != TYPE_UNKNOWN {
 						scope := binder.result_get_scope(ctx.bind_result, ctx.scope_id)
 						if scope != nil {
@@ -1674,7 +1693,7 @@ build_async_func_type :: proc(fd: ^parser.Async_Func_Def, ctx: ^Infer_Context) -
 	if !is_static && len(params) > 0 && (params[0].name == "self" || params[0].name == "cls") {
 		actual_params = params[1:]
 	}
-	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+	ret_type := resolve_annotation(fd.returns, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 	return make_callable_type(ctx.reg, actual_params, ret_type)
 }
 
@@ -1729,14 +1748,31 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
 	class_type_id: Type_ID
 	if sym_id != binder.INVALID_SYMBOL {
-		if existing, found := ctx.reg.class_types[sym_id]; found {
-			class_type_id = existing
-		} else {
+		// Check local first (per-file), then global (imports)
+		found_existing := false
+		if ctx.local_class_types != nil {
+			if existing, found := ctx.local_class_types[sym_id]; found {
+				class_type_id = existing
+				found_existing = true
+			}
+		}
+		if !found_existing {
+			if existing, found := ctx.reg.class_types[sym_id]; found {
+				class_type_id = existing
+				found_existing = true
+			}
+		}
+		if !found_existing {
 			class_type_id = register_type(ctx.reg, Class_Type{
 				name      = cd.name,
 				symbol_id = sym_id,
 				scope_id  = scope_id,
 			})
+		}
+		// Write to local (not global) to avoid cross-file collision
+		if ctx.local_class_types != nil {
+			ctx.local_class_types[sym_id] = class_type_id
+		} else {
 			ctx.reg.class_types[sym_id] = class_type_id
 		}
 	} else {
@@ -1760,13 +1796,13 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 				case ^parser.Tuple_Expr:
 					tup := sub.slice.(^parser.Tuple_Expr)
 					for elt in tup.elts {
-						tv := resolve_annotation(elt, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+						tv := resolve_annotation(elt, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 						if is_typevar(ctx.reg, tv) {
 							append(&type_params_dyn, tv)
 						}
 					}
 				case:
-					tv := resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					tv := resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 					if is_typevar(ctx.reg, tv) {
 						append(&type_params_dyn, tv)
 					}
@@ -1848,7 +1884,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 			#partial switch s in stmt {
 			case ^parser.Ann_Assign:
 				if name_expr, ok := s.target.(^parser.Name_Expr); ok {
-					field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 					has_default := s.value != nil
 					append(&init_params, Param_Type{name = name_expr.id, type_id = field_type, has_default = has_default})
 				}
@@ -1895,7 +1931,7 @@ build_typeddict_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_
 		#partial switch s in stmt {
 		case ^parser.Ann_Assign:
 			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
-				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 				fields[name_expr.id] = field_type
 				// Detect Required[T] / NotRequired[T] wrappers
 				is_required_override := is_required_annotation(s.annotation, ctx.bind_result)
@@ -1921,7 +1957,11 @@ build_typeddict_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_
 	})
 
 	if sym_id != binder.INVALID_SYMBOL {
-		ctx.reg.class_types[sym_id] = td_type_id
+		if ctx.local_class_types != nil {
+			ctx.local_class_types[sym_id] = td_type_id
+		} else {
+			ctx.reg.class_types[sym_id] = td_type_id
+		}
 	}
 
 	return td_type_id
@@ -1939,7 +1979,7 @@ build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_i
 			methods[s.name] = ft
 		case ^parser.Ann_Assign:
 			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
-				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 				attrs[name_expr.id] = field_type
 			}
 		}
@@ -1953,7 +1993,11 @@ build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_i
 	})
 
 	if sym_id != binder.INVALID_SYMBOL {
-		ctx.reg.class_types[sym_id] = proto_type_id
+		if ctx.local_class_types != nil {
+			ctx.local_class_types[sym_id] = proto_type_id
+		} else {
+			ctx.reg.class_types[sym_id] = proto_type_id
+		}
 	}
 
 	return proto_type_id
@@ -1995,7 +2039,7 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 				scan_init_attrs(s, ctx, attrs)
 			}
 		case ^parser.Ann_Assign:
-			declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
 				attrs[name_expr.id] = declared
 			}
@@ -2029,19 +2073,19 @@ _resolve_param_type :: proc(name: string, fd: ^parser.Func_Def, ctx: ^Infer_Cont
 	// Check args (regular params)
 	for arg in fd.args.args {
 		if arg.arg == name && arg.annotation != nil {
-			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 		}
 	}
 	// Check posonlyargs
 	for arg in fd.args.posonlyargs {
 		if arg.arg == name && arg.annotation != nil {
-			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 		}
 	}
 	// Check kwonlyargs
 	for arg in fd.args.kwonlyargs {
 		if arg.arg == name && arg.annotation != nil {
-			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			return resolve_annotation(arg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 		}
 	}
 	return TYPE_UNKNOWN
@@ -2110,7 +2154,7 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 			if attr, ok := s.target.(^parser.Attribute_Expr); ok {
 				if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
 					if self_name.id == "self" {
-						declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+						declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 						attrs[attr.attr] = declared
 					}
 				}
@@ -2153,7 +2197,7 @@ scan_init_attrs_stmts :: proc(fd: ^parser.Func_Def, stmts: []parser.Stmt, ctx: ^
 			if attr, ok := s.target.(^parser.Attribute_Expr); ok {
 				if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
 					if self_name.id == "self" {
-						declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+						declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types)
 						attrs[attr.attr] = declared
 					}
 				}
@@ -2282,14 +2326,21 @@ check_return_types :: proc(
 
 // Pre-register all class names so that return type annotations (-> MyClass) can resolve them.
 // Only registers placeholder Class_Types — full class body processing happens later in check_scope.
-pre_register_classes :: proc(stmts: []parser.Stmt, bind_result: ^binder.Bind_Result, reg: ^Type_Registry) {
+pre_register_classes :: proc(stmts: []parser.Stmt, bind_result: ^binder.Bind_Result, reg: ^Type_Registry, local_ct: ^map[binder.Symbol_ID]Type_ID = nil) {
 	for stmt in stmts {
 		#partial switch s in stmt {
 		case ^parser.Class_Def:
 			sym_id := find_symbol_for_name(s.name, s.loc, bind_result)
-			// Skip if already registered (e.g., from imports)
+			// Skip if already registered (e.g., from imports) — check local first, then global
 			if sym_id != binder.INVALID_SYMBOL {
-				if _, already := reg.class_types[sym_id]; already { continue }
+				already := false
+				if local_ct != nil {
+					if _, a := local_ct[sym_id]; a { already = true }
+				}
+				if !already {
+					if _, a := reg.class_types[sym_id]; a { already = true }
+				}
+				if already { continue }
 			}
 			scope_id := find_scope_for_def(s.name, s.loc, bind_result, .Class)
 			class_type_id := register_type(reg, Class_Type{
@@ -2298,10 +2349,14 @@ pre_register_classes :: proc(stmts: []parser.Stmt, bind_result: ^binder.Bind_Res
 				scope_id  = scope_id,
 			})
 			if sym_id != binder.INVALID_SYMBOL {
-				reg.class_types[sym_id] = class_type_id
+				if local_ct != nil {
+					local_ct[sym_id] = class_type_id
+				} else {
+					reg.class_types[sym_id] = class_type_id
+				}
 			}
 			// Recurse for nested classes
-			pre_register_classes(s.body, bind_result, reg)
+			pre_register_classes(s.body, bind_result, reg, local_ct)
 
 		case ^parser.If_Stmt:
 			pre_register_classes(s.body, bind_result, reg)
