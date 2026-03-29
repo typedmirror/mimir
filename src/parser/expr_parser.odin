@@ -150,9 +150,44 @@ _parse_prefix :: proc(ctx: ^Parser_Context) -> Expr {
 	case .INT, .FLOAT, .COMPLEX:
 		return _parse_number(ctx)
 	case .STRING, .BYTES:
-		return _parse_string_constant(ctx)
+		result := _parse_string_constant(ctx)
+		// Handle implicit concat: STRING + FSTRING (e.g., "text" f"more {x}")
+		if _at(ctx, .FSTRING) {
+			// Convert to Joined_Str combining the constant prefix with fstring parts
+			parts := make([dynamic]Expr, 0, 4, ctx.allocator)
+			append(&parts, result)
+			for _at_any(ctx, .FSTRING, .STRING, .BYTES) {
+				if _at(ctx, .FSTRING) {
+					append(&parts, _parse_fstring(ctx))
+				} else {
+					append(&parts, _parse_string_constant(ctx))
+				}
+			}
+			js := new(Joined_Str, ctx.allocator)
+			js.loc = tok.loc
+			js.values = parts[:]
+			return js
+		}
+		return result
 	case .FSTRING:
-		return _parse_fstring(ctx)
+		result := _parse_fstring(ctx)
+		// Handle implicit concat: FSTRING + STRING/FSTRING
+		if _at_any(ctx, .STRING, .BYTES, .FSTRING) {
+			parts := make([dynamic]Expr, 0, 4, ctx.allocator)
+			append(&parts, result)
+			for _at_any(ctx, .FSTRING, .STRING, .BYTES) {
+				if _at(ctx, .FSTRING) {
+					append(&parts, _parse_fstring(ctx))
+				} else {
+					append(&parts, _parse_string_constant(ctx))
+				}
+			}
+			js := new(Joined_Str, ctx.allocator)
+			js.loc = tok.loc
+			js.values = parts[:]
+			return js
+		}
+		return result
 	case .KW_TRUE:
 		_advance(ctx)
 		return _make_const_bool(ctx, true, tok.loc)
@@ -283,6 +318,15 @@ _parse_string_constant :: proc(ctx: ^Parser_Context) -> Expr {
 
 	// Extract string content (strip quotes and prefix)
 	content := _extract_string_content(tok.text, ctx.allocator)
+
+	// Implicit string concatenation: "a" "b" → "ab"
+	// Adjacent string/bytes literals are merged (Python spec)
+	for _at_any(ctx, .STRING, .BYTES) {
+		next_tok := _advance(ctx)
+		next_content := _extract_string_content(next_tok.text, ctx.allocator)
+		content = strings.concatenate({content, next_content}, ctx.allocator)
+	}
+
 	if tok.kind == .BYTES {
 		c.value = Const_Bytes{data = transmute([]u8)content}
 	} else {
