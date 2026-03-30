@@ -2122,6 +2122,18 @@ expr_to_rawptr :: proc(expr: parser.Expr) -> rawptr {
 // ==================== Typing Special Forms ====================
 
 try_typing_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> (Type_ID, bool) {
+	// collections.namedtuple("Name", [...]) → intercept as NamedTuple
+	if attr, attr_ok := e.func.(^parser.Attribute_Expr); attr_ok {
+		if attr.attr == "namedtuple" {
+			if mod, mod_ok := attr.value.(^parser.Name_Expr); mod_ok {
+				if mod.id == "collections" {
+					return handle_namedtuple_call(e, ctx), true
+				}
+			}
+		}
+		return TYPE_UNKNOWN, false
+	}
+
 	name_expr, ok := e.func.(^parser.Name_Expr)
 	if !ok { return TYPE_UNKNOWN, false }
 
@@ -2475,6 +2487,12 @@ handle_namedtuple_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Typ
 							attrs[field_name] = field_type
 							append(&params, Param_Type{name = field_name, type_id = field_type})
 						}
+					}
+				// collections.namedtuple("Name", ["field1", "field2"]) — list of strings
+				case ^parser.Constant_Expr:
+					if field_name, ok := tup.value.(string); ok {
+						attrs[field_name] = TYPE_ANY
+						append(&params, Param_Type{name = field_name, type_id = TYPE_ANY})
 					}
 				}
 			}
