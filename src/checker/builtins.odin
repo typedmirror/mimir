@@ -157,7 +157,6 @@ resolve_annotation :: proc(
 	bind_result: ^binder.Bind_Result,
 	builtins: ^Builtin_Names,
 	env: ^Type_Env = nil,
-	local_class_types: ^map[binder.Symbol_ID]Type_ID = nil,
 ) -> Type_ID {
 	if expr == nil { return TYPE_UNKNOWN }
 
@@ -179,25 +178,13 @@ resolve_annotation :: proc(
 				_ = tid
 			}
 		}
-		// Look up as a symbol reference (user-defined class) — local first, then global
+		// Look up as a symbol reference (user-defined class) — qualified key, no collision
 		if sym_id, ok := binder.get_ref(bind_result, rawptr(e)); ok {
 			class_type_id: Type_ID
 			found_class := false
-			if local_class_types != nil {
-				if ct, f := local_class_types[sym_id]; f {
-					class_type_id = ct
-					found_class = true
-				}
-			}
-			if !found_class {
-				if ct, f := reg.class_types[sym_id]; f {
-					// Verify name matches to prevent cross-file Symbol_ID collision
-					ct_type := get_type(reg, ct)
-					if ci, ci_ok := ct_type.info.(Class_Type); ci_ok && ci.name == e.id {
-						class_type_id = ct
-						found_class = true
-					}
-				}
+			if ct, f := reg.class_types[qualify(reg, sym_id)]; f {
+				class_type_id = ct
+				found_class = true
 			}
 			if found_class {
 				ct := get_type(reg, class_type_id)

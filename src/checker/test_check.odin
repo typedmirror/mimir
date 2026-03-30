@@ -200,7 +200,7 @@ _collect_mock_specs :: proc(
 					// Resolve the spec class
 					if spec_name, ok := kw.value.(^parser.Name_Expr); ok {
 						if sym_id, rok := binder.get_ref(bind_result, rawptr(spec_name)); rok {
-							if class_type, found := reg.class_types[sym_id]; found {
+							if class_type, found := reg.class_types[qualify(reg, sym_id)]; found {
 								mock_vars[name.id] = class_type
 							}
 						}

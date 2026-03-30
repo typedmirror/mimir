@@ -185,13 +185,25 @@ Spec_Cache_Entry :: struct {
 	type_args:     []Type_ID,
 }
 
+// Globally unique class type key — (file_id, sym_id) eliminates cross-file Symbol_ID collision
+Qualified_Symbol :: struct {
+	file_id: u32,
+	sym_id:  binder.Symbol_ID,
+}
+
+qualify :: proc(reg: ^Type_Registry, sym_id: binder.Symbol_ID) -> Qualified_Symbol {
+	return {file_id = reg.current_file_id, sym_id = sym_id}
+}
+
 Type_Registry :: struct {
 	types:       [dynamic]Type,
 	union_cache: map[u64]Type_ID,
 	list_cache:  map[Type_ID]Type_ID,
 	dict_cache:  map[[2]Type_ID]Type_ID,
 	set_cache:   map[Type_ID]Type_ID,
-	class_types:    map[binder.Symbol_ID]Type_ID,
+	class_types:    map[Qualified_Symbol]Type_ID,
+	next_file_id:   u32,
+	current_file_id: u32,
 	instance_cache: map[Type_ID]Type_ID,
 	spec_cache:     map[u64]Spec_Cache_Entry,
 	tensor_cache:   map[u64]Type_ID,
@@ -231,7 +243,7 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.list_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.dict_cache = make(map[[2]Type_ID]Type_ID, 16, allocator)
 	reg.set_cache = make(map[Type_ID]Type_ID, 16, allocator)
-	reg.class_types = make(map[binder.Symbol_ID]Type_ID, 16, allocator)
+	reg.class_types = make(map[Qualified_Symbol]Type_ID, 16, allocator)
 	reg.instance_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.spec_cache = make(map[u64]Spec_Cache_Entry, 8, allocator)
 	reg.tensor_cache = make(map[u64]Type_ID, 8, allocator)

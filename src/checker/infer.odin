@@ -34,7 +34,6 @@ Infer_Context :: struct {
 	closed_vars:      ^map[binder.Symbol_ID]parser.Src_Loc, // §4.2: variables closed after with-block exit
 	final_vars:       ^map[binder.Symbol_ID]bool,              // Final[T]: variables that cannot be reassigned
 	resolved_types:   ^map[binder.Symbol_ID]Type_ID,           // Constraint-resolved types for unknown symbols (re-inference pass)
-	local_class_types: ^map[binder.Symbol_ID]Type_ID,        // Per-file class types (avoids Symbol_ID collision in multi-file)
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -571,18 +570,9 @@ infer_name :: proc(e: ^parser.Name_Expr, ctx: ^Infer_Context) -> Type_ID {
 		if t, found := ctx.env.types[sym_id]; found {
 			return t
 		}
-		// Fallback: check class_types — local first (per-file), then global (imports)
-		if ctx.local_class_types != nil {
-			if class_type, found := ctx.local_class_types[sym_id]; found {
-				return class_type
-			}
-		}
-		if class_type, found := ctx.reg.class_types[sym_id]; found {
-			// Verify name matches to prevent cross-file Symbol_ID collision
-			ct := get_type(ctx.reg, class_type)
-			if ci, ci_ok := ct.info.(Class_Type); ci_ok && ci.name == e.id {
-				return class_type
-			}
+		// Fallback: check class_types — qualified key, no collision
+		if class_type, found := ctx.reg.class_types[qualify(ctx.reg, sym_id)]; found {
+			return class_type
 		}
 		// Fallback: check module-level symbol types (LEGB "G" — global scope)
 		// Only for functions/classes — variables may have stale flow-sensitive types
@@ -1622,7 +1612,7 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 		has_default := i >= (n_positional - n_defaults)
 		params[idx] = Param_Type{
 			name = a.arg,
-			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types),
+			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env),
 			has_default = has_default,
 		}
 		idx += 1
@@ -1634,7 +1624,7 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 		has_default := (len(args.posonlyargs) + i) >= (n_positional - n_defaults)
 		params[idx] = Param_Type{
 			name = a.arg,
-			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types),
+			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env),
 			has_default = has_default,
 		}
 		idx += 1
@@ -1656,7 +1646,7 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 		has_default := i < len(args.kw_defaults) && args.kw_defaults[i] != nil
 		params[idx] = Param_Type{
 			name = a.arg,
-			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env, ctx.local_class_types),
+			type_id = resolve_annotation(a.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env),
 			has_default = has_default,
 		}
 		idx += 1
