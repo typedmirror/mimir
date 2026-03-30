@@ -622,6 +622,7 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 		if left_intlike && right_intlike { return TYPE_INT }
 		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
 		if left == TYPE_STR && right == TYPE_STR { return TYPE_STR }
+		if left == TYPE_BYTES && right == TYPE_BYTES { return TYPE_BYTES }
 		if is_list_type(reg, left) && is_list_type(reg, right) { return left }
 
 	case .Sub, .Mult:
@@ -631,6 +632,9 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 		if op == .Mult {
 			if left == TYPE_STR && right_intlike { return TYPE_STR }
 			if left_intlike && right == TYPE_STR { return TYPE_STR }
+			// bytes * int or int * bytes
+			if left == TYPE_BYTES && right_intlike { return TYPE_BYTES }
+			if left_intlike && right == TYPE_BYTES { return TYPE_BYTES }
 			// list * int or int * list
 			if is_list_type(reg, left) && right_intlike { return left }
 			if left_intlike && is_list_type(reg, right) { return right }
