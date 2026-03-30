@@ -62,6 +62,10 @@ check :: proc(
 	collect_func_return_types(module.body, bind_result, &result.registry, &builtins, &return_type_map)
 	collect_func_args(module.body, bind_result, &func_args_map)
 
+	// Collect Generator[Y, S, R] send types for yield expression typing
+	generator_send_types := make(map[binder.Scope_ID]Type_ID, 4, allocator)
+	collect_generator_send_types(module.body, bind_result, &result.registry, &builtins, &generator_send_types)
+
 	// §31.2: Collect pytest fixture return types for injection into test params
 	fixture_types := collect_fixture_types(module.body, bind_result, &return_type_map)
 
@@ -104,6 +108,7 @@ check :: proc(
 			shape_reg = shape_reg_ptr,
 			const_map = cm,
 			fixture_types = fixture_ptr,
+			generator_send_types = &generator_send_types if len(generator_send_types) > 0 else nil,
 		)
 	}
 
@@ -175,6 +180,7 @@ check :: proc(
 				shape_reg = shape_reg_ptr,
 				const_map = fixpoint_cm,
 				caller_param_types = scope_caller_types,
+				generator_send_types = &generator_send_types if len(generator_send_types) > 0 else nil,
 			)
 		}
 
@@ -370,6 +376,12 @@ check_with_imports :: proc(
 	collect_func_return_types(module.body, bind_result, registry, builtins, &return_type_map)
 	collect_func_args(module.body, bind_result, &func_args_map)
 
+	// Collect Generator[Y, S, R] send types
+	generator_send_types := make(map[binder.Scope_ID]Type_ID, 4, allocator)
+	collect_generator_send_types(module.body, bind_result, registry, builtins, &generator_send_types)
+	gen_send_ptr: ^map[binder.Scope_ID]Type_ID = nil
+	if len(generator_send_types) > 0 { gen_send_ptr = &generator_send_types }
+
 	local_import_types := import_types
 	mt := init_method_table(registry)
 
@@ -405,6 +417,7 @@ check_with_imports :: proc(
 			import_types  = &local_import_types,
 			shape_reg     = shape_reg_ptr,
 			const_map     = cm,
+			generator_send_types = gen_send_ptr,
 		)
 	}
 
@@ -468,6 +481,7 @@ check_with_imports :: proc(
 				shape_reg     = shape_reg_ptr,
 				const_map     = fp_cm,
 				caller_param_types = scope_caller_types_multi,
+				generator_send_types = gen_send_ptr,
 			)
 		}
 
@@ -580,6 +594,7 @@ check_scope :: proc(
 	const_map: ^flow.Const_Map = nil,
 	caller_param_types: map[int]Type_ID = nil,
 	fixture_types: ^map[string]Type_ID = nil,
+	generator_send_types: ^map[binder.Scope_ID]Type_ID = nil,
 ) {
 	// Use shared registry if provided, otherwise use result's own
 	reg := reg_override if reg_override != nil else &result.registry
@@ -728,6 +743,7 @@ check_scope :: proc(
 			groupby_sources  = &groupby_sources,
 			closed_vars      = &closed_vars,
 			final_vars       = &final_vars,
+				generator_send_types = generator_send_types,
 		}
 
 		// Process each statement in the block
@@ -857,6 +873,7 @@ check_scope :: proc(
 					groupby_sources  = &groupby_sources,
 					final_vars       = &final_vars,
 					resolved_types   = &resolved,
+					generator_send_types = generator_send_types,
 				}
 
 				for stmt in block.stmts {
@@ -2495,6 +2512,105 @@ collect_func_return_types :: proc(
 			}
 			collect_func_return_types(s.finalbody, bind_result, reg, builtins, out)
 			collect_func_return_types(s.orelse, bind_result, reg, builtins, out)
+		}
+	}
+}
+
+// Extract Generator[Y, S, R] send types from function return annotations.
+// For functions annotated with -> Generator[Y, S, R] or -> AsyncGenerator[Y, S],
+// stores the SendType (S) per scope so yield expressions can return it.
+collect_generator_send_types :: proc(
+	stmts: []parser.Stmt,
+	bind_result: ^binder.Bind_Result,
+	reg: ^Type_Registry,
+	builtins: ^Builtin_Names,
+	out: ^map[binder.Scope_ID]Type_ID,
+) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			_extract_generator_send(s.returns, s.name, s.loc, bind_result, reg, builtins, out)
+			collect_generator_send_types(s.body, bind_result, reg, builtins, out)
+		case ^parser.Async_Func_Def:
+			_extract_generator_send(s.returns, s.name, s.loc, bind_result, reg, builtins, out)
+			collect_generator_send_types(s.body, bind_result, reg, builtins, out)
+		case ^parser.Class_Def:
+			collect_generator_send_types(s.body, bind_result, reg, builtins, out)
+		case ^parser.If_Stmt:
+			collect_generator_send_types(s.body, bind_result, reg, builtins, out)
+			collect_generator_send_types(s.orelse, bind_result, reg, builtins, out)
+		case ^parser.For_Stmt:
+			collect_generator_send_types(s.body, bind_result, reg, builtins, out)
+		case ^parser.While_Stmt:
+			collect_generator_send_types(s.body, bind_result, reg, builtins, out)
+		case ^parser.Try_Stmt:
+			collect_generator_send_types(s.body, bind_result, reg, builtins, out)
+			for handler in s.handlers {
+				collect_generator_send_types(handler.body, bind_result, reg, builtins, out)
+			}
+		}
+	}
+}
+
+// Check if a return annotation is Generator[Y, S, R] or AsyncGenerator[Y, S]
+// and extract the SendType into the output map.
+_extract_generator_send :: proc(
+	returns: parser.Expr,
+	name: string,
+	loc: parser.Src_Loc,
+	bind_result: ^binder.Bind_Result,
+	reg: ^Type_Registry,
+	builtins: ^Builtin_Names,
+	out: ^map[binder.Scope_ID]Type_ID,
+) {
+	if returns == nil { return }
+	sub, ok := returns.(^parser.Subscript_Expr)
+	if !ok { return }
+
+	base_name := get_annotation_name(sub.value)
+	if len(base_name) == 0 { return }
+
+	// Check if this is a typing.Generator or typing.AsyncGenerator
+	// Two paths: (1) from typing import Generator → typing_names lookup
+	//            (2) typing.Generator → Attribute_Expr with attr "Generator"/"AsyncGenerator"
+	is_generator := false
+	is_async_gen := false
+	if orig, is_typing := bind_result.typing_names[base_name]; is_typing {
+		is_generator = orig == "Generator"
+		is_async_gen = orig == "AsyncGenerator"
+	} else if attr, attr_ok := sub.value.(^parser.Attribute_Expr); attr_ok {
+		// typing.Generator or typing.AsyncGenerator
+		if mod, mod_ok := attr.value.(^parser.Name_Expr); mod_ok {
+			if mod.id == "typing" || mod.id == "typing_extensions" {
+				is_generator = attr.attr == "Generator"
+				is_async_gen = attr.attr == "AsyncGenerator"
+			}
+		}
+	}
+	if !is_generator && !is_async_gen { return }
+
+	// Extract type params from the subscript slice
+	// Generator[Y, S, R] — S is index 1
+	// AsyncGenerator[Y, S] — S is index 1
+	tup, tup_ok := sub.slice.(^parser.Tuple_Expr)
+	if !tup_ok { return }
+
+	send_idx := 1
+	if is_generator && len(tup.elts) >= 2 {
+		send_type := resolve_annotation(tup.elts[send_idx], reg, bind_result, builtins)
+		if send_type != TYPE_UNKNOWN {
+			scope_id := find_scope_for_def(name, loc, bind_result, .Function)
+			if scope_id != binder.INVALID_SCOPE {
+				out[scope_id] = send_type
+			}
+		}
+	} else if is_async_gen && len(tup.elts) >= 2 {
+		send_type := resolve_annotation(tup.elts[send_idx], reg, bind_result, builtins)
+		if send_type != TYPE_UNKNOWN {
+			scope_id := find_scope_for_def(name, loc, bind_result, .Function)
+			if scope_id != binder.INVALID_SCOPE {
+				out[scope_id] = send_type
+			}
 		}
 	}
 }

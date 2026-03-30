@@ -34,6 +34,7 @@ Infer_Context :: struct {
 	closed_vars:      ^map[binder.Symbol_ID]parser.Src_Loc, // §4.2: variables closed after with-block exit
 	final_vars:       ^map[binder.Symbol_ID]bool,              // Final[T]: variables that cannot be reassigned
 	resolved_types:   ^map[binder.Symbol_ID]Type_ID,           // Constraint-resolved types for unknown symbols (re-inference pass)
+	generator_send_types: ^map[binder.Scope_ID]Type_ID,      // Generator[Y,S,R] → S per scope
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -483,10 +484,17 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		return val_type
 
 	case ^parser.Yield_Expr:
+		yield_type := TYPE_NONE
 		if e.value != nil {
-			return infer_expr(e.value, ctx)
+			yield_type = infer_expr(e.value, ctx)
 		}
-		return TYPE_NONE
+		// Generator[Y, S, R]: yield expression returns SendType (S), not YieldType
+		if ctx.generator_send_types != nil {
+			if send_type, has := ctx.generator_send_types[ctx.scope_id]; has && send_type != TYPE_UNKNOWN {
+				return send_type
+			}
+		}
+		return yield_type
 
 	case ^parser.Yield_From_Expr:
 		return infer_expr(e.value, ctx)
