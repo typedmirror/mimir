@@ -1363,9 +1363,11 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 	if receiver == TYPE_STR {
 		switch attr {
 		// 0-arg methods returning str
-		case "upper", "lower", "strip", "lstrip", "rstrip", "title", "capitalize",
-		     "swapcase":
+		case "upper", "lower", "title", "capitalize", "swapcase":
 			return make_callable_type(reg, no_params, TYPE_STR)
+		// 0-or-1-arg methods returning str (optional chars arg)
+		case "strip", "lstrip", "rstrip":
+			return make_callable_type(reg, make_params(reg, {TYPE_STR}, {true}), TYPE_STR)
 		// 1+ arg methods returning str
 		case "replace":
 			return make_callable_type(reg,

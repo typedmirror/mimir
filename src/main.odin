@@ -1475,11 +1475,16 @@ should_emit_at_level :: proc(code: string, level: Analysis_Level) -> bool {
 }
 
 // §28.3: Check if a diagnostic code is suppressed by an inline comment on the given line.
-// Supports: # mimir: ignore (suppress all) and # mimir: ignore[T001] or # mimir: ignore[T001, T002]
+// Supports: # mimir: ignore, # type: ignore (suppress all)
+// and # mimir: ignore[T001] or # mimir: ignore[T001, T002]
 is_line_suppressed :: proc(code: string, line_num: int, source_lines: []string) -> bool {
 	idx := line_num - 1
 	if idx < 0 || idx >= len(source_lines) { return false }
 	line := source_lines[idx]
+
+	// Check for # type: ignore (mypy-compatible blanket suppression)
+	if strings.index(line, "# type: ignore") >= 0 { return true }
+
 	marker_pos := strings.index(line, "# mimir: ignore")
 	if marker_pos < 0 { return false }
 	rest := line[marker_pos + len("# mimir: ignore"):]
