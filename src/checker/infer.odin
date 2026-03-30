@@ -1256,8 +1256,9 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		param_type := func_info.params[i].type_id
 		arg_type := infer_expr(e.args[i], ctx, param_type)
 		if _is_any_type(param_type, ctx.reg) || param_type == TYPE_UNKNOWN ||
-		   arg_type == TYPE_UNKNOWN || _is_any_type(arg_type, ctx.reg) {
-			// Skip — Any accepts/produces anything
+		   arg_type == TYPE_UNKNOWN || _is_any_type(arg_type, ctx.reg) ||
+		   _union_has_unknown(arg_type, ctx.reg) {
+			// Skip — Any/Unknown in union means partial resolution, can't verify
 		} else if !is_assignable(ctx.reg, arg_type, param_type) {
 			emit_diagnostic(ctx, e.loc, "T002", .Error,
 				"Incompatible argument type",
@@ -1272,7 +1273,8 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		for p in func_info.params {
 			if p.name == kw.arg {
 				if _is_any_type(p.type_id, ctx.reg) || p.type_id == TYPE_UNKNOWN ||
-				   kw_type == TYPE_UNKNOWN || _is_any_type(kw_type, ctx.reg) {
+				   kw_type == TYPE_UNKNOWN || _is_any_type(kw_type, ctx.reg) ||
+				   _union_has_unknown(kw_type, ctx.reg) {
 					// Skip
 				} else if !is_assignable(ctx.reg, kw_type, p.type_id) {
 					emit_diagnostic(ctx, e.loc, "T002", .Error,
@@ -2064,6 +2066,18 @@ _is_any_type :: proc(t: Type_ID, reg: ^Type_Registry) -> bool {
 	if typ == nil { return false }
 	_, ok := typ.info.(Any_Type)
 	return ok
+}
+
+// Check if a type is a union containing Unknown — indicates partial resolution
+_union_has_unknown :: proc(t: Type_ID, reg: ^Type_Registry) -> bool {
+	typ := get_type(reg, t)
+	if typ == nil { return false }
+	if ut, ok := typ.info.(Union_Type); ok {
+		for m in ut.members {
+			if m == TYPE_UNKNOWN { return true }
+		}
+	}
+	return false
 }
 
 _match_lookup_sym :: proc(name: string, ctx: ^Infer_Context) -> binder.Symbol_ID {
