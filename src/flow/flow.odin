@@ -74,6 +74,9 @@ analyze :: proc(module: ^parser.Module, bind_result: ^binder.Bind_Result, file_p
 		// Skip generator functions (yield doesn't need explicit return)
 		if !has_return_ann || returns_none || is_stub || is_generator { continue }
 
+		// Skip functions whose body is just `while True: ... return/raise` — always terminates
+		if _body_is_while_true_with_return(&cfg) { continue }
+
 		check_missing_return(&cfg, cfg.scope_name, has_return_ann, has_any_return, file_path, scope.loc, &result.diagnostics)
 	}
 
@@ -350,6 +353,77 @@ _has_yield :: proc(stmts: []parser.Stmt) -> bool {
 			if _has_yield(s.body) { return true }
 		case ^parser.Async_With:
 			if _has_yield(s.body) { return true }
+		}
+	}
+	return false
+}
+
+// Check if a CFG's function body is dominated by `while True` with internal return/raise.
+// Pattern: `while True: ... return` — the post-while fallthrough is dead code, not a missing return.
+@(private = "file")
+_body_is_while_true_with_return :: proc(cfg: ^CFG) -> bool {
+	// Check all blocks in the CFG for `while True` containing a return.
+	// The while True may be nested inside try/if/with blocks.
+	for i in 0..<len(cfg.blocks) {
+		block := &cfg.blocks[i]
+		if !block.is_reachable { continue }
+		for stmt in block.stmts {
+			if _stmt_has_while_true_return(stmt) { return true }
+		}
+	}
+	return false
+}
+
+@(private = "file")
+_stmt_has_while_true_return :: proc(stmt: parser.Stmt) -> bool {
+	#partial switch s in stmt {
+	case ^parser.While_Stmt:
+		if _is_true_constant(s.test) && _stmts_have_return(s.body) {
+			return true
+		}
+	case ^parser.Try_Stmt:
+		for st in s.body { if _stmt_has_while_true_return(st) { return true } }
+	case ^parser.If_Stmt:
+		for st in s.body { if _stmt_has_while_true_return(st) { return true } }
+		for st in s.orelse { if _stmt_has_while_true_return(st) { return true } }
+	case ^parser.With_Stmt:
+		for st in s.body { if _stmt_has_while_true_return(st) { return true } }
+	case ^parser.Async_With:
+		for st in s.body { if _stmt_has_while_true_return(st) { return true } }
+	}
+	return false
+}
+
+@(private = "file")
+_is_true_constant :: proc(expr: parser.Expr) -> bool {
+	if expr == nil { return false }
+	if c, ok := expr.(^parser.Constant_Expr); ok {
+		if b, b_ok := c.value.(bool); b_ok {
+			return b
+		}
+	}
+	return false
+}
+
+@(private = "file")
+_stmts_have_return :: proc(stmts: []parser.Stmt) -> bool {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Return_Stmt:
+			return true
+		case ^parser.If_Stmt:
+			if _stmts_have_return(s.body) || _stmts_have_return(s.orelse) { return true }
+		case ^parser.Try_Stmt:
+			if _stmts_have_return(s.body) { return true }
+			for handler in s.handlers {
+				if _stmts_have_return(handler.body) { return true }
+			}
+		case ^parser.With_Stmt:
+			if _stmts_have_return(s.body) { return true }
+		case ^parser.While_Stmt:
+			if _stmts_have_return(s.body) { return true }
+		case ^parser.For_Stmt:
+			if _stmts_have_return(s.body) { return true }
 		}
 	}
 	return false

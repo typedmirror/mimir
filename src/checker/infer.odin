@@ -639,9 +639,17 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 	case .Div:
 		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
 
-	case .Floor_Div, .Mod:
+	case .Floor_Div:
 		if left_intlike && right_intlike { return TYPE_INT }
 		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
+
+	case .Mod:
+		if left_intlike && right_intlike { return TYPE_INT }
+		if is_numeric(reg, left) && is_numeric(reg, right) { return TYPE_FLOAT }
+		// str % (...) → str (printf-style formatting)
+		if left == TYPE_STR { return TYPE_STR }
+		// bytes % (...) → bytes (printf-style formatting)
+		if left == TYPE_BYTES { return TYPE_BYTES }
 
 	case .Pow:
 		if left_intlike && right_intlike { return TYPE_INT }
