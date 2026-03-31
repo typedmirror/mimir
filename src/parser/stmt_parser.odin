@@ -730,6 +730,37 @@ _parse_single_pattern :: proc(ctx: ^Parser_Context) -> Pattern {
 		p.loc = tok.loc
 		p.patterns = patterns[:]
 		return p
+	case .LBRACE:
+		// Mapping pattern: {key: pattern, key: pattern, **rest}
+		_advance(ctx)
+		keys := make([dynamic]Expr, 0, 4, ctx.allocator)
+		patterns := make([dynamic]Pattern, 0, 4, ctx.allocator)
+		rest_name := ""
+		for !_at(ctx, .RBRACE) && !_at(ctx, .EOF) {
+			if len(keys) > 0 || len(rest_name) > 0 { _expect(ctx, .COMMA) }
+			if _at(ctx, .RBRACE) { break }
+			// **rest capture
+			if _at(ctx, .DOUBLE_STAR) {
+				_advance(ctx)
+				if _at_any(ctx, .NAME, .KW_MATCH, .KW_CASE, .KW_TYPE) {
+					rest_tok := _advance(ctx)
+					rest_name = rest_tok.text
+				}
+			} else {
+				key_expr := parse_expr(ctx)
+				append(&keys, key_expr)
+				_expect(ctx, .COLON)
+				val_pat := _parse_pattern(ctx)
+				append(&patterns, val_pat)
+			}
+		}
+		_expect(ctx, .RBRACE)
+		mp := new(Match_Mapping, ctx.allocator)
+		mp.loc = tok.loc
+		mp.keys = keys[:]
+		mp.patterns = patterns[:]
+		mp.rest = rest_name
+		return mp
 	case .NAME, .KW_MATCH, .KW_CASE, .KW_TYPE:
 		_advance(ctx)
 
