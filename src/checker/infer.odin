@@ -695,7 +695,71 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 		}
 	}
 
+	// Dunder method dispatch: try __add__/__radd__ etc. on Instance/Class types
+	dunder := _binop_dunder(op)
+	rdunder := _binop_rdunder(op)
+	if dunder != "" {
+		// Try left.__add__(right)
+		method_type := lookup_attribute(left, dunder, reg)
+		if method_type != TYPE_UNKNOWN {
+			mt := get_type(reg, method_type)
+			if ct, ok := mt.info.(Callable_Type); ok {
+				return ct.return_type
+			}
+		}
+		// Try right.__radd__(left)
+		if rdunder != "" {
+			rmethod_type := lookup_attribute(right, rdunder, reg)
+			if rmethod_type != TYPE_UNKNOWN {
+				rmt := get_type(reg, rmethod_type)
+				if ct, ok := rmt.info.(Callable_Type); ok {
+					return ct.return_type
+				}
+			}
+		}
+	}
+
 	return TYPE_UNKNOWN // signals unsupported
+}
+
+// Map binary operators to their forward dunder method name
+_binop_dunder :: proc(op: parser.Binary_Op) -> string {
+	switch op {
+	case .Add: return "__add__"
+	case .Sub: return "__sub__"
+	case .Mult: return "__mul__"
+	case .Div: return "__truediv__"
+	case .Floor_Div: return "__floordiv__"
+	case .Mod: return "__mod__"
+	case .Pow: return "__pow__"
+	case .LShift: return "__lshift__"
+	case .RShift: return "__rshift__"
+	case .Bit_Or: return "__or__"
+	case .Bit_Xor: return "__xor__"
+	case .Bit_And: return "__and__"
+	case .Mat_Mult: return "__matmul__"
+	}
+	return ""
+}
+
+// Map binary operators to their reverse dunder method name
+_binop_rdunder :: proc(op: parser.Binary_Op) -> string {
+	switch op {
+	case .Add: return "__radd__"
+	case .Sub: return "__rsub__"
+	case .Mult: return "__rmul__"
+	case .Div: return "__rtruediv__"
+	case .Floor_Div: return "__rfloordiv__"
+	case .Mod: return "__rmod__"
+	case .Pow: return "__rpow__"
+	case .LShift: return "__rlshift__"
+	case .RShift: return "__rrshift__"
+	case .Bit_Or: return "__ror__"
+	case .Bit_Xor: return "__rxor__"
+	case .Bit_And: return "__rand__"
+	case .Mat_Mult: return "__rmatmul__"
+	}
+	return ""
 }
 
 // PEP 604: Map builtin constructor Callable_Types back to their primitive types.
@@ -1287,9 +1351,31 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		}
 	}
 
-	// Infer remaining positional args not checked
-	for i := n_params; i < n_args; i += 1 {
-		infer_expr(e.args[i], ctx)
+	// Type-check remaining positional args against *args type (if present)
+	if n_params > 0 {
+		last := func_info.params[n_params - 1]
+		if last.is_variadic && !_is_any_type(last.type_id, ctx.reg) && last.type_id != TYPE_ANY && last.type_id != TYPE_UNKNOWN {
+			// Check excess positional args against *args element type
+			for i := n_params; i < n_args; i += 1 {
+				arg_type := infer_expr(e.args[i], ctx, last.type_id)
+				if arg_type == TYPE_UNKNOWN || _is_any_type(arg_type, ctx.reg) || _union_has_unknown(arg_type, ctx.reg) {
+					// Skip
+				} else if !is_assignable(ctx.reg, arg_type, last.type_id) {
+					emit_diagnostic(ctx, e.loc, "T002", .Error,
+						"Incompatible argument type",
+						fmt_type_mismatch(arg_type, last.type_id, ctx.reg),
+						"Use the correct type")
+				}
+			}
+		} else {
+			for i := n_params; i < n_args; i += 1 {
+				infer_expr(e.args[i], ctx)
+			}
+		}
+	} else {
+		for i := n_params; i < n_args; i += 1 {
+			infer_expr(e.args[i], ctx)
+		}
 	}
 }
 
@@ -1654,11 +1740,16 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 		idx += 1
 	}
 
-	// *args
+	// *args — resolve annotation if present (e.g., *args: int means each arg is int)
 	if args.vararg != nil {
+		vararg_type := TYPE_ANY
+		if args.vararg.annotation != nil {
+			resolved := resolve_annotation(args.vararg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			if resolved != TYPE_UNKNOWN { vararg_type = resolved }
+		}
 		params[idx] = Param_Type{
 			name = args.vararg.arg,
-			type_id = TYPE_ANY,
+			type_id = vararg_type,
 			has_default = true,
 			is_variadic = true,
 		}
@@ -1676,11 +1767,16 @@ resolve_params :: proc(args: ^parser.Arguments, ctx: ^Infer_Context) -> []Param_
 		idx += 1
 	}
 
-	// **kwargs
+	// **kwargs — resolve annotation if present (e.g., **kwargs: str means each value is str)
 	if args.kwarg != nil {
+		kwarg_type := TYPE_ANY
+		if args.kwarg.annotation != nil {
+			resolved := resolve_annotation(args.kwarg.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			if resolved != TYPE_UNKNOWN { kwarg_type = resolved }
+		}
 		params[idx] = Param_Type{
 			name = args.kwarg.arg,
-			type_id = TYPE_ANY,
+			type_id = kwarg_type,
 			has_default = true,
 			is_variadic = true,
 		}
