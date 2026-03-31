@@ -597,12 +597,48 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	case Callable_Type:
 		#partial switch tgt in tgt_type.info {
 		case Callable_Type:
-			if len(src.params) != len(tgt.params) { return false }
-			for i in 0..<len(src.params) {
-				// Contravariant: target param must be assignable TO source param
+			// Check param compatibility with variadic/default awareness
+			src_has_variadic := len(src.params) > 0 && src.params[len(src.params)-1].is_variadic
+			tgt_has_variadic := len(tgt.params) > 0 && tgt.params[len(tgt.params)-1].is_variadic
+
+			// If source has *args, it can accept any number of arguments
+			if !src_has_variadic && !tgt_has_variadic {
+				if len(src.params) != len(tgt.params) {
+					// Source has more params than target: OK if extras have defaults
+					if len(src.params) > len(tgt.params) {
+						for i := len(tgt.params); i < len(src.params); i += 1 {
+							if !src.params[i].has_default && !src.params[i].is_variadic { return false }
+						}
+					} else {
+						// Target has more params: OK if extras have defaults
+						for i := len(src.params); i < len(tgt.params); i += 1 {
+							if !tgt.params[i].has_default && !tgt.params[i].is_variadic { return false }
+						}
+					}
+				}
+			}
+
+			// Check common params (contravariant)
+			n_check := min(len(src.params), len(tgt.params))
+			// Don't compare *args param against non-variadic
+			if src_has_variadic && n_check > 0 && n_check == len(src.params) { n_check -= 1 }
+			if tgt_has_variadic && n_check > 0 && n_check == len(tgt.params) { n_check -= 1 }
+			for i in 0..<n_check {
 				if !is_assignable(reg, tgt.params[i].type_id, src.params[i].type_id) { return false }
 			}
 			return is_assignable(reg, src.return_type, tgt.return_type)
+		}
+	}
+
+	// Class_Type → Callable: a class is callable (via its constructor)
+	#partial switch src in src_type.info {
+	case Class_Type:
+		#partial switch tgt in tgt_type.info {
+		case Callable_Type:
+			// type[X] is assignable to Callable[..., X] — class constructors are callables
+			// Return type check: the class creates an instance
+			inst_type := make_instance_type(reg, source)
+			return is_assignable(reg, inst_type, tgt.return_type)
 		}
 	}
 
