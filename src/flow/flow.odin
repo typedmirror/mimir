@@ -246,28 +246,60 @@ find_scope_for_def :: proc(bind_result: ^binder.Bind_Result, name: string, loc: 
 }
 
 body_is_stub :: proc(stmts: []parser.Stmt) -> bool {
-	// A stub body is exactly one statement: either `...` (Ellipsis) or `pass`
-	if len(stmts) != 1 { return false }
+	// A stub body is: `...`, `pass`, or a docstring optionally followed by `...`/`pass`
+	if len(stmts) == 0 { return false }
+	if len(stmts) > 2 { return false }
+
+	// Check if first stmt is docstring (string constant expression)
+	first_is_docstring := false
 	#partial switch s in stmts[0] {
 	case ^parser.Expr_Stmt:
-		// Check for `...` (Ellipsis constant)
 		c, ok := s.value.(^parser.Constant_Expr)
 		if ok {
+			_, is_str := c.value.(string)
+			if is_str { first_is_docstring = true }
 			_, is_ellipsis := c.value.(parser.Const_Ellipsis)
-			return is_ellipsis
+			if is_ellipsis { return true }
 		}
 	case ^parser.Pass_Stmt:
 		return true
+	}
+
+	if len(stmts) == 1 {
+		// Docstring-only body is also a stub
+		return first_is_docstring
+	}
+
+	// 2 statements: docstring + pass/ellipsis
+	if first_is_docstring {
+		#partial switch s in stmts[1] {
+		case ^parser.Pass_Stmt:
+			return true
+		case ^parser.Expr_Stmt:
+			c, ok := s.value.(^parser.Constant_Expr)
+			if ok {
+				_, is_ellipsis := c.value.(parser.Const_Ellipsis)
+				return is_ellipsis
+			}
+		}
 	}
 	return false
 }
 
 returns_is_none :: proc(returns: parser.Expr) -> bool {
 	if returns == nil { return false }
+	// None return type
 	c, ok := returns.(^parser.Constant_Expr)
-	if !ok { return false }
-	_, is_none := c.value.(parser.Const_None)
-	return is_none
+	if ok {
+		_, is_none := c.value.(parser.Const_None)
+		return is_none
+	}
+	// NoReturn / Never return type — function never returns normally
+	n, n_ok := returns.(^parser.Name_Expr)
+	if n_ok {
+		return n.id == "NoReturn" || n.id == "Never"
+	}
+	return false
 }
 
 check_function_returns :: proc(stmts: []parser.Stmt, target_scope: ^binder.Scope, has_return_ann: ^bool, has_any_return: ^bool, returns_none: ^bool, is_stub: ^bool, is_generator: ^bool) {
