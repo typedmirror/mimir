@@ -1237,7 +1237,20 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 		return make_instance_type(ctx.reg, func_type)
 	}
 
-	// Unknown callable
+	// Not callable — emit T005 for known non-callable primitive types
+	is_noncallable := false
+	switch func_type {
+	case TYPE_NONE, TYPE_INT, TYPE_FLOAT, TYPE_BOOL, TYPE_BYTES:
+		is_noncallable = true
+	}
+	if is_noncallable {
+		emit_diagnostic(ctx, e.loc, "T005", .Error,
+			"Not callable",
+			fmt.aprintf("'%s' is not callable",
+				type_to_string(ctx.reg, func_type),
+				allocator = ctx.reg.allocator),
+			"Check variable type — it may need to be initialized differently")
+	}
 	for arg in e.args {
 		infer_expr(arg, ctx)
 	}
