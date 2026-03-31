@@ -60,7 +60,9 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		left := infer_expr(e.left, ctx)
 		right := infer_expr(e.right, ctx)
 		result := infer_binop(e.op, left, right, ctx.reg)
-		if result == TYPE_UNKNOWN && left != TYPE_UNKNOWN && right != TYPE_UNKNOWN {
+		if result == TYPE_UNKNOWN && left != TYPE_UNKNOWN && right != TYPE_UNKNOWN &&
+		   !_is_any_type(left, ctx.reg) && !_is_any_type(right, ctx.reg) &&
+		   !_union_has_unknown(left, ctx.reg) && !_union_has_unknown(right, ctx.reg) {
 			emit_diagnostic(ctx, e.loc, "T005", .Error,
 				"Unsupported operand types",
 				fmt_binop_error(e.op, left, right, ctx.reg),
@@ -89,7 +91,8 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 	case ^parser.Unary_Op_Expr:
 		operand := infer_expr(e.operand, ctx)
 		result := infer_unaryop(e.op, operand, ctx.reg)
-		if result == TYPE_UNKNOWN && operand != TYPE_UNKNOWN && operand != TYPE_ANY {
+		if result == TYPE_UNKNOWN && operand != TYPE_UNKNOWN && operand != TYPE_ANY &&
+		   !_is_any_type(operand, ctx.reg) && !_union_has_unknown(operand, ctx.reg) {
 			emit_diagnostic(ctx, e.loc, "T005", .Error,
 				"Unsupported operand type",
 				fmt.aprintf("Cannot apply unary '%s' to '%s'",
