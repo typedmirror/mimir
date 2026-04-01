@@ -183,11 +183,63 @@ _parse_unexpected_indent :: proc(ctx: ^Parser_Context) -> Stmt {
 	return nil
 }
 
+// ==================== Type Parameters (PEP 695) ====================
+
+_parse_type_params :: proc(ctx: ^Parser_Context) -> []Type_Param {
+	if !_at(ctx, .LBRACKET) { return nil }
+	_advance(ctx) // consume [
+
+	params := make([dynamic]Type_Param, 0, 2, ctx.allocator)
+	for !_at(ctx, .RBRACKET) && !_at(ctx, .EOF) {
+		if len(params) > 0 {
+			if !_at(ctx, .COMMA) { break }
+			_advance(ctx)
+			if _at(ctx, .RBRACKET) { break } // trailing comma
+		}
+
+		if _at(ctx, .DOUBLE_STAR) {
+			// **P → Param_Spec_Param
+			star_tok := _advance(ctx)
+			name_tok := _advance(ctx)
+			p := new(Param_Spec_Param, ctx.allocator)
+			p.loc = star_tok.loc
+			p.name = name_tok.text
+			append(&params, Type_Param(p))
+		} else if _at(ctx, .STAR) {
+			// *Ts → Type_Var_Tuple_Param
+			star_tok := _advance(ctx)
+			name_tok := _advance(ctx)
+			p := new(Type_Var_Tuple_Param, ctx.allocator)
+			p.loc = star_tok.loc
+			p.name = name_tok.text
+			append(&params, Type_Param(p))
+		} else {
+			// T or T: bound
+			name_tok := _advance(ctx)
+			bound: Expr
+			if _at(ctx, .COLON) {
+				_advance(ctx)
+				bound = parse_expr(ctx)
+			}
+			p := new(Type_Var_Param, ctx.allocator)
+			p.loc = name_tok.loc
+			p.name = name_tok.text
+			p.bound = bound
+			append(&params, Type_Param(p))
+		}
+	}
+	_expect(ctx, .RBRACKET)
+	return params[:]
+}
+
 // ==================== Function / Class ====================
 
 _parse_func_def :: proc(ctx: ^Parser_Context, is_async: bool) -> Stmt {
 	def_tok := _advance(ctx) // consume 'def'
 	name_tok := _advance(ctx) // function name
+
+	// PEP 695 type parameters
+	type_params := _parse_type_params(ctx)
 
 	// Parameters
 	args := _parse_parameters(ctx)
@@ -209,6 +261,7 @@ _parse_func_def :: proc(ctx: ^Parser_Context, is_async: bool) -> Stmt {
 		n.args = args
 		n.body = body
 		n.returns = returns
+		n.type_params = type_params
 		return n
 	}
 
@@ -218,6 +271,7 @@ _parse_func_def :: proc(ctx: ^Parser_Context, is_async: bool) -> Stmt {
 	n.args = args
 	n.body = body
 	n.returns = returns
+	n.type_params = type_params
 	return n
 }
 
@@ -338,6 +392,9 @@ _parse_class_def :: proc(ctx: ^Parser_Context) -> Stmt {
 	class_tok := _advance(ctx) // consume 'class'
 	name_tok := _advance(ctx)
 
+	// PEP 695 type parameters
+	type_params := _parse_type_params(ctx)
+
 	bases: []Expr
 	keywords: []Keyword
 	if _at(ctx, .LPAREN) {
@@ -379,6 +436,7 @@ _parse_class_def :: proc(ctx: ^Parser_Context) -> Stmt {
 	n.bases = bases
 	n.keywords = keywords
 	n.body = body
+	n.type_params = type_params
 	return n
 }
 
@@ -1087,6 +1145,8 @@ _parse_type_alias_or_expr :: proc(ctx: ^Parser_Context) -> Stmt {
 	if _at_any(ctx, .NAME, .KW_MATCH, .KW_CASE) {
 		name_tok := _peek(ctx)
 		_advance(ctx)
+		// PEP 695 type parameters
+		alias_type_params := _parse_type_params(ctx)
 		if _at(ctx, .ASSIGN) {
 			_advance(ctx)
 			value := parse_expr(ctx)
@@ -1097,6 +1157,7 @@ _parse_type_alias_or_expr :: proc(ctx: ^Parser_Context) -> Stmt {
 			n := new(Type_Alias_Stmt, ctx.allocator)
 			n.loc = tok.loc
 			n.name = name_expr
+			n.type_params = alias_type_params
 			n.value = value
 			return n
 		}

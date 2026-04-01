@@ -1,6 +1,7 @@
 package checker
 
 import "core:mem"
+import "core:strings"
 
 import parser "mimir:parser"
 import binder "mimir:binder"
@@ -1198,6 +1199,21 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 		return func_type
 
 	case Class_Type:
+		// Check abstract class instantiation
+		if len(info.abstract_methods) > 0 {
+			names_dyn := make([dynamic]string, 0, len(info.abstract_methods), ctx.reg.allocator)
+			for name, is_abstract in info.abstract_methods {
+				if is_abstract { append(&names_dyn, name) }
+			}
+			if len(names_dyn) > 0 {
+				emit_diagnostic(ctx, e.loc, "T013", .Error,
+					"Cannot instantiate abstract class",
+					fmt.tprintf("'%s' has unimplemented abstract method(s): %s",
+						info.name, strings.join(names_dyn[:], ", ", allocator = ctx.reg.allocator)),
+					"Implement all abstract methods in a concrete subclass")
+			}
+		}
+
 		// Generic class — infer TypeVar bindings from __init__ args
 		if len(info.type_params) > 0 {
 			return infer_generic_constructor(e, &info, func_type, ctx, expected)
@@ -2402,20 +2418,40 @@ resolve_overload :: proc(e: ^parser.Call_Expr, sigs: []Type_ID, ctx: ^Infer_Cont
 			}
 		}
 	}
-	// No overload matched — return TYPE_UNKNOWN
+	// No overload matched — try the implementation signature (non-@overload function)
+	// The implementation signature is stored in the env as the function type
+	#partial switch fn in e.func {
+	case ^parser.Name_Expr:
+		if sym_id, ok := binder.get_ref(ctx.bind_result, rawptr(fn)); ok {
+			if impl_type, impl_ok := ctx.env.types[sym_id]; impl_ok {
+				impl_t := get_type(ctx.reg, impl_type)
+				#partial switch impl_info in impl_t.info {
+				case Callable_Type:
+					// Implementation sig is the non-@overload version — use its return type
+					return impl_info.return_type
+				}
+			}
+		}
+	}
 	return TYPE_UNKNOWN
 }
 
 overload_sig_matches :: proc(arg_types: []Type_ID, keywords: []parser.Keyword, params: []Param_Type, reg: ^Type_Registry) -> bool {
 	total := len(arg_types) + len(keywords)
 	required := 0
+	has_variadic := false
 	for p in params {
+		if p.is_variadic { has_variadic = true; continue }
 		if !p.has_default { required += 1 }
 	}
-	if total < required || total > len(params) { return false }
+	if total < required { return false }
+	if !has_variadic && total > len(params) { return false }
 	// Check positional args
 	for arg_type, i in arg_types {
-		if i >= len(params) { return false }
+		if i >= len(params) {
+			if has_variadic { continue }
+			return false
+		}
 		if arg_type != TYPE_UNKNOWN && arg_type != TYPE_ANY &&
 		   params[i].type_id != TYPE_UNKNOWN && params[i].type_id != TYPE_ANY {
 			if !is_assignable(reg, arg_type, params[i].type_id) {
@@ -2425,6 +2461,7 @@ overload_sig_matches :: proc(arg_types: []Type_ID, keywords: []parser.Keyword, p
 	}
 	// Check keyword args
 	for kw in keywords {
+		if kw.arg == "" { continue } // **kwargs unpacking
 		found := false
 		for p in params {
 			if p.name == kw.arg {
@@ -2432,7 +2469,7 @@ overload_sig_matches :: proc(arg_types: []Type_ID, keywords: []parser.Keyword, p
 				break
 			}
 		}
-		if !found { return false }
+		if !found && !has_variadic { return false }
 	}
 	return true
 }

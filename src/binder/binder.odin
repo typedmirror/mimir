@@ -84,6 +84,7 @@ collect_defs_stmt :: proc(b: ^Binder, stmt: parser.Stmt) {
 		add_symbol(b, s.name, .Function, {.Is_Assigned}, s.loc)
 		child := push_scope(b, .Function, s.name, s.loc)
 		add_params(b, &s.args, s.loc)
+		for tp in s.type_params { collect_type_param(b, tp) }
 		collect_defs_stmts(b, s.body)
 		for dec in s.decorator_list { scan_expr_for_scopes(b, dec) }
 		if s.returns != nil { scan_expr_for_scopes(b, s.returns) }
@@ -93,6 +94,7 @@ collect_defs_stmt :: proc(b: ^Binder, stmt: parser.Stmt) {
 		add_symbol(b, s.name, .Function, {.Is_Assigned}, s.loc)
 		child := push_scope(b, .Function, s.name, s.loc)
 		add_params(b, &s.args, s.loc)
+		for tp in s.type_params { collect_type_param(b, tp) }
 		collect_defs_stmts(b, s.body)
 		for dec in s.decorator_list { scan_expr_for_scopes(b, dec) }
 		if s.returns != nil { scan_expr_for_scopes(b, s.returns) }
@@ -101,6 +103,7 @@ collect_defs_stmt :: proc(b: ^Binder, stmt: parser.Stmt) {
 	case ^parser.Class_Def:
 		add_symbol(b, s.name, .Class, {.Is_Assigned}, s.loc)
 		child := push_scope(b, .Class, s.name, s.loc)
+		for tp in s.type_params { collect_type_param(b, tp) }
 		collect_defs_stmts(b, s.body)
 		for base in s.bases { scan_expr_for_scopes(b, base) }
 		for dec in s.decorator_list { scan_expr_for_scopes(b, dec) }
@@ -586,26 +589,26 @@ resolve_refs_stmt :: proc(b: ^Binder, stmt: parser.Stmt) {
 	case ^parser.Func_Def:
 		// Decorators resolve in CURRENT scope
 		for dec in s.decorator_list { resolve_refs_expr(b, dec) }
-		if s.returns != nil { resolve_refs_expr(b, s.returns) }
 		// Default values resolve in CURRENT scope
 		resolve_param_defaults(b, &s.args)
-		// Body resolves in CHILD scope
+		// Body + annotations resolve in CHILD scope (type params visible via LEGB)
 		child := find_child_scope(b, current_scope(b), s.name, .Function, s.loc)
 		if child != INVALID_SCOPE {
 			append(&b.scope_stack, child)
 			resolve_param_annotations(b, &s.args)
+			if s.returns != nil { resolve_refs_expr(b, s.returns) }
 			resolve_refs_stmts(b, s.body)
 			pop_scope(b)
 		}
 
 	case ^parser.Async_Func_Def:
 		for dec in s.decorator_list { resolve_refs_expr(b, dec) }
-		if s.returns != nil { resolve_refs_expr(b, s.returns) }
 		resolve_param_defaults(b, &s.args)
 		child := find_child_scope(b, current_scope(b), s.name, .Function, s.loc)
 		if child != INVALID_SCOPE {
 			append(&b.scope_stack, child)
 			resolve_param_annotations(b, &s.args)
+			if s.returns != nil { resolve_refs_expr(b, s.returns) }
 			resolve_refs_stmts(b, s.body)
 			pop_scope(b)
 		}

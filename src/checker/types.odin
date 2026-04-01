@@ -95,12 +95,14 @@ Tuple_Type :: struct {
 }
 
 Class_Type :: struct {
-	name:        string,
-	symbol_id:   binder.Symbol_ID,
-	scope_id:    binder.Scope_ID,
-	bases:       []Type_ID,
-	attrs:       map[string]Type_ID,
-	type_params: []Type_ID,
+	name:             string,
+	symbol_id:        binder.Symbol_ID,
+	scope_id:         binder.Scope_ID,
+	bases:            []Type_ID,
+	attrs:            map[string]Type_ID,
+	type_params:      []Type_ID,
+	is_final:         bool,
+	abstract_methods: map[string]bool,
 }
 
 Instance_Type :: struct {
