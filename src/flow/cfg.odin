@@ -779,8 +779,36 @@ check_missing_return :: proc(cfg: ^CFG, scope_name: string, has_return_annotatio
 block_ends_with_return :: proc(blk: ^Block) -> bool {
 	if len(blk.stmts) == 0 { return false }
 	last := blk.stmts[len(blk.stmts) - 1]
-	_, is_return := last.(^parser.Return_Stmt)
-	return is_return
+	#partial switch s in last {
+	case ^parser.Return_Stmt:
+		return true
+	case ^parser.Raise_Stmt:
+		return true
+	case ^parser.Assert_Stmt:
+		// assert False — always terminates
+		if c, ok := s.test.(^parser.Constant_Expr); ok {
+			if bval, bok := c.value.(bool); bok && !bval {
+				return true
+			}
+		}
+		// assert_never(...) or similar — name contains "never" or "assert"
+		if call, ok := s.test.(^parser.Call_Expr); ok {
+			if name, nok := call.func.(^parser.Name_Expr); nok {
+				if name.id == "assert_never" { return true }
+			}
+		}
+	case ^parser.Expr_Stmt:
+		// sys.exit() or exit() as expression statement
+		if call, ok := s.value.(^parser.Call_Expr); ok {
+			#partial switch fn in call.func {
+			case ^parser.Name_Expr:
+				if fn.id == "exit" || fn.id == "quit" { return true }
+			case ^parser.Attribute_Expr:
+				if fn.attr == "exit" { return true }
+			}
+		}
+	}
+	return false
 }
 
 // ==================== Helpers ====================
