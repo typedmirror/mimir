@@ -617,6 +617,35 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 	if left == TYPE_UNKNOWN || left == TYPE_ANY { return TYPE_UNKNOWN }
 	if right == TYPE_UNKNOWN || right == TYPE_ANY { return TYPE_UNKNOWN }
 
+	// Union dispatch: try each member, collect results
+	left_t := get_type(reg, left)
+	right_t := get_type(reg, right)
+	if lu, lu_ok := left_t.info.(Union_Type); lu_ok {
+		results := make([dynamic]Type_ID, 0, len(lu.members), reg.allocator)
+		for m in lu.members {
+			r := infer_binop(op, m, right, reg)
+			if r != TYPE_UNKNOWN {
+				append(&results, r)
+			}
+		}
+		if len(results) > 0 {
+			if len(results) == 1 { return results[0] }
+			return make_union_type(reg, results[:])
+		}
+	} else if ru, ru_ok := right_t.info.(Union_Type); ru_ok {
+		results := make([dynamic]Type_ID, 0, len(ru.members), reg.allocator)
+		for m in ru.members {
+			r := infer_binop(op, left, m, reg)
+			if r != TYPE_UNKNOWN {
+				append(&results, r)
+			}
+		}
+		if len(results) > 0 {
+			if len(results) == 1 { return results[0] }
+			return make_union_type(reg, results[:])
+		}
+	}
+
 	// Helper: int or bool (Python promotes bool to int in arithmetic)
 	left_intlike := left == TYPE_INT || left == TYPE_BOOL
 	right_intlike := right == TYPE_INT || right == TYPE_BOOL
@@ -1240,18 +1269,28 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			}
 		}
 
-		// Calling a class = constructor → check __init__ args
-		if init_type_id, ok := info.attrs["__init__"]; ok {
-			init_t := get_type(ctx.reg, init_type_id)
-			#partial switch &init_info in init_t.info {
+		// Calling a class = constructor → check __new__ args (if defined), else __init__
+		checked_constructor := false
+		if new_type_id, new_ok := info.attrs["__new__"]; new_ok {
+			new_t := get_type(ctx.reg, new_type_id)
+			#partial switch &new_info in new_t.info {
 			case Callable_Type:
-				check_call_args(e, &init_info, ctx)
-			case:
+				check_call_args(e, &new_info, ctx)
+				checked_constructor = true
+			}
+		}
+		if !checked_constructor {
+			if init_type_id, ok := info.attrs["__init__"]; ok {
+				init_t := get_type(ctx.reg, init_type_id)
+				#partial switch &init_info in init_t.info {
+				case Callable_Type:
+					check_call_args(e, &init_info, ctx)
+				case:
+					for arg in e.args { infer_expr(arg, ctx) }
+				}
+			} else {
 				for arg in e.args { infer_expr(arg, ctx) }
 			}
-		} else {
-			// No __init__ — just infer args
-			for arg in e.args { infer_expr(arg, ctx) }
 		}
 		return make_instance_type(ctx.reg, func_type)
 	}
