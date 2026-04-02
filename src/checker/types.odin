@@ -102,6 +102,7 @@ Class_Type :: struct {
 	attrs:            map[string]Type_ID,
 	type_params:      []Type_ID,
 	is_final:         bool,
+	is_enum:          bool,
 	abstract_methods: map[string]bool,
 }
 
@@ -599,6 +600,28 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	case Callable_Type:
 		#partial switch tgt in tgt_type.info {
 		case Callable_Type:
+			// ParamSpec/TypeVarTuple permissiveness: if either callable has TypeVar-derived
+			// params (ParamSpec.args/kwargs or *Ts), be permissive on param matching.
+			// Full ParamSpec semantics are complex; avoid false positives on valid code.
+			has_typevar_param := false
+			for p in src.params {
+				pt := get_type(reg, p.type_id)
+				if _, is_tv := pt.info.(TypeVar_Type); is_tv { has_typevar_param = true; break }
+				if _, is_tvt := pt.info.(TypeVarTuple_Type); is_tvt { has_typevar_param = true; break }
+			}
+			if !has_typevar_param {
+				for p in tgt.params {
+					pt := get_type(reg, p.type_id)
+					if _, is_tv := pt.info.(TypeVar_Type); is_tv { has_typevar_param = true; break }
+					if _, is_tvt := pt.info.(TypeVarTuple_Type); is_tvt { has_typevar_param = true; break }
+				}
+			}
+			if has_typevar_param {
+				// Only check return type covariance — params are too complex to validate statically
+				return is_assignable(reg, src.return_type, tgt.return_type) ||
+				       src.return_type == TYPE_UNKNOWN || tgt.return_type == TYPE_UNKNOWN
+			}
+
 			// Check param compatibility with variadic/default awareness
 			src_has_variadic := len(src.params) > 0 && src.params[len(src.params)-1].is_variadic
 			tgt_has_variadic := len(tgt.params) > 0 && tgt.params[len(tgt.params)-1].is_variadic
@@ -650,6 +673,24 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		#partial switch tgt in tgt_type.info {
 		case Instance_Type:
 			return is_class_subtype(reg, src.class_type, tgt.class_type)
+		case Callable_Type:
+			// Instance with __call__ is assignable to Callable
+			cls := get_type(reg, src.class_type)
+			if ci, ci_ok := cls.info.(Class_Type); ci_ok {
+				if call_type, has_call := ci.attrs["__call__"]; has_call {
+					call_t := get_type(reg, call_type)
+					if call_info, call_ok := call_t.info.(Callable_Type); call_ok {
+						// Check param compatibility (skip self) and return type
+						call_params := call_info.params
+						if len(call_params) > 0 && call_params[0].name == "self" {
+							call_params = call_params[1:]
+						}
+						// Permissive: just check return type covariance
+						return is_assignable(reg, call_info.return_type, tgt.return_type) ||
+						       call_info.return_type == TYPE_UNKNOWN || tgt.return_type == TYPE_UNKNOWN
+					}
+				}
+			}
 		}
 		// NewType → primitive base: Instance_Type(NewType_class) assignable to its primitive base
 		// is_class_subtype can't traverse primitive bases, so check directly
@@ -793,6 +834,7 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 
 is_class_subtype :: proc(reg: ^Type_Registry, sub_class: Type_ID, super_class: Type_ID, depth: int = 0) -> bool {
 	if sub_class == super_class { return true }
+	if super_class == TYPE_OBJECT { return true } // all classes are subtypes of object
 	if depth > 32 { return false }  // cycle guard
 	t := get_type(reg, sub_class)
 	#partial switch cls in t.info {

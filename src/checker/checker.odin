@@ -1783,9 +1783,10 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	// Find the scope for this class in binder
 	scope_id := find_scope_for_def(cd.name, cd.loc, ctx.bind_result, .Class)
 
-	// Check for special typing bases: TypedDict, Protocol
+	// Check for special typing bases: TypedDict, Protocol, Enum
 	is_typeddict := false
 	is_protocol := false
+	is_enum := false
 	for base in cd.bases {
 		base_name := ""
 		#partial switch b in base {
@@ -1795,6 +1796,11 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		if orig, is_typing := ctx.bind_result.typing_names[base_name]; is_typing {
 			if orig == "TypedDict" { is_typeddict = true }
 			if orig == "Protocol" { is_protocol = true }
+		}
+		// Enum detection — matches Enum, IntEnum, StrEnum, Flag, IntFlag
+		if base_name == "Enum" || base_name == "IntEnum" || base_name == "StrEnum" ||
+		   base_name == "Flag" || base_name == "IntFlag" {
+			is_enum = true
 		}
 	}
 
@@ -1950,6 +1956,16 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	ctx.reg.current_resolve_class = saved_resolve
 	ctx.current_class = saved_class
 
+	// Enum: inject standard attrs (name, value) available on all enum members
+	if is_enum {
+		attrs["name"] = TYPE_STR
+		attrs["value"] = TYPE_ANY
+		attrs["_name_"] = TYPE_STR
+		attrs["_value_"] = TYPE_ANY
+		attrs["_member_map_"] = TYPE_ANY
+		attrs["_value2member_map_"] = TYPE_ANY
+	}
+
 	// Inherit attributes from base classes (own attrs take precedence)
 	for base_type_id in bases {
 		base_t := get_type(ctx.reg, base_type_id)
@@ -2084,6 +2100,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		info.attrs = attrs
 		info.type_params = type_params
 		info.is_final = class_is_final
+		info.is_enum = is_enum
 		info.abstract_methods = abstract_meths
 	}
 

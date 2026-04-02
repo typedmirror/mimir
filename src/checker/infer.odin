@@ -1307,6 +1307,12 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 	n_total := n_args + n_named_kw
 	n_params := len(func_info.params)
 
+	// Check if ANY param is variadic (*args or **kwargs) — not just the last
+	has_variadic_param := false
+	for p in func_info.params {
+		if p.is_variadic { has_variadic_param = true; break }
+	}
+
 	// With **kwargs, we can't statically determine the total arg count
 	if !has_star_kwargs {
 		if n_total < required {
@@ -1314,16 +1320,15 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 				"Too few arguments",
 				fmt_arg_count_error(required, n_total, ctx.reg),
 				"Add missing arguments")
-		} else if n_total > n_params {
+		} else if n_total > n_params && !has_variadic_param {
 			if n_params == 0 {
 				emit_diagnostic(ctx, e.loc, "T004", .Error,
 					"Too many arguments",
 					fmt_arg_count_error(n_params, n_total, ctx.reg),
 					"Remove extra arguments")
 			} else {
-				// Check if last param is *args (explicit flag) or builtin with Any type (implicit)
 				last := func_info.params[n_params - 1]
-				if !last.is_variadic && last.type_id != TYPE_ANY {
+				if last.type_id != TYPE_ANY {
 					emit_diagnostic(ctx, e.loc, "T004", .Error,
 						"Too many arguments",
 						fmt_arg_count_error(n_params, n_total, ctx.reg),
