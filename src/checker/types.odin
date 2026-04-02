@@ -587,6 +587,20 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 				}
 				return true
 			}
+			// Homogeneous variadic tuple: Tuple[T, ...] accepts any-length tuple of T
+			if tgt.is_variadic && len(tgt.elements) == 1 {
+				elem_type := tgt.elements[0]
+				for e in src.elements {
+					if !is_assignable(reg, e, elem_type) { return false }
+				}
+				return true
+			}
+			if src.is_variadic && len(src.elements) == 1 {
+				// Source is variadic — compatible with same variadic target
+				if tgt.is_variadic && len(tgt.elements) == 1 {
+					return is_assignable(reg, src.elements[0], tgt.elements[0])
+				}
+			}
 			if len(src.elements) != len(tgt.elements) { return false }
 			for e, i in src.elements {
 				if !is_assignable(reg, e, tgt.elements[i]) { return false }

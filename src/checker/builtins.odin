@@ -266,7 +266,25 @@ resolve_annotation :: proc(
 			return make_set_type(reg, elem)
 		case "tuple", "Tuple":
 			elems := resolve_tuple_args(e.slice, reg, bind_result, builtins, env)
-			return make_tuple_type(reg, elems, false)
+			// Detect Tuple[T, ...] — homogeneous variadic tuple
+			is_variadic := false
+			if len(elems) == 2 {
+				last_t := get_type(reg, elems[1])
+				if _, is_unk := last_t.info.(Unknown_Type); is_unk {
+					// Ellipsis resolves to Unknown — check if actual AST has Ellipsis
+					if tup, tup_ok := e.slice.(^parser.Tuple_Expr); tup_ok {
+						if len(tup.elts) == 2 {
+							if c, c_ok := tup.elts[1].(^parser.Constant_Expr); c_ok {
+								if _, is_ellipsis := c.value.(parser.Const_Ellipsis); is_ellipsis {
+									elems = elems[:1]  // Keep just the element type
+									is_variadic = true
+								}
+							}
+						}
+					}
+				}
+			}
+			return make_tuple_type(reg, elems, is_variadic)
 		case "Optional":
 			inner := resolve_annotation(e.slice, reg, bind_result, builtins, env)
 			members := [2]Type_ID{inner, TYPE_NONE}
