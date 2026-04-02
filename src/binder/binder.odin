@@ -615,11 +615,12 @@ resolve_refs_stmt :: proc(b: ^Binder, stmt: parser.Stmt) {
 
 	case ^parser.Class_Def:
 		for dec in s.decorator_list { resolve_refs_expr(b, dec) }
-		for base in s.bases { resolve_refs_expr(b, base) }
 		for kw in s.keywords { resolve_refs_expr(b, kw.value) }
 		child := find_child_scope(b, current_scope(b), s.name, .Class, s.loc)
 		if child != INVALID_SCOPE {
 			append(&b.scope_stack, child)
+			// Resolve bases inside child scope (PEP 695 type params visible via LEGB)
+			for base in s.bases { resolve_refs_expr(b, base) }
 			resolve_refs_stmts(b, s.body)
 			pop_scope(b)
 		}
