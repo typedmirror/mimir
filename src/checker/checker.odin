@@ -1045,6 +1045,26 @@ check_stmt :: proc(
 				}
 			}
 		}
+		// Track Instance_Type from constructor calls for reassignment checking
+		// Narrow scope: only Call_Expr → Instance_Type, non-discard, non-annotated
+		if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY &&
+		   !_is_any_type(rhs_type, ctx.reg) && len(s.targets) == 1 {
+			rhs_t := get_type(ctx.reg, rhs_type)
+			if _, is_instance := rhs_t.info.(Instance_Type); is_instance {
+				if _, is_call := s.value.(^parser.Call_Expr); is_call {
+					if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+						if len(name.id) > 0 && name.id[0] != '_' {
+							if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+								if sym_id not_in ctx.declared_types {
+									ctx.declared_types[sym_id] = rhs_type
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		for target in s.targets {
 			assign_target(target, rhs_type, ctx)
 		}
