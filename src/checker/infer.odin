@@ -1217,7 +1217,12 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			}
 		}
 		// Check for missing required fields (per-field Required/NotRequired)
-		{
+		// Skip when positional args present (dict literal/call) or **kwargs unpacking
+		has_kwargs_unpack := false
+		for kw in e.keywords {
+			if kw.arg == "" { has_kwargs_unpack = true; break }
+		}
+		if len(e.args) == 0 && !has_kwargs_unpack {
 			provided := make(map[string]bool, len(e.keywords), ctx.reg.allocator)
 			for kw in e.keywords {
 				provided[kw.arg] = true
