@@ -756,32 +756,24 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		}
 	}
 
-	// Protocol structural subtyping: Instance must have matching methods/attrs with compatible types
-	#partial switch tgt in tgt_type.info {
+	// Protocol structural subtyping: Instance/Class must have matching methods/attrs
+	#partial switch &tgt in tgt_type.info {
 	case Protocol_Type:
-		#partial switch src in src_type.info {
+		check_ok := false
+		#partial switch &src in src_type.info {
 		case Instance_Type:
 			cls := get_type(reg, src.class_type)
-			#partial switch cls_info in cls.info {
+			#partial switch &cls_info in cls.info {
 			case Class_Type:
-				for method_name, method_type in tgt.methods {
-					cls_attr, ok := cls_info.attrs[method_name]
-					if !ok { return false }
-					// Check type compatibility if both types are known
-					if method_type != TYPE_UNKNOWN && cls_attr != TYPE_UNKNOWN {
-						if !is_assignable(reg, cls_attr, method_type) { return false }
-					}
-				}
-				for attr_name, attr_type in tgt.attrs {
-					cls_attr, ok := cls_info.attrs[attr_name]
-					if !ok { return false }
-					if attr_type != TYPE_UNKNOWN && cls_attr != TYPE_UNKNOWN {
-						if !is_assignable(reg, cls_attr, attr_type) { return false }
-					}
-				}
-				return true
+				check_ok = _match_protocol(&cls_info, &tgt, reg)
 			}
+		case Class_Type:
+			// Class object → Protocol: check if class itself has the protocol attrs
+			check_ok = _match_protocol(&src, &tgt, reg)
 		}
+		if check_ok { return true }
+		// Protocol with no methods/attrs: any type satisfies
+		if len(tgt.methods) == 0 && len(tgt.attrs) == 0 { return true }
 		return false
 	}
 
@@ -830,6 +822,25 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	}
 
 	return false
+}
+
+// Check if a class satisfies a protocol's structural requirements
+_match_protocol :: proc(cls_info: ^Class_Type, proto: ^Protocol_Type, reg: ^Type_Registry) -> bool {
+	for method_name, method_type in proto.methods {
+		cls_attr, ok := cls_info.attrs[method_name]
+		if !ok { return false }
+		if method_type != TYPE_UNKNOWN && cls_attr != TYPE_UNKNOWN {
+			if !is_assignable(reg, cls_attr, method_type) { return false }
+		}
+	}
+	for attr_name, attr_type in proto.attrs {
+		cls_attr, ok := cls_info.attrs[attr_name]
+		if !ok { return false }
+		if attr_type != TYPE_UNKNOWN && cls_attr != TYPE_UNKNOWN {
+			if !is_assignable(reg, cls_attr, attr_type) { return false }
+		}
+	}
+	return true
 }
 
 is_class_subtype :: proc(reg: ^Type_Registry, sub_class: Type_ID, super_class: Type_ID, depth: int = 0) -> bool {
