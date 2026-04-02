@@ -698,6 +698,19 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 	case .Bit_Or:
 		if left_intlike && right_intlike { return TYPE_INT }
 		if is_set_type(reg, left) && is_set_type(reg, right) { return left }
+		// Dict/TypedDict merge: d1 | d2 → merged dict/TypedDict
+		{
+			lt := get_type(reg, left)
+			rt := get_type(reg, right)
+			l_is_dict := false; r_is_dict := false
+			if _, ok := lt.info.(TypedDict_Type); ok { l_is_dict = true }
+			if _, ok := lt.info.(Dict_Type); ok { l_is_dict = true }
+			if _, ok := rt.info.(TypedDict_Type); ok { r_is_dict = true }
+			if _, ok := rt.info.(Dict_Type); ok { r_is_dict = true }
+			if l_is_dict && r_is_dict { return left }
+			if l_is_dict { return left }
+			if r_is_dict { return right }
+		}
 		// PEP 604: int | str → Union[int, str] (type objects use | for unions)
 		left_as_type := callable_to_primitive(left, reg)
 		right_as_type := callable_to_primitive(right, reg)
