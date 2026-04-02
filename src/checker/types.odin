@@ -769,6 +769,18 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			}
 		case Class_Type:
 			check_ok = _match_protocol(&src, &tgt, reg)
+		case Callable_Type:
+			// Callable → Protocol: satisfies protocol if protocol has __call__ method
+			if call_type, has_call := tgt.methods["__call__"]; has_call {
+				// Check callable signature against __call__ type
+				if call_type == TYPE_UNKNOWN || is_assignable(reg, source, call_type) {
+					check_ok = true
+				}
+			}
+			// Also: if protocol has no methods (just __call__), any callable satisfies
+			if len(tgt.methods) == 1 && "__call__" in tgt.methods && len(tgt.attrs) == 0 {
+				check_ok = true
+			}
 		case Protocol_Type:
 			// Protocol → Protocol: source protocol must have all target's methods/attrs
 			all_match := true
