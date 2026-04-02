@@ -1211,6 +1211,16 @@ check_stmt :: proc(
 			}
 		} else {
 			append(return_types, TYPE_NONE)
+			// Bare "return" in non-None function
+			if declared_return != TYPE_UNKNOWN && declared_return != TYPE_NONE &&
+			   !_is_any_type(declared_return, ctx.reg) &&
+			   !is_assignable(ctx.reg, TYPE_NONE, declared_return) {
+				emit_diagnostic(ctx, s.loc, "T003", .Error,
+					"Return value expected",
+					fmt.tprintf("Function declared to return '%s' but returns None",
+						type_to_string(ctx.reg, declared_return)),
+					"Add a return value or change the return annotation to Optional")
+			}
 		}
 
 	case ^parser.Func_Def:

@@ -1256,11 +1256,34 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 		return make_instance_type(ctx.reg, func_type)
 	}
 
-	// Not callable — emit T005 for known non-callable primitive types
+	// Not callable — emit T005 for known non-callable types
 	is_noncallable := false
 	switch func_type {
-	case TYPE_NONE, TYPE_INT, TYPE_FLOAT, TYPE_BOOL, TYPE_BYTES:
+	case TYPE_NONE, TYPE_INT, TYPE_FLOAT, TYPE_BOOL, TYPE_BYTES, TYPE_STR:
 		is_noncallable = true
+	}
+	if !is_noncallable {
+		ft := get_type(ctx.reg, func_type)
+		#partial switch nc_info in ft.info {
+		case Instance_Type:
+			cls := get_type(ctx.reg, nc_info.class_type)
+			if cls_info, cls_ok := cls.info.(Class_Type); cls_ok {
+				// Only flag if class has enough attrs to be confident
+				if len(cls_info.attrs) > 3 && "__call__" not_in cls_info.attrs {
+					is_noncallable = true
+				}
+			}
+		case Module_Type:
+			is_noncallable = true
+		case Tuple_Type:
+			is_noncallable = true
+		case List_Type:
+			is_noncallable = true
+		case Dict_Type:
+			is_noncallable = true
+		case Set_Type:
+			is_noncallable = true
+		}
 	}
 	if is_noncallable {
 		emit_diagnostic(ctx, e.loc, "T005", .Error,
@@ -1368,11 +1391,14 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		}
 	}
 
-	// Check keyword arg types against matching param types
+	// Check keyword arg types and names against matching param types
 	for kw in e.keywords {
+		if kw.arg == "" { continue } // **kwargs unpacking
 		kw_type := infer_expr(kw.value, ctx)
+		found_param := false
 		for p in func_info.params {
 			if p.name == kw.arg {
+				found_param = true
 				if _is_any_type(p.type_id, ctx.reg) || p.type_id == TYPE_UNKNOWN ||
 				   kw_type == TYPE_UNKNOWN || _is_any_type(kw_type, ctx.reg) ||
 				   _union_has_unknown(kw_type, ctx.reg) {
@@ -1384,6 +1410,47 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 						"Use the correct type")
 				}
 				break
+			}
+			if p.is_variadic { found_param = true; break } // **kwargs accepts any keyword
+		}
+		if !found_param && !has_variadic_param && n_params >= 2 {
+			// Only flag for locally-defined functions (not imports/stubs)
+			// Imported functions may have incomplete signatures missing **kwargs
+			is_local := false
+			#partial switch fn in e.func {
+			case ^parser.Name_Expr:
+				if sym_id, sym_ok := binder.get_ref(ctx.bind_result, rawptr(fn)); sym_ok {
+					sym := binder.result_get_symbol(ctx.bind_result, sym_id)
+					if sym != nil && sym.kind == .Function { is_local = true }
+				}
+			}
+			if is_local {
+				emit_diagnostic(ctx, e.loc, "T004", .Error,
+					"Unexpected keyword argument",
+					fmt.tprintf("'%s' is not a valid keyword argument", kw.arg),
+					"Check the function signature for valid parameter names")
+			}
+		}
+	}
+
+	// Check required keyword-only params are provided
+	// Keyword-only params come after the *args param in the param list
+	if !has_star_kwargs {
+		saw_variadic := false
+		for p in func_info.params {
+			if p.is_variadic { saw_variadic = true; continue }
+			if saw_variadic && !p.has_default {
+				// This is a required keyword-only param — check if provided
+				provided := false
+				for kw in e.keywords {
+					if kw.arg == p.name { provided = true; break }
+				}
+				if !provided {
+					emit_diagnostic(ctx, e.loc, "T004", .Error,
+						"Missing required keyword argument",
+						fmt.tprintf("'%s' is a required keyword-only argument", p.name),
+						"Add the missing keyword argument")
+				}
 			}
 		}
 	}
