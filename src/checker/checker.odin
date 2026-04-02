@@ -1032,13 +1032,19 @@ check_stmt :: proc(
 		if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY {
 			for target in s.targets {
 				if name, ok := target.(^parser.Name_Expr); ok {
+					// Skip self-assignment (x = x)
+					if rhs_name, rhs_ok := s.value.(^parser.Name_Expr); rhs_ok {
+						if rhs_name.id == name.id { continue }
+					}
 					if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
 						if declared, found := ctx.declared_types[sym_id]; found {
-							if !is_assignable(ctx.reg, rhs_type, declared) {
-								emit_diagnostic(ctx, s.loc, "T001", .Error,
-									"Incompatible types in assignment",
-									fmt_type_mismatch(rhs_type, declared, ctx.reg),
-									"Change the value or the annotation")
+							if declared != TYPE_ANY && !_is_any_type(declared, ctx.reg) {
+								if !is_assignable(ctx.reg, rhs_type, declared) {
+									emit_diagnostic(ctx, s.loc, "T001", .Error,
+										"Incompatible types in assignment",
+										fmt_type_mismatch(rhs_type, declared, ctx.reg),
+										"Change the value or the annotation")
+								}
 							}
 						}
 					}
