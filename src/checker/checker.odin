@@ -1051,19 +1051,27 @@ check_stmt :: proc(
 				}
 			}
 		}
-		// Track Instance_Type from constructor calls for reassignment checking
-		// Narrow scope: only Call_Expr → Instance_Type, non-discard, non-annotated
+		// Track inferred types for reassignment checking
+		// Two patterns: Instance_Type from constructor calls, primitives from literals
 		if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY &&
 		   !_is_any_type(rhs_type, ctx.reg) && len(s.targets) == 1 {
-			rhs_t := get_type(ctx.reg, rhs_type)
-			if _, is_instance := rhs_t.info.(Instance_Type); is_instance {
-				if _, is_call := s.value.(^parser.Call_Expr); is_call {
-					if name, ok := s.targets[0].(^parser.Name_Expr); ok {
-						if len(name.id) > 0 && name.id[0] != '_' {
-							if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
-								if sym_id not_in ctx.declared_types {
-									ctx.declared_types[sym_id] = rhs_type
+			if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+				if len(name.id) > 0 && name.id[0] != '_' {
+					if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+						if sym_id not_in ctx.declared_types {
+							should_track := false
+							// Pattern 1: Instance_Type from constructor Call_Expr
+							rhs_t := get_type(ctx.reg, rhs_type)
+							if _, is_instance := rhs_t.info.(Instance_Type); is_instance {
+								if _, is_call := s.value.(^parser.Call_Expr); is_call {
+									should_track = true
 								}
+							}
+							// Pattern 2: Primitive from literal — DISABLED (creates too many FPs)
+							// mypy only tracks in typed functions with specific rules
+							// that are too complex to replicate without full mypy config support
+							if should_track {
+								ctx.declared_types[sym_id] = rhs_type
 							}
 						}
 					}
@@ -1297,10 +1305,38 @@ check_stmt :: proc(
 				fmt_binop_error(s.op, lhs_type, rhs_type, ctx.reg),
 				"Check operand types")
 		}
+		// Check augmented result against declared type (x: int; x += "str" → T001)
+		if result_type != TYPE_UNKNOWN && result_type != TYPE_ANY {
+			if name, ok := s.target.(^parser.Name_Expr); ok {
+				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+					if declared, found := ctx.declared_types[sym_id]; found {
+						if declared != TYPE_ANY && !_is_any_type(declared, ctx.reg) {
+							if !is_assignable(ctx.reg, result_type, declared) {
+								emit_diagnostic(ctx, s.loc, "T001", .Error,
+									"Incompatible types in assignment",
+									fmt_type_mismatch(result_type, declared, ctx.reg),
+									"Check operand types for augmented assignment")
+							}
+						}
+					}
+				}
+			}
+		}
 		assign_target(s.target, result_type, ctx)
 
 	case ^parser.For_Stmt:
 		iter_type := infer_expr(s.iter, ctx)
+		// Check if iter expression is iterable
+		if iter_type != TYPE_UNKNOWN && iter_type != TYPE_ANY &&
+		   !_is_any_type(iter_type, ctx.reg) {
+			switch iter_type {
+			case TYPE_INT, TYPE_FLOAT, TYPE_BOOL, TYPE_NONE:
+				emit_diagnostic(ctx, s.loc, "T005", .Error,
+					"Not iterable",
+					fmt.tprintf("'%s' is not iterable", type_to_string(ctx.reg, iter_type)),
+					"Use a list, tuple, or other iterable")
+			}
+		}
 		elem_type := get_iterator_element_type(iter_type, ctx.reg)
 		assign_target(s.target, elem_type, ctx)
 
@@ -1889,6 +1925,27 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 			symbol_id = sym_id,
 			scope_id  = scope_id,
 		})
+	}
+
+	// Check for duplicate base classes
+	{
+		seen_bases := make(map[string]bool, 4, ctx.reg.allocator)
+		for base in cd.bases {
+			base_name := ""
+			#partial switch b in base {
+			case ^parser.Name_Expr: base_name = b.id
+			case ^parser.Subscript_Expr: base_name = get_annotation_name(b.value)
+			}
+			if len(base_name) > 0 && base_name != "Generic" && base_name != "Protocol" {
+				if base_name in seen_bases {
+					emit_diagnostic(ctx, cd.loc, "T015", .Error,
+						"Duplicate base class",
+						fmt.tprintf("'%s' is listed as a base class more than once", base_name),
+						"Remove the duplicate base class")
+				}
+				seen_bases[base_name] = true
+			}
+		}
 	}
 
 	// Resolve base classes, detecting Generic[T] for type_params
