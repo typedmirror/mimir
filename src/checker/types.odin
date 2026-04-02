@@ -756,7 +756,7 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		}
 	}
 
-	// Protocol structural subtyping: Instance/Class must have matching methods/attrs
+	// Protocol structural subtyping: Instance/Class/Protocol must have matching methods/attrs
 	#partial switch &tgt in tgt_type.info {
 	case Protocol_Type:
 		check_ok := false
@@ -768,8 +768,27 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 				check_ok = _match_protocol(&cls_info, &tgt, reg)
 			}
 		case Class_Type:
-			// Class object → Protocol: check if class itself has the protocol attrs
 			check_ok = _match_protocol(&src, &tgt, reg)
+		case Protocol_Type:
+			// Protocol → Protocol: source protocol must have all target's methods/attrs
+			all_match := true
+			for method_name, tgt_method in tgt.methods {
+				src_method, ok := src.methods[method_name]
+				if !ok { all_match = false; break }
+				if tgt_method != TYPE_UNKNOWN && src_method != TYPE_UNKNOWN {
+					if !is_assignable(reg, src_method, tgt_method) { all_match = false; break }
+				}
+			}
+			if all_match {
+				for attr_name, tgt_attr in tgt.attrs {
+					src_attr, ok := src.attrs[attr_name]
+					if !ok { all_match = false; break }
+					if tgt_attr != TYPE_UNKNOWN && src_attr != TYPE_UNKNOWN {
+						if !is_assignable(reg, src_attr, tgt_attr) { all_match = false; break }
+					}
+				}
+			}
+			if all_match { check_ok = true }
 		}
 		if check_ok { return true }
 		// Protocol with no methods/attrs: any type satisfies
