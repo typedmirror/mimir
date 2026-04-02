@@ -1740,6 +1740,10 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 			if attr_type, ok := cls_info.attrs[attr]; ok {
 				return attr_type
 			}
+			// __getattr__ fallback: if class defines __getattr__, any attribute is valid
+			if _, has_getattr := cls_info.attrs["__getattr__"]; has_getattr {
+				return TYPE_ANY
+			}
 			// Fallback: dict methods for classes inheriting from Mapping/MutableMapping/dict
 			if _has_mapping_base(reg, &cls_info) {
 				dict_result := _lookup_dict_method(attr, reg)
