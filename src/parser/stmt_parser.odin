@@ -775,6 +775,29 @@ _parse_single_pattern :: proc(ctx: ^Parser_Context) -> Pattern {
 		p.loc = tok.loc
 		p.value = val
 		return p
+	case .LPAREN:
+		// Parenthesized sequence pattern: (a, b) or (a,) or grouping (a)
+		_advance(ctx)
+		patterns := make([dynamic]Pattern, 0, 4, ctx.allocator)
+		has_comma := false
+		for !_at(ctx, .RPAREN) && !_at(ctx, .EOF) {
+			if len(patterns) > 0 {
+				if !_at(ctx, .COMMA) { break }
+				_advance(ctx)
+				has_comma = true
+				if _at(ctx, .RPAREN) { break } // trailing comma
+			}
+			append(&patterns, _parse_pattern(ctx))
+		}
+		_expect(ctx, .RPAREN)
+		// Single element without comma = grouping, not sequence
+		if len(patterns) == 1 && !has_comma {
+			return patterns[0]
+		}
+		p := new(Match_Sequence, ctx.allocator)
+		p.loc = tok.loc
+		p.patterns = patterns[:]
+		return p
 	case .LBRACKET:
 		_advance(ctx)
 		patterns := make([dynamic]Pattern, 0, 4, ctx.allocator)
