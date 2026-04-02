@@ -1355,15 +1355,22 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		if !p.has_default { required += 1 }
 	}
 
-	// Check arg count (positional + named keyword, excluding **kwargs unpacking)
+	// Check arg count (positional + named keyword, excluding **kwargs and *args unpacking)
 	n_args := len(e.args)
 	n_named_kw := 0
 	has_star_kwargs := false
+	has_star_args := false
 	for kw in e.keywords {
 		if kw.arg == "" {
 			has_star_kwargs = true
 		} else {
 			n_named_kw += 1
+		}
+	}
+	for arg in e.args {
+		if _, is_starred := arg.(^parser.Starred_Expr); is_starred {
+			has_star_args = true
+			break
 		}
 	}
 	n_total := n_args + n_named_kw
@@ -1375,8 +1382,8 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		if p.is_variadic { has_variadic_param = true; break }
 	}
 
-	// With **kwargs, we can't statically determine the total arg count
-	if !has_star_kwargs {
+	// With *args/**kwargs unpacking, we can't statically determine the total arg count
+	if !has_star_kwargs && !has_star_args {
 		if n_total < required {
 			emit_diagnostic(ctx, e.loc, "T004", .Error,
 				"Too few arguments",
