@@ -2388,6 +2388,10 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 					}
 				}
 			}
+		case ^parser.Class_Def:
+			// Nested class — register as attr (class type)
+			nested_type := build_class_type(s, ctx)
+			attrs[s.name] = nested_type
 		case ^parser.If_Stmt:
 			scan_class_body_attrs(s.body, ctx, attrs)
 			scan_class_body_attrs(s.orelse, ctx, attrs)
