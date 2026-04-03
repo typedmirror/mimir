@@ -2265,6 +2265,36 @@ build_typeddict_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_
 		}
 	}
 
+	// Inherit fields from base TypedDict classes
+	for base in cd.bases {
+		base_name := ""
+		#partial switch b in base {
+		case ^parser.Name_Expr: base_name = b.id
+		case ^parser.Subscript_Expr: base_name = get_annotation_name(b.value)
+		}
+		if base_name == "TypedDict" || len(base_name) == 0 { continue }
+		// Look up base in class_types by name (scan all registered types)
+		for _, ct_id in ctx.reg.class_types {
+			bt := get_type(ctx.reg, ct_id)
+			#partial switch &base_td in bt.info {
+			case TypedDict_Type:
+				if base_td.name == base_name {
+					for field_name, field_type in base_td.fields {
+						if field_name not_in fields {
+							fields[field_name] = field_type
+						}
+					}
+					for field_name, is_req in base_td.required_fields {
+						if field_name not_in required_fields {
+							required_fields[field_name] = is_req
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
 	sym_id := find_symbol_for_name(cd.name, cd.loc, ctx.bind_result)
 	td_type_id := register_type(ctx.reg, TypedDict_Type{
 		name            = cd.name,
