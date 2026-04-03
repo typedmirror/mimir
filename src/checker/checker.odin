@@ -2437,7 +2437,27 @@ build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_i
 		#partial switch s in stmt {
 		case ^parser.Func_Def:
 			ft := build_func_type(s, ctx)
-			methods[s.name] = ft
+			// @property: store return type in attrs (not callable in methods)
+			is_property := false
+			for dec in s.decorator_list {
+				#partial switch d in dec {
+				case ^parser.Name_Expr:
+					if d.id == "property" { is_property = true }
+				case ^parser.Attribute_Expr:
+					if d.attr == "property" { is_property = true }
+				}
+			}
+			if is_property {
+				ft_info := get_type(ctx.reg, ft)
+				#partial switch callable in ft_info.info {
+				case Callable_Type:
+					attrs[s.name] = callable.return_type
+				case:
+					attrs[s.name] = ft
+				}
+			} else {
+				methods[s.name] = ft
+			}
 		case ^parser.Ann_Assign:
 			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
 				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
