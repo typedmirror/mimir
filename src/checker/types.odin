@@ -524,15 +524,15 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			return (is_assignable(reg, src.key, tgt.key) && is_assignable(reg, tgt.key, src.key)) &&
 			       (is_assignable(reg, src.value, tgt.value) && is_assignable(reg, tgt.value, src.value))
 		case TypedDict_Type:
-			// Dict[str, V] → TypedDict: allow when dict has string keys
-			if src.key == TYPE_STR || src.key == TYPE_ANY {
+			// Dict[str, V] → TypedDict: allow when dict has string keys or unknown (empty dict)
+			if src.key == TYPE_STR || src.key == TYPE_ANY || src.key == TYPE_UNKNOWN {
 				return true
 			}
 		case Instance_Type, Class_Type:
-			// Dict[str, V] → Instance/Class: allow when dict has string keys
+			// Dict[str, V] → Instance/Class: allow when dict has string keys or unknown
 			// Covers TypedDict class syntax (pre-registered as Class_Type before
 			// being converted to TypedDict_Type during check_scope)
-			if src.key == TYPE_STR || src.key == TYPE_ANY {
+			if src.key == TYPE_STR || src.key == TYPE_ANY || src.key == TYPE_UNKNOWN {
 				return true
 			}
 		}
@@ -632,6 +632,12 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			}
 			if has_typevar_param {
 				// Only check return type covariance — params are too complex to validate statically
+				return is_assignable(reg, src.return_type, tgt.return_type) ||
+				       src.return_type == TYPE_UNKNOWN || tgt.return_type == TYPE_UNKNOWN
+			}
+
+			// Target with 0 params (from Callable[..., T] or unresolved): just check return
+			if len(tgt.params) == 0 && len(src.params) > 0 {
 				return is_assignable(reg, src.return_type, tgt.return_type) ||
 				       src.return_type == TYPE_UNKNOWN || tgt.return_type == TYPE_UNKNOWN
 			}
