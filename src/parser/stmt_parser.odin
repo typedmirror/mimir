@@ -668,6 +668,20 @@ _parse_match_cases :: proc(ctx: ^Parser_Context) -> []Match_Case {
 		_advance(ctx) // consume 'case'
 
 		pattern := _parse_pattern(ctx)
+		// Top-level sequence pattern: case a, b, c: → MatchSequence
+		if _at(ctx, .COMMA) {
+			patterns := make([dynamic]Pattern, 0, 3, ctx.allocator)
+			append(&patterns, pattern)
+			for _at(ctx, .COMMA) {
+				_advance(ctx)
+				if _at(ctx, .COLON) || _at(ctx, .KW_IF) { break } // trailing comma
+				append(&patterns, _parse_pattern(ctx))
+			}
+			seq := new(Match_Sequence, ctx.allocator)
+			seq.loc = _pattern_loc(pattern)
+			seq.patterns = patterns[:]
+			pattern = seq
+		}
 		guard: Expr
 		if _at(ctx, .KW_IF) {
 			_advance(ctx)
