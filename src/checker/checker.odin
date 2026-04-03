@@ -1075,6 +1075,13 @@ check_stmt :: proc(
 								if _, is_call := s.value.(^parser.Call_Expr); is_call {
 									should_track = true
 								}
+								// Also track Instance_Type from variable/attribute (b = a, b = self.x)
+								if !should_track {
+									#partial switch _ in s.value {
+									case ^parser.Name_Expr, ^parser.Attribute_Expr:
+										should_track = true
+									}
+								}
 							}
 							// Pattern 2: Primitive from literal — DISABLED (creates too many FPs)
 							// mypy only tracks in typed functions with specific rules
