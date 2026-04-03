@@ -1027,7 +1027,20 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 						return make_list_type(ctx.reg, elem_type)
 					case "reversed":
 						return make_list_type(ctx.reg, elem_type)
+					case "enumerate":
+						// enumerate(Iterable[T]) → Iterator[tuple[int, T]]
+						return make_list_type(ctx.reg, make_tuple_type(ctx.reg, {TYPE_INT, elem_type}, false))
 					}
+				}
+				// zip(iter1, iter2) → list[tuple[T1, T2]]
+				if name_expr.id == "zip" && len(e.args) >= 2 {
+					elems := make([dynamic]Type_ID, 0, len(e.args), ctx.reg.allocator)
+					for arg in e.args {
+						at := infer_expr(arg, ctx)
+						et := get_iterator_element_type(at, ctx.reg)
+						append(&elems, et)
+					}
+					return make_list_type(ctx.reg, make_tuple_type(ctx.reg, elems[:], false))
 				}
 			}
 		}
