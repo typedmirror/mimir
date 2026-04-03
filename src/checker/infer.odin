@@ -1305,6 +1305,14 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			}
 		}
 
+		// Enum functional form: Enum('Name', 'members', ...) uses metaclass constructor
+		// The __init__ signature doesn't match; skip arg checking for enum class calls
+		if info.is_enum || info.name == "Enum" || info.name == "IntEnum" ||
+		   info.name == "Flag" || info.name == "IntFlag" || info.name == "StrEnum" {
+			for arg in e.args { infer_expr(arg, ctx) }
+			return make_instance_type(ctx.reg, func_type)
+		}
+
 		// Calling a class = constructor → check __new__ args (if defined), else __init__
 		checked_constructor := false
 		if new_type_id, new_ok := info.attrs["__new__"]; new_ok {
