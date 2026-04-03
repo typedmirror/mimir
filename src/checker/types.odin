@@ -696,12 +696,24 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 				if tgt_ci, tgt_ok := tgt_cls_t.info.(Class_Type); tgt_ok {
 					if src_ci.name == tgt_ci.name && src_ci.symbol_id == tgt_ci.symbol_id &&
 					   src_ci.name != "" && src_ci.symbol_id != 0 {
-						// Verify attrs are structurally equivalent (invariant)
+						// Verify attrs are compatible:
+						// - If target is unspecialized (has type_params), source can be any specialization
+						// - If both specialized, attrs must match (invariant)
+						if len(tgt_ci.type_params) > 0 {
+							// Target is unspecialized generic — any specialization is assignable
+							return true
+						}
+						if len(src_ci.type_params) > 0 {
+							// Source is unspecialized — assignable to any specialization of same class
+							return true
+						}
+						// Both specialized — check attrs match (invariant)
 						if len(src_ci.attrs) == len(tgt_ci.attrs) {
 							attrs_match := true
 							for attr_name, src_attr_type in src_ci.attrs {
 								if tgt_attr_type, found := tgt_ci.attrs[attr_name]; found {
-									if src_attr_type != tgt_attr_type {
+									if src_attr_type != tgt_attr_type &&
+									   !is_assignable(reg, src_attr_type, tgt_attr_type) {
 										attrs_match = false
 										break
 									}
