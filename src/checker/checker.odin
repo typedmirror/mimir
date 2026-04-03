@@ -1322,10 +1322,17 @@ check_stmt :: proc(
 		rhs_type := infer_expr(s.value, ctx)
 		result_type := infer_binop(s.op, lhs_type, rhs_type, ctx.reg)
 		if result_type == TYPE_UNKNOWN && lhs_type != TYPE_UNKNOWN && rhs_type != TYPE_UNKNOWN {
-			emit_diagnostic(ctx, s.loc, "T005", .Error,
-				"Unsupported operand types",
-				fmt_binop_error(s.op, lhs_type, rhs_type, ctx.reg),
-				"Check operand types")
+			// Suppress T005 for augmented assignment on Callable types
+			// (e.g. f += 5 where f: Callable — treated as reassignment)
+			lhs_t := get_type(ctx.reg, lhs_type)
+			is_callable_lhs := false
+			if _, is_ct := lhs_t.info.(Callable_Type); is_ct { is_callable_lhs = true }
+			if !is_callable_lhs {
+				emit_diagnostic(ctx, s.loc, "T005", .Error,
+					"Unsupported operand types",
+					fmt_binop_error(s.op, lhs_type, rhs_type, ctx.reg),
+					"Check operand types")
+			}
 		}
 		// Check augmented result against declared type (x: int; x += "str" → T001)
 		if result_type != TYPE_UNKNOWN && result_type != TYPE_ANY {
