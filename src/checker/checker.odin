@@ -1014,6 +1014,15 @@ check_stmt :: proc(
 		}
 		rhs_type := infer_expr(s.value, ctx, target_expected)
 
+		// Type alias fallback: if RHS produced Unknown and looks like a type expression,
+		// try resolve_annotation (handles list[float], dict[str, int], etc.)
+		if rhs_type == TYPE_UNKNOWN && s.value != nil {
+			alias_type := resolve_annotation(s.value, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			if alias_type != TYPE_UNKNOWN {
+				rhs_type = alias_type
+			}
+		}
+
 		// Check Final reassignment
 		for target in s.targets {
 			if name, ok := target.(^parser.Name_Expr); ok {

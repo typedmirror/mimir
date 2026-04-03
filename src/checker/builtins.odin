@@ -212,6 +212,15 @@ resolve_annotation :: proc(
 					case Class_Type:
 						// Class alias: MyClass = Foo → use as instance type
 						return make_instance_type(reg, env_type)
+					case List_Type, Dict_Type, Set_Type, Tuple_Type, Union_Type:
+						// Container/union type alias: Vector = list[float] → use directly
+						return env_type
+					case Primitive_Type:
+						// Primitive alias: MyInt = int → use directly
+						return env_type
+					case Instance_Type:
+						// Instance alias: x = MyClass() used as type → use directly
+						return env_type
 					}
 				}
 			}
