@@ -1399,6 +1399,21 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		if !p.has_default { required += 1 }
 	}
 
+	// Detect unbound method call: X.method(instance, args) where X is a class
+	// In this case, the first param (self) is explicitly provided
+	is_unbound := false
+	if attr, ok := e.func.(^parser.Attribute_Expr); ok {
+		receiver_type := infer_expr(attr.value, ctx)
+		rt := get_type(ctx.reg, receiver_type)
+		if _, is_class := rt.info.(Class_Type); is_class {
+			// Calling a method on the class itself (unbound) — self is first arg
+			if len(func_info.params) > 0 && func_info.params[0].name == "self" {
+				is_unbound = true
+				required = max(required - 1, 0)
+			}
+		}
+	}
+
 	// Check arg count (positional + named keyword, excluding **kwargs and *args unpacking)
 	n_args := len(e.args)
 	n_named_kw := 0
@@ -1419,6 +1434,8 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 	}
 	n_total := n_args + n_named_kw
 	n_params := len(func_info.params)
+	// Adjust for unbound method — self param is explicitly provided
+	if is_unbound && n_params > 0 { n_params -= 1 }
 
 	// Check if ANY param is variadic (*args or **kwargs) — not just the last
 	has_variadic_param := false
