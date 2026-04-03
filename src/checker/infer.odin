@@ -657,6 +657,8 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 		if left == TYPE_STR && right == TYPE_STR { return TYPE_STR }
 		if left == TYPE_BYTES && right == TYPE_BYTES { return TYPE_BYTES }
 		if is_list_type(reg, left) && is_list_type(reg, right) { return left }
+		// Tuple concatenation: tuple + tuple → tuple
+		if is_tuple_type(reg, left) && is_tuple_type(reg, right) { return left }
 
 	case .Sub, .Mult:
 		if left_intlike && right_intlike { return TYPE_INT }
@@ -671,6 +673,9 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 			// list * int or int * list
 			if is_list_type(reg, left) && right_intlike { return left }
 			if left_intlike && is_list_type(reg, right) { return right }
+			// tuple * int or int * tuple
+			if is_tuple_type(reg, left) && right_intlike { return left }
+			if left_intlike && is_tuple_type(reg, right) { return right }
 		}
 
 	case .Div:

@@ -920,6 +920,12 @@ is_set_type :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
 	return ok
 }
 
+is_tuple_type :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
+	typ := get_type(reg, t)
+	_, ok := typ.info.(Tuple_Type)
+	return ok
+}
+
 is_dict_type :: proc(reg: ^Type_Registry, t: Type_ID) -> bool {
 	typ := get_type(reg, t)
 	_, ok := typ.info.(Dict_Type)
