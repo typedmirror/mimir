@@ -2130,6 +2130,18 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 				}
 			}
 		}
+		// If any base is Any/Unknown, add **kwargs to accept additional args
+		has_any_base := false
+		for base_type_id in bases {
+			if base_type_id == TYPE_ANY || base_type_id == TYPE_UNKNOWN ||
+			   _is_any_type(base_type_id, ctx.reg) {
+				has_any_base = true
+				break
+			}
+		}
+		if has_any_base {
+			append(&init_params, Param_Type{name = "kwargs", type_id = TYPE_ANY, has_default = true, is_variadic = true})
+		}
 		attrs["__init__"] = make_callable_type(ctx.reg, init_params[:], TYPE_NONE)
 		no_params := make([]Param_Type, 0, ctx.reg.allocator)
 		attrs["__repr__"] = make_callable_type(ctx.reg, no_params, TYPE_STR)
