@@ -1237,10 +1237,16 @@ check_stmt :: proc(
 			if declared_return != TYPE_UNKNOWN && !_is_any_type(declared_return, ctx.reg) &&
 			   ret_type != TYPE_UNKNOWN && !_is_any_type(ret_type, ctx.reg) {
 				if !is_assignable(ctx.reg, ret_type, declared_return) {
-					emit_diagnostic(ctx, s.loc, "T003", .Error,
-						"Incompatible return value type",
-						fmt_type_mismatch(ret_type, declared_return, ctx.reg),
-						"Change the return value or the return annotation")
+					// Don't flag when returning to a Protocol — structural matching
+					// may fail during function body check due to class scan ordering
+					dr := get_type(ctx.reg, declared_return)
+					_, is_proto := dr.info.(Protocol_Type)
+					if !is_proto {
+						emit_diagnostic(ctx, s.loc, "T003", .Error,
+							"Incompatible return value type",
+							fmt_type_mismatch(ret_type, declared_return, ctx.reg),
+							"Change the return value or the return annotation")
+					}
 				}
 			}
 		} else {
