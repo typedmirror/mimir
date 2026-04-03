@@ -703,7 +703,7 @@ _parse_pattern :: proc(ctx: ^Parser_Context) -> Pattern {
 		orp := new(Match_Or, ctx.allocator)
 		orp.loc = _pattern_loc(pat)
 		orp.patterns = patterns[:]
-		return orp
+		pat = orp  // Continue to check for 'as' binding below
 	}
 
 	// As-pattern: pattern as name
@@ -770,7 +770,8 @@ _parse_single_pattern :: proc(ctx: ^Parser_Context) -> Pattern {
 		p.value = false
 		return p
 	case .INT, .FLOAT, .STRING, .MINUS:
-		val := parse_expr(ctx)
+		// Parse expression but stop before | (PIPE) — PIPE is the or-pattern separator
+		val := parse_expr(ctx, PREC_BIT_OR + 1)
 		p := new(Match_Value, ctx.allocator)
 		p.loc = tok.loc
 		p.value = val
