@@ -1409,10 +1409,16 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 				"Add missing arguments")
 		} else if n_total > n_params && !has_variadic_param {
 			if n_params == 0 {
-				emit_diagnostic(ctx, e.loc, "T004", .Error,
-					"Too many arguments",
-					fmt_arg_count_error(n_params, n_total, ctx.reg),
-					"Remove extra arguments")
+				// Skip for chained/higher-order calls: f(g)(args)
+				// The inner call returns a callable with unresolved params
+				is_chained := false
+				if _, is_call := e.func.(^parser.Call_Expr); is_call { is_chained = true }
+				if !is_chained {
+					emit_diagnostic(ctx, e.loc, "T004", .Error,
+						"Too many arguments",
+						fmt_arg_count_error(n_params, n_total, ctx.reg),
+						"Remove extra arguments")
+				}
 			} else {
 				last := func_info.params[n_params - 1]
 				if last.type_id != TYPE_ANY {
