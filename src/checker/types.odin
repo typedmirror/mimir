@@ -686,7 +686,36 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	case Instance_Type:
 		#partial switch tgt in tgt_type.info {
 		case Instance_Type:
-			return is_class_subtype(reg, src.class_type, tgt.class_type)
+			if is_class_subtype(reg, src.class_type, tgt.class_type) { return true }
+			// Generic specialization creates different Type_IDs for same class.
+			// Check if both are specializations of the same base class (same name + symbol_id)
+			// with bidirectional attr compatibility (invariant — prevents G[int] → G[str]).
+			src_cls_t := get_type(reg, src.class_type)
+			tgt_cls_t := get_type(reg, tgt.class_type)
+			if src_ci, src_ok := src_cls_t.info.(Class_Type); src_ok {
+				if tgt_ci, tgt_ok := tgt_cls_t.info.(Class_Type); tgt_ok {
+					if src_ci.name == tgt_ci.name && src_ci.symbol_id == tgt_ci.symbol_id &&
+					   src_ci.name != "" && src_ci.symbol_id != 0 {
+						// Verify attrs are structurally equivalent (invariant)
+						if len(src_ci.attrs) == len(tgt_ci.attrs) {
+							attrs_match := true
+							for attr_name, src_attr_type in src_ci.attrs {
+								if tgt_attr_type, found := tgt_ci.attrs[attr_name]; found {
+									if src_attr_type != tgt_attr_type {
+										attrs_match = false
+										break
+									}
+								} else {
+									attrs_match = false
+									break
+								}
+							}
+							if attrs_match { return true }
+						}
+					}
+				}
+			}
+			return false
 		case Callable_Type:
 			// Instance with __call__ is assignable to Callable
 			cls := get_type(reg, src.class_type)

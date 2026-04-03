@@ -1901,8 +1901,9 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		return build_protocol_class(cd, ctx, scope_id)
 	}
 
-	// Check for @dataclass decorator
+	// Check for @dataclass decorator and kw_only flag
 	is_dataclass := false
+	dc_kw_only := false  // @dataclass(kw_only=True) — all fields are keyword-only
 	for dec in cd.decorator_list {
 		#partial switch d in dec {
 		case ^parser.Name_Expr:
@@ -1910,9 +1911,28 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		case ^parser.Call_Expr:
 			#partial switch f in d.func {
 			case ^parser.Name_Expr:
-				if f.id == "dataclass" { is_dataclass = true }
+				if f.id == "dataclass" {
+					is_dataclass = true
+					// Check for kw_only=True in decorator args
+					for kw in d.keywords {
+						if kw.arg == "kw_only" {
+							if c, cok := kw.value.(^parser.Constant_Expr); cok {
+								if bv, bvok := c.value.(bool); bvok && bv { dc_kw_only = true }
+							}
+						}
+					}
+				}
 			case ^parser.Attribute_Expr:
-				if f.attr == "dataclass" { is_dataclass = true }
+				if f.attr == "dataclass" {
+					is_dataclass = true
+					for kw in d.keywords {
+						if kw.arg == "kw_only" {
+							if c, cok := kw.value.(^parser.Constant_Expr); cok {
+								if bv, bvok := c.value.(bool); bvok && bv { dc_kw_only = true }
+							}
+						}
+					}
+				}
 			}
 		case ^parser.Attribute_Expr:
 			if d.attr == "dataclass" { is_dataclass = true }
@@ -2129,12 +2149,82 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		}
 
 		// Then add child's own fields
+		kw_only_active := dc_kw_only  // Start with decorator-level kw_only
 		for stmt in cd.body {
 			#partial switch s in stmt {
 			case ^parser.Ann_Assign:
 				if name_expr, ok := s.target.(^parser.Name_Expr); ok {
-					field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					// Check for KW_ONLY sentinel: _: KW_ONLY
+					ann_name := get_annotation_name(s.annotation)
+					if ann_name == "KW_ONLY" {
+						kw_only_active = true
+						continue  // Skip sentinel — not a real field
+					}
+
+					// Resolve annotation — handle InitVar[X] → extract inner type
+					field_type: Type_ID
+					is_init_var := false
+					if sub, sub_ok := s.annotation.(^parser.Subscript_Expr); sub_ok {
+						sub_name := get_annotation_name(sub.value)
+						if sub_name == "InitVar" {
+							// InitVar[X] — resolve the inner type X
+							field_type = resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+							is_init_var = true
+						}
+					}
+					if !is_init_var {
+						if ann_name == "InitVar" {
+							// Bare InitVar without subscript — treat as Any
+							field_type = TYPE_ANY
+							is_init_var = true
+						} else {
+							field_type = resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+						}
+					}
+
+					// Check default: literal value, or field() call with default/default_factory
 					has_default := s.value != nil
+					if !has_default && kw_only_active {
+						// kw_only fields without default are still keyword-only
+						// but NOT optional — leave has_default false
+					}
+					if s.value != nil {
+						// Check for field(..., default=...) or field(..., default_factory=...)
+						if call, cok := s.value.(^parser.Call_Expr); cok {
+							fn_name := ""
+							#partial switch f in call.func {
+							case ^parser.Name_Expr: fn_name = f.id
+							case ^parser.Attribute_Expr: fn_name = f.attr
+							}
+							if fn_name == "field" {
+								// Check for kw_only=True in field() args
+								for kw in call.keywords {
+									if kw.arg == "kw_only" {
+										if c, ck := kw.value.(^parser.Constant_Expr); ck {
+											if bv, bvk := c.value.(bool); bvk && bv { kw_only_active = true }
+										}
+									}
+								}
+								// Check for default or default_factory
+								has_field_default := false
+								for kw in call.keywords {
+									if kw.arg == "default" || kw.arg == "default_factory" {
+										has_field_default = true
+										break
+									}
+								}
+								has_default = has_field_default
+							}
+						}
+					}
+
+					// kw_only fields need has_default=true for T004 positional count
+					if kw_only_active && !has_default {
+						// Keyword-only without default: required kwarg, but not positional
+						// Mark as has_default so T004 positional count is correct
+						has_default = true
+					}
+
 					append(&init_params, Param_Type{name = name_expr.id, type_id = field_type, has_default = has_default})
 				}
 			}
@@ -2508,6 +2598,10 @@ _resolve_rhs_from_param :: proc(value: parser.Expr, fd: ^parser.Func_Def, ctx: ^
 
 // Scan __init__ body for self.attr = value patterns
 scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[string]Type_ID) {
+	// Pre-scan: collect all self.x target names with TYPE_UNKNOWN
+	// This ensures forward references like self.y = self.x work when x is assigned later
+	_prescan_init_targets(fd.body, attrs)
+
 	for stmt in fd.body {
 		#partial switch s in stmt {
 		case ^parser.Assign:
@@ -2574,6 +2668,51 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 }
 
 // Helper: recurse scan_init_attrs into nested statement blocks
+// Pre-scan __init__ body to collect all self.X target names (not types).
+// This ensures forward references like self.y = self.x resolve even if x is assigned later.
+_prescan_init_targets :: proc(stmts: []parser.Stmt, attrs: ^map[string]Type_ID) {
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			for target in s.targets {
+				if attr, ok := target.(^parser.Attribute_Expr); ok {
+					if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
+						if self_name.id == "self" {
+							if attr.attr not_in attrs^ {
+								attrs[attr.attr] = TYPE_UNKNOWN
+							}
+						}
+					}
+				}
+			}
+		case ^parser.Ann_Assign:
+			if attr, ok := s.target.(^parser.Attribute_Expr); ok {
+				if self_name, ok2 := attr.value.(^parser.Name_Expr); ok2 {
+					if self_name.id == "self" {
+						if attr.attr not_in attrs^ {
+							attrs[attr.attr] = TYPE_UNKNOWN
+						}
+					}
+				}
+			}
+		case ^parser.If_Stmt:
+			_prescan_init_targets(s.body, attrs)
+			_prescan_init_targets(s.orelse, attrs)
+		case ^parser.For_Stmt:
+			_prescan_init_targets(s.body, attrs)
+		case ^parser.While_Stmt:
+			_prescan_init_targets(s.body, attrs)
+		case ^parser.Try_Stmt:
+			_prescan_init_targets(s.body, attrs)
+			for handler in s.handlers {
+				_prescan_init_targets(handler.body, attrs)
+			}
+		case ^parser.With_Stmt:
+			_prescan_init_targets(s.body, attrs)
+		}
+	}
+}
+
 scan_init_attrs_stmts :: proc(fd: ^parser.Func_Def, stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: ^map[string]Type_ID) {
 	for stmt in stmts {
 		#partial switch s in stmt {

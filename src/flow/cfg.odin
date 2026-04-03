@@ -798,14 +798,46 @@ block_ends_with_return :: proc(blk: ^Block) -> bool {
 			}
 		}
 	case ^parser.Expr_Stmt:
-		// sys.exit() or exit() as expression statement
+		// sys.exit(), exit(), or other known never-return calls as expression statement
 		if call, ok := s.value.(^parser.Call_Expr); ok {
 			#partial switch fn in call.func {
 			case ^parser.Name_Expr:
-				if fn.id == "exit" || fn.id == "quit" { return true }
+				switch fn.id {
+				case "exit", "quit", "_exit", "abort", "assert_never", "no_return":
+					return true
+				}
 			case ^parser.Attribute_Expr:
-				if fn.attr == "exit" { return true }
+				switch fn.attr {
+				case "exit", "_exit", "abort", "assert_never", "skip", "fail", "xfail":
+					return true
+				}
 			}
+		}
+	case ^parser.Match_Stmt:
+		// Exhaustive match: if every case arm ends with return, the match covers all paths
+		if len(s.cases) > 0 {
+			all_return := true
+			for mc in s.cases {
+				case_returns := false
+				if len(mc.body) > 0 {
+					last_stmt := mc.body[len(mc.body) - 1]
+					#partial switch ls in last_stmt {
+					case ^parser.Return_Stmt: case_returns = true
+					case ^parser.Raise_Stmt: case_returns = true
+					case ^parser.Expr_Stmt:
+						if call, cok := ls.value.(^parser.Call_Expr); cok {
+							#partial switch fn in call.func {
+							case ^parser.Name_Expr:
+								if fn.id == "exit" || fn.id == "assert_never" { case_returns = true }
+							case ^parser.Attribute_Expr:
+								if fn.attr == "exit" { case_returns = true }
+							}
+						}
+					}
+				}
+				if !case_returns { all_return = false; break }
+			}
+			if all_return { return true }
 		}
 	}
 	return false

@@ -1865,7 +1865,13 @@ cmd_check_single :: proc(
 	for d in flow_result.diagnostics {
 		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
 	}
+	// Deduplicate checker diagnostics — convergence loop can emit duplicates
+	check_seen := make(map[u64]bool, len(check_result.diagnostics), arena.allocator)
 	for d in check_result.diagnostics {
+		key := u64(d.location.line) * 100003 + u64(d.location.column) * 31
+		for i := 0; i < len(d.code); i += 1 { key = key * 131 + u64(d.code[i]) }
+		if key in check_seen { continue }
+		check_seen[key] = true
 		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
 	}
 
