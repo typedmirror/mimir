@@ -2155,8 +2155,10 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 			}
 		}
 
-		// Then add child's own fields
+		// Then add child's own fields — collect regular and kw-only separately
+		// Python dataclass ordering: regular fields first, then kw-only fields
 		kw_only_active := dc_kw_only  // Start with decorator-level kw_only
+		kw_only_params := make([dynamic]Param_Type, 0, 4, ctx.reg.allocator)
 		for stmt in cd.body {
 			#partial switch s in stmt {
 			case ^parser.Ann_Assign:
@@ -2168,20 +2170,41 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 						continue  // Skip sentinel — not a real field
 					}
 
+					// Detect per-field kw_only from field(kw_only=True)
+					field_is_kw_only := kw_only_active
+					if s.value != nil {
+						if call, cok := s.value.(^parser.Call_Expr); cok {
+							fn_name := ""
+							#partial switch f in call.func {
+							case ^parser.Name_Expr: fn_name = f.id
+							case ^parser.Attribute_Expr: fn_name = f.attr
+							}
+							if fn_name == "field" {
+								for kw in call.keywords {
+									if kw.arg == "kw_only" {
+										if c, ck := kw.value.(^parser.Constant_Expr); ck {
+											if bv, bvk := c.value.(bool); bvk && bv {
+												field_is_kw_only = true
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+
 					// Resolve annotation — handle InitVar[X] → extract inner type
 					field_type: Type_ID
 					is_init_var := false
 					if sub, sub_ok := s.annotation.(^parser.Subscript_Expr); sub_ok {
 						sub_name := get_annotation_name(sub.value)
 						if sub_name == "InitVar" {
-							// InitVar[X] — resolve the inner type X
 							field_type = resolve_annotation(sub.slice, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 							is_init_var = true
 						}
 					}
 					if !is_init_var {
 						if ann_name == "InitVar" {
-							// Bare InitVar without subscript — treat as Any
 							field_type = TYPE_ANY
 							is_init_var = true
 						} else {
@@ -2191,12 +2214,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 
 					// Check default: literal value, or field() call with default/default_factory
 					has_default := s.value != nil
-					if !has_default && kw_only_active {
-						// kw_only fields without default are still keyword-only
-						// but NOT optional — leave has_default false
-					}
 					if s.value != nil {
-						// Check for field(..., default=...) or field(..., default_factory=...)
 						if call, cok := s.value.(^parser.Call_Expr); cok {
 							fn_name := ""
 							#partial switch f in call.func {
@@ -2204,15 +2222,6 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 							case ^parser.Attribute_Expr: fn_name = f.attr
 							}
 							if fn_name == "field" {
-								// Check for kw_only=True in field() args
-								for kw in call.keywords {
-									if kw.arg == "kw_only" {
-										if c, ck := kw.value.(^parser.Constant_Expr); ck {
-											if bv, bvk := c.value.(bool); bvk && bv { kw_only_active = true }
-										}
-									}
-								}
-								// Check for default or default_factory
 								has_field_default := false
 								for kw in call.keywords {
 									if kw.arg == "default" || kw.arg == "default_factory" {
@@ -2225,16 +2234,21 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 						}
 					}
 
-					// kw_only fields need has_default=true for T004 positional count
-					if kw_only_active && !has_default {
-						// Keyword-only without default: required kwarg, but not positional
-						// Mark as has_default so T004 positional count is correct
-						has_default = true
+					// kw-only fields are appended after regular fields
+					if field_is_kw_only {
+						if !has_default {
+							has_default = true  // kw-only without default: still not positional
+						}
+						append(&kw_only_params, Param_Type{name = name_expr.id, type_id = field_type, has_default = has_default})
+					} else {
+						append(&init_params, Param_Type{name = name_expr.id, type_id = field_type, has_default = has_default})
 					}
-
-					append(&init_params, Param_Type{name = name_expr.id, type_id = field_type, has_default = has_default})
 				}
 			}
+		}
+		// Append kw-only params after regular params
+		for p in kw_only_params {
+			append(&init_params, p)
 		}
 		// If any base is Any/Unknown, add **kwargs to accept additional args
 		has_any_base := false
