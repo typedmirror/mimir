@@ -1068,7 +1068,7 @@ check_stmt :: proc(
 		}
 
 		// Check reassignment against declared annotation type
-		if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY {
+		if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY && !_is_any_type(rhs_type, ctx.reg) {
 			for target in s.targets {
 				if name, ok := target.(^parser.Name_Expr); ok {
 					// Skip self-assignment (x = x)
@@ -1084,6 +1084,25 @@ check_stmt :: proc(
 										fmt_type_mismatch(rhs_type, declared, ctx.reg),
 										"Change the value or the annotation")
 								}
+							}
+						}
+					}
+				}
+				// Attribute assignment: obj.attr = val — check against attr's declared type
+				if attr_expr, attr_ok := target.(^parser.Attribute_Expr); attr_ok {
+					receiver := infer_expr(attr_expr.value, ctx)
+					attr_type := lookup_attribute(receiver, attr_expr.attr, ctx.reg)
+					if attr_type != TYPE_UNKNOWN && attr_type != TYPE_ANY && !_is_any_type(attr_type, ctx.reg) {
+						// Don't check when attr is a Callable (method assignment is different)
+						at := get_type(ctx.reg, attr_type)
+						is_callable_attr := false
+						if _, ca := at.info.(Callable_Type); ca { is_callable_attr = true }
+						if !is_callable_attr {
+							if !is_assignable(ctx.reg, rhs_type, attr_type) {
+								emit_diagnostic(ctx, s.loc, "T001", .Error,
+									"Incompatible types in assignment",
+									fmt_type_mismatch(rhs_type, attr_type, ctx.reg),
+									"Check the attribute type")
 							}
 						}
 					}
