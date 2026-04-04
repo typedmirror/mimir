@@ -598,6 +598,121 @@ resolve_string_type_name :: proc(name: string, reg: ^Type_Registry) -> Type_ID {
 	return TYPE_UNKNOWN
 }
 
+// Resolve a PEP 484 type comment string to a Type_ID.
+// Handles: primitives, Optional[X], List[X], Dict[K,V], Tuple[X,...], Set[X],
+// Union[X,Y], X|Y, class names. Returns TYPE_UNKNOWN for unrecognized patterns.
+resolve_type_comment :: proc(
+	comment: string,
+	reg: ^Type_Registry,
+	bind_result: ^binder.Bind_Result,
+	builtins: ^Builtin_Names,
+	env: ^Type_Env = nil,
+) -> Type_ID {
+	s := strings.trim_space(comment)
+	if len(s) == 0 { return TYPE_UNKNOWN }
+
+	// Handle X | Y union syntax
+	if strings.contains(s, " | ") {
+		parts := strings.split(s, " | ", allocator = reg.allocator)
+		if len(parts) >= 2 {
+			members := make([dynamic]Type_ID, 0, len(parts), reg.allocator)
+			for part in parts {
+				p := strings.trim_space(part)
+				pt := resolve_type_comment(p, reg, bind_result, builtins, env)
+				if pt != TYPE_UNKNOWN { append(&members, pt) }
+			}
+			if len(members) >= 2 { return make_union_type(reg, members[:]) }
+			if len(members) == 1 { return members[0] }
+		}
+	}
+
+	// Handle Generic[X] patterns: Optional[X], List[X], Dict[K,V], etc.
+	bracket := strings.index_byte(s, '[')
+	if bracket > 0 && s[len(s) - 1] == ']' {
+		base := s[:bracket]
+		inner := s[bracket + 1 : len(s) - 1]
+		switch base {
+		case "Optional":
+			inner_type := resolve_type_comment(inner, reg, bind_result, builtins, env)
+			if inner_type != TYPE_UNKNOWN {
+				members := [2]Type_ID{inner_type, TYPE_NONE}
+				return make_union_type(reg, members[:])
+			}
+		case "List", "list":
+			elem := resolve_type_comment(inner, reg, bind_result, builtins, env)
+			return make_list_type(reg, elem)
+		case "Set", "set", "FrozenSet", "frozenset":
+			elem := resolve_type_comment(inner, reg, bind_result, builtins, env)
+			return make_set_type(reg, elem)
+		case "Dict", "dict":
+			// Split on first comma (outside brackets)
+			k, v := _split_type_comment_pair(inner)
+			kt := resolve_type_comment(k, reg, bind_result, builtins, env)
+			vt := resolve_type_comment(v, reg, bind_result, builtins, env)
+			return make_dict_type(reg, kt, vt)
+		case "Tuple", "tuple":
+			// Tuple[X, Y] or Tuple[X, ...]
+			parts := _split_type_comment_args(inner, reg.allocator)
+			elems := make([]Type_ID, len(parts), reg.allocator)
+			for p, i in parts {
+				elems[i] = resolve_type_comment(strings.trim_space(p), reg, bind_result, builtins, env)
+			}
+			return make_tuple_type(reg, elems, false)
+		case "Union":
+			parts := _split_type_comment_args(inner, reg.allocator)
+			members := make([]Type_ID, len(parts), reg.allocator)
+			for p, i in parts {
+				members[i] = resolve_type_comment(strings.trim_space(p), reg, bind_result, builtins, env)
+			}
+			return make_union_type(reg, members)
+		case "Callable":
+			// Callable[[X, Y], R] — simplified: just return TYPE_ANY for now
+			return TYPE_ANY
+		case "Type", "type":
+			inner_type := resolve_type_comment(inner, reg, bind_result, builtins, env)
+			return inner_type // Approximate: type[X] → X
+		}
+		// User-defined generic: MyClass[X]
+		base_type := resolve_string_type_name(base, reg)
+		if base_type != TYPE_UNKNOWN { return base_type }
+	}
+
+	// Simple name resolution
+	return resolve_string_type_name(s, reg)
+}
+
+// Split "K, V" respecting bracket nesting
+@(private = "file")
+_split_type_comment_pair :: proc(s: string) -> (string, string) {
+	depth := 0
+	for i in 0..<len(s) {
+		if s[i] == '[' { depth += 1 }
+		if s[i] == ']' { depth -= 1 }
+		if s[i] == ',' && depth == 0 {
+			return strings.trim_space(s[:i]), strings.trim_space(s[i+1:])
+		}
+	}
+	return s, ""
+}
+
+// Split "A, B, C" respecting bracket nesting
+@(private = "file")
+_split_type_comment_args :: proc(s: string, allocator: mem.Allocator) -> []string {
+	parts := make([dynamic]string, 0, 4, allocator)
+	depth := 0
+	start := 0
+	for i in 0..<len(s) {
+		if s[i] == '[' { depth += 1 }
+		if s[i] == ']' { depth -= 1 }
+		if s[i] == ',' && depth == 0 {
+			append(&parts, s[start:i])
+			start = i + 1
+		}
+	}
+	append(&parts, s[start:])
+	return parts[:]
+}
+
 // Helper: resolve two generic args from a Tuple_Expr (for dict[K, V])
 resolve_two_args :: proc(
 	expr: parser.Expr,

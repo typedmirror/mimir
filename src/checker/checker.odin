@@ -1001,9 +1001,15 @@ check_stmt :: proc(
 ) {
 	switch s in stmt {
 	case ^parser.Assign:
+		// PEP 484 type comment: `x = val  # type: T` acts as annotation
+		tc_type := TYPE_UNKNOWN
+		if len(s.type_comment) > 0 {
+			tc_type = resolve_type_comment(s.type_comment, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		}
+
 		// Look up target's known type for contextual typing
-		target_expected := TYPE_UNKNOWN
-		if len(s.targets) == 1 {
+		target_expected := tc_type if tc_type != TYPE_UNKNOWN else TYPE_UNKNOWN
+		if target_expected == TYPE_UNKNOWN && len(s.targets) == 1 {
 			if name, ok := s.targets[0].(^parser.Name_Expr); ok {
 				if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
 					if t, found := ctx.env.types[sym_id]; found {
@@ -1021,6 +1027,30 @@ check_stmt :: proc(
 			if alias_type != TYPE_UNKNOWN {
 				rhs_type = alias_type
 			}
+		}
+
+		// Type comment creates a declared type — check RHS assignability
+		// Skip when RHS is None (non-strict-optional: None assignable to any type)
+		if tc_type != TYPE_UNKNOWN && tc_type != TYPE_ANY && !_is_any_type(tc_type, ctx.reg) {
+			if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY && !_is_any_type(rhs_type, ctx.reg) &&
+			   rhs_type != TYPE_NONE {
+				if !is_assignable(ctx.reg, rhs_type, tc_type) {
+					emit_diagnostic(ctx, s.loc, "T001", .Error,
+						"Incompatible types in assignment",
+						fmt_type_mismatch(rhs_type, tc_type, ctx.reg),
+						"Change the value or the type comment")
+				}
+			}
+			// Register as declared type for future reassignment checking
+			for target in s.targets {
+				if name, ok := target.(^parser.Name_Expr); ok {
+					if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+						ctx.declared_types[sym_id] = tc_type
+					}
+				}
+			}
+			// Set env type to the declared type (not the RHS type)
+			rhs_type = tc_type
 		}
 
 		// Check Final reassignment

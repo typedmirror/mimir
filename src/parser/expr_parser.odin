@@ -8,10 +8,11 @@ import "core:strconv"
 // ==================== Parser Context ====================
 
 Parser_Context :: struct {
-	tokens:    []Token,
-	pos:       int,
-	allocator: mem.Allocator,
-	file:      string,
+	tokens:        []Token,
+	pos:           int,
+	allocator:     mem.Allocator,
+	file:          string,
+	type_comments: ^map[i32]string, // PEP 484: line → type comment string (from # type: X)
 }
 
 // ==================== Token Helpers ====================

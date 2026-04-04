@@ -525,6 +525,12 @@ _parse_for :: proc(ctx: ^Parser_Context, is_async: bool) -> Stmt {
 	n.iter = iter
 	n.body = body
 	n.orelse = orelse
+	// Attach PEP 484 type comment if present
+	if ctx.type_comments != nil {
+		if tc, ok := ctx.type_comments[tok.loc.line]; ok {
+			n.type_comment = tc
+		}
+	}
 	return n
 }
 
@@ -1273,6 +1279,12 @@ _parse_expr_or_assign :: proc(ctx: ^Parser_Context) -> Stmt {
 		n.loc = loc
 		n.targets = tgts[:]
 		n.value = value
+		// Attach PEP 484 type comment if present on this line
+		if ctx.type_comments != nil {
+			if tc, ok := ctx.type_comments[loc.line]; ok {
+				n.type_comment = tc
+			}
+		}
 		return n
 	}
 
