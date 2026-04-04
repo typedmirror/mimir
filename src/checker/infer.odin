@@ -207,7 +207,7 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			case Class_Type:
 				// Class object attribute resolution is incomplete (no classmethods, class vars).
 				// Only flag on classes with enough attrs to be confident.
-				should_flag = len(ri.attrs) > 2
+				should_flag = len(ri.attrs) > 1
 			case Module_Type:
 				should_flag = len(ri.exports) > 0
 			case Protocol_Type:
