@@ -675,9 +675,29 @@ resolve_type_comment :: proc(
 			inner_type := resolve_type_comment(inner, reg, bind_result, builtins, env)
 			return inner_type // Approximate: type[X] → X
 		}
-		// User-defined generic: MyClass[X]
+		// User-defined generic: MyClass[X] — resolve and specialize
 		base_type := resolve_string_type_name(base, reg)
-		if base_type != TYPE_UNKNOWN { return base_type }
+		if base_type != TYPE_UNKNOWN {
+			// Try to specialize if it's an Instance_Type wrapping a generic class
+			bt := get_type(reg, base_type)
+			#partial switch inst in bt.info {
+			case Instance_Type:
+				cls_t := get_type(reg, inst.class_type)
+				#partial switch cls_info in cls_t.info {
+				case Class_Type:
+					if len(cls_info.type_params) > 0 {
+						type_args := _split_type_comment_args(inner, reg.allocator)
+						resolved_args := make([]Type_ID, len(type_args), reg.allocator)
+						for ta, i in type_args {
+							resolved_args[i] = resolve_type_comment(
+								strings.trim_space(ta), reg, bind_result, builtins, env)
+						}
+						return specialize_class(reg, inst.class_type, resolved_args)
+					}
+				}
+			}
+			return base_type
+		}
 	}
 
 	// Simple name resolution
