@@ -1192,9 +1192,24 @@ check_stmt :: proc(
 										}
 									}
 								case TypedDict_Type:
-									// §3.5: existing TypedDict + new key → accumulate
+									// TypedDict subscript assignment: validate value type for existing keys
 									if key, key_ok := sub.slice.(^parser.Constant_Expr); key_ok {
 										if key_name, str_ok := key.value.(string); str_ok {
+											if field_type, exists := df_info.fields[key_name]; exists {
+												// Validate value type matches field type
+												if rhs_type != TYPE_UNKNOWN && rhs_type != TYPE_ANY &&
+												   field_type != TYPE_UNKNOWN && field_type != TYPE_ANY &&
+												   !_is_any_type(rhs_type, ctx.reg) && !_is_any_type(field_type, ctx.reg) {
+													if !is_assignable(ctx.reg, rhs_type, field_type) {
+														emit_diagnostic(ctx, s.loc, "T001", .Error,
+															"Incompatible TypedDict value type",
+															fmt_type_mismatch(rhs_type, field_type, ctx.reg),
+															"Use the correct type for this field")
+													}
+												}
+											}
+											// Note: new keys are allowed in assignment (accumulation)
+											// Invalid key errors are only for read access (Subscript_Expr in infer.odin)
 											new_fields := make(map[string]Type_ID, len(df_info.fields) + 1, ctx.reg.allocator)
 											for fn, ft in df_info.fields { new_fields[fn] = ft }
 											new_fields[key_name] = rhs_type

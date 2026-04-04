@@ -1241,6 +1241,7 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 		// TypedDict constructor — validate keyword args against fields
 		for arg in e.args { infer_expr(arg, ctx) }
 		for kw in e.keywords {
+			if kw.arg == "" { continue } // **kwargs unpacking
 			kw_type := infer_expr(kw.value, ctx)
 			if field_type, ok := info.fields[kw.arg]; ok {
 				if kw_type != TYPE_UNKNOWN && kw_type != TYPE_ANY &&
@@ -1252,6 +1253,14 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 							"Use the correct type")
 					}
 				}
+			} else {
+				// Extra keyword not in TypedDict fields
+				td_display := info.name if len(info.name) > 0 else "TypedDict"
+				emit_diagnostic(ctx, e.loc, "T004", .Error,
+					"Extra TypedDict field",
+					fmt.aprintf("TypedDict '%s' has no field '%s'", td_display, kw.arg,
+						allocator = ctx.reg.allocator),
+					"Remove the extra field or add it to the TypedDict definition")
 			}
 		}
 		// Check for missing required fields (per-field Required/NotRequired)
