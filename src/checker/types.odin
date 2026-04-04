@@ -103,6 +103,7 @@ Class_Type :: struct {
 	type_params:      []Type_ID,
 	is_final:         bool,
 	is_enum:          bool,
+	enum_value_type:  Type_ID,  // For IntEnum→TYPE_INT, StrEnum→TYPE_STR, etc.
 	abstract_methods: map[string]bool,
 }
 
@@ -684,6 +685,17 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			// Return type check: the class creates an instance
 			inst_type := make_instance_type(reg, source)
 			return is_assignable(reg, inst_type, tgt.return_type)
+		}
+	}
+
+	// Enum instance → primitive: IntEnum → int, StrEnum → str, etc.
+	#partial switch src in src_type.info {
+	case Instance_Type:
+		src_cls := get_type(reg, src.class_type)
+		if src_ci, src_ok := src_cls.info.(Class_Type); src_ok {
+			if src_ci.is_enum && src_ci.enum_value_type != INVALID_TYPE {
+				if target == src_ci.enum_value_type { return true }
+			}
 		}
 	}
 

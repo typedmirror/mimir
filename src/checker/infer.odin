@@ -793,6 +793,26 @@ _binop_dunder :: proc(op: parser.Binary_Op) -> string {
 	return ""
 }
 
+// Map binary operators to their in-place dunder method name (for augmented assignment)
+_augassign_dunder :: proc(op: parser.Binary_Op) -> string {
+	switch op {
+	case .Add: return "__iadd__"
+	case .Sub: return "__isub__"
+	case .Mult: return "__imul__"
+	case .Div: return "__itruediv__"
+	case .Floor_Div: return "__ifloordiv__"
+	case .Mod: return "__imod__"
+	case .Pow: return "__ipow__"
+	case .LShift: return "__ilshift__"
+	case .RShift: return "__irshift__"
+	case .Bit_Or: return "__ior__"
+	case .Bit_Xor: return "__ixor__"
+	case .Bit_And: return "__iand__"
+	case .Mat_Mult: return "__imatmul__"
+	}
+	return ""
+}
+
 // Map binary operators to their reverse dunder method name
 _binop_rdunder :: proc(op: parser.Binary_Op) -> string {
 	switch op {
@@ -1400,16 +1420,17 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 	}
 
 	// Detect unbound method call: X.method(instance, args) where X is a class
-	// In this case, the first param (self) is explicitly provided
+	// build_func_type strips self/cls for methods, so the caller provides an extra arg
+	// that isn't reflected in func_info.params.
+	// Only detect for __init__/__new__ (most common unbound patterns);
+	// static/class methods don't have self stripped, so no adjustment needed.
 	is_unbound := false
 	if attr, ok := e.func.(^parser.Attribute_Expr); ok {
 		receiver_type := infer_expr(attr.value, ctx)
 		rt := get_type(ctx.reg, receiver_type)
 		if _, is_class := rt.info.(Class_Type); is_class {
-			// Calling a method on the class itself (unbound) — self is first arg
-			if len(func_info.params) > 0 && func_info.params[0].name == "self" {
+			if attr.attr == "__init__" || attr.attr == "__new__" {
 				is_unbound = true
-				required = max(required - 1, 0)
 			}
 		}
 	}
@@ -1434,8 +1455,10 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 	}
 	n_total := n_args + n_named_kw
 	n_params := len(func_info.params)
-	// Adjust for unbound method — self param is explicitly provided
-	if is_unbound && n_params > 0 { n_params -= 1 }
+	// Adjust for unbound method — self was already stripped by build_func_type,
+	// but caller provides it explicitly. Subtract from n_total to account for the extra arg.
+	unbound_offset := 0
+	if is_unbound { n_total = max(n_total - 1, 0); unbound_offset = 1 }
 
 	// Check if ANY param is variadic (*args or **kwargs) — not just the last
 	has_variadic_param := false
@@ -1489,9 +1512,12 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 	}
 
 	// Check positional arg types against param types
-	for i := 0; i < min(n_args, n_params); i += 1 {
+	// For unbound calls, infer arg[0] (self) but don't type-check it against params
+	if unbound_offset > 0 && n_args > 0 { infer_expr(e.args[0], ctx) }
+	arg_check_count := min(n_args - unbound_offset, n_params)
+	for i := 0; i < arg_check_count; i += 1 {
 		param_type := func_info.params[i].type_id
-		arg_type := infer_expr(e.args[i], ctx, param_type)
+		arg_type := infer_expr(e.args[i + unbound_offset], ctx, param_type)
 		if _is_any_type(param_type, ctx.reg) || param_type == TYPE_UNKNOWN ||
 		   arg_type == TYPE_UNKNOWN || _is_any_type(arg_type, ctx.reg) ||
 		   _union_has_unknown(arg_type, ctx.reg) {
@@ -1608,6 +1634,12 @@ make_params :: proc(reg: ^Type_Registry, types: []Type_ID, defaults: []bool = {}
 }
 
 // Check if a class inherits from a dict-like base (Mapping, MutableMapping, dict).
+@(private = "file")
+_is_dunder :: proc(name: string) -> bool {
+	return len(name) >= 4 && name[0] == '_' && name[1] == '_' &&
+	       name[len(name)-1] == '_' && name[len(name)-2] == '_'
+}
+
 @(private = "file")
 _has_mapping_base :: proc(reg: ^Type_Registry, cls: ^Class_Type) -> bool {
 	for base_id in cls.bases {
@@ -1836,6 +1868,17 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 		}
 	case Class_Type:
 		if attr_type, ok := info.attrs[attr]; ok {
+			// Enum members: Class.MEMBER returns Instance_Type(EnumClass), not the value type
+			if info.is_enum && !_is_dunder(attr) {
+				at := get_type(reg, attr_type)
+				#partial switch _ in at.info {
+				case Callable_Type:
+					// Methods stay as-is
+					return attr_type
+				case:
+					return make_instance_type(reg, receiver)
+				}
+			}
 			return attr_type
 		}
 	case Module_Type:

@@ -1322,6 +1322,21 @@ check_stmt :: proc(
 		rhs_type := infer_expr(s.value, ctx)
 		result_type := infer_binop(s.op, lhs_type, rhs_type, ctx.reg)
 		if result_type == TYPE_UNKNOWN && lhs_type != TYPE_UNKNOWN && rhs_type != TYPE_UNKNOWN {
+			// Check in-place dunder (__iadd__, __isub__, etc.) before flagging T005
+			iaug := _augassign_dunder(s.op)
+			if iaug != "" {
+				aug_method := lookup_attribute(lhs_type, iaug, ctx.reg)
+				if aug_method != TYPE_UNKNOWN {
+					mt := get_type(ctx.reg, aug_method)
+					if ct, ok := mt.info.(Callable_Type); ok {
+						result_type = ct.return_type
+					} else {
+						result_type = lhs_type // dunder exists but not callable — use LHS type
+					}
+				}
+			}
+		}
+		if result_type == TYPE_UNKNOWN && lhs_type != TYPE_UNKNOWN && rhs_type != TYPE_UNKNOWN {
 			// Suppress T005 for augmented assignment on Callable types
 			// (e.g. f += 5 where f: Callable — treated as reassignment)
 			lhs_t := get_type(ctx.reg, lhs_type)
@@ -1893,6 +1908,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		#partial switch b in base {
 		case ^parser.Name_Expr: base_name = b.id
 		case ^parser.Subscript_Expr: base_name = get_annotation_name(b.value)
+		case ^parser.Attribute_Expr: base_name = b.attr
 		}
 		if orig, is_typing := ctx.bind_result.typing_names[base_name]; is_typing {
 			if orig == "TypedDict" { is_typeddict = true }
@@ -2339,6 +2355,20 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		info.type_params = type_params
 		info.is_final = class_is_final
 		info.is_enum = is_enum
+		// Determine enum value type from base names (IntEnum→int, StrEnum→str)
+		if is_enum {
+			for base in cd.bases {
+				bname := ""
+				#partial switch b in base {
+				case ^parser.Name_Expr: bname = b.id
+				case ^parser.Attribute_Expr: bname = b.attr
+				}
+				switch bname {
+				case "IntEnum", "IntFlag": info.enum_value_type = TYPE_INT
+				case "StrEnum": info.enum_value_type = TYPE_STR
+				}
+			}
+		}
 		info.abstract_methods = abstract_meths
 	}
 

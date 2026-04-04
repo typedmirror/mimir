@@ -761,7 +761,26 @@ resolve_refs_expr :: proc(b: ^Binder, expr: parser.Expr) {
 
 	case ^parser.Subscript_Expr:
 		resolve_refs_expr(b, e.value)
-		resolve_refs_expr(b, e.slice)
+		// Annotated[T, metadata...] — only resolve T, skip metadata args (they are arbitrary expressions)
+		is_annotated := false
+		if base_name, bnok := e.value.(^parser.Name_Expr); bnok {
+			if base_name.id == "Annotated" { is_annotated = true }
+			if orig, ok := b.result.typing_names[base_name.id]; ok {
+				if orig == "Annotated" { is_annotated = true }
+			}
+		}
+		if is_annotated {
+			if tup, tok := e.slice.(^parser.Tuple_Expr); tok {
+				if len(tup.elts) > 0 {
+					resolve_refs_expr(b, tup.elts[0])
+				}
+				// Skip metadata args — they may contain arbitrary names
+			} else {
+				resolve_refs_expr(b, e.slice)
+			}
+		} else {
+			resolve_refs_expr(b, e.slice)
+		}
 
 	case ^parser.Starred_Expr:
 		resolve_refs_expr(b, e.value)
