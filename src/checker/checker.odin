@@ -2177,6 +2177,26 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		attrs["_value_"] = TYPE_ANY
 		attrs["_member_map_"] = TYPE_ANY
 		attrs["_value2member_map_"] = TYPE_ANY
+		// Flag/IntFlag: inject bitwise operators that return the enum type
+		is_flag := false
+		for base in cd.bases {
+			bname := ""
+			#partial switch b in base {
+			case ^parser.Name_Expr: bname = b.id
+			case ^parser.Attribute_Expr: bname = b.attr
+			}
+			if bname == "Flag" || bname == "IntFlag" { is_flag = true; break }
+		}
+		if is_flag {
+			flag_inst := make_instance_type(ctx.reg, class_type_id)
+			flag_params := make([]Param_Type, 1, ctx.reg.allocator)
+			flag_params[0] = Param_Type{name = "other", type_id = flag_inst}
+			attrs["__or__"]  = make_callable_type(ctx.reg, flag_params, flag_inst)
+			attrs["__and__"] = make_callable_type(ctx.reg, flag_params, flag_inst)
+			attrs["__xor__"] = make_callable_type(ctx.reg, flag_params, flag_inst)
+			inv_params := make([]Param_Type, 0, ctx.reg.allocator)
+			attrs["__invert__"] = make_callable_type(ctx.reg, inv_params, flag_inst)
+		}
 	}
 
 	// Inherit attributes from base classes (own attrs take precedence)

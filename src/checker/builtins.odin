@@ -355,6 +355,9 @@ resolve_annotation :: proc(
 		case "Unpack":
 			// Unpack[Ts] — unpack a TypeVarTuple in annotation context
 			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
+		case "InitVar":
+			// InitVar[T] — dataclass init-only variable, resolve to inner type T
+			return resolve_annotation(e.slice, reg, bind_result, builtins, env)
 		case "Literal":
 			// Literal["read", "write"] or Literal[1, 2] → union of literal types
 			return resolve_literal_annotation(e.slice, reg)
