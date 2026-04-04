@@ -1093,11 +1093,16 @@ check_stmt :: proc(
 					receiver := infer_expr(attr_expr.value, ctx)
 					attr_type := lookup_attribute(receiver, attr_expr.attr, ctx.reg)
 					if attr_type != TYPE_UNKNOWN && attr_type != TYPE_ANY && !_is_any_type(attr_type, ctx.reg) {
-						// Don't check when attr is a Callable (method assignment is different)
+						// Skip when both attr and RHS are Callable (method override/reassignment)
 						at := get_type(ctx.reg, attr_type)
-						is_callable_attr := false
-						if _, ca := at.info.(Callable_Type); ca { is_callable_attr = true }
-						if !is_callable_attr {
+						skip_check := false
+						if _, ca := at.info.(Callable_Type); ca {
+							rt := get_type(ctx.reg, rhs_type)
+							if _, rc := rt.info.(Callable_Type); rc { skip_check = true }
+							// Also skip when assigning Any/Unknown to method
+							if rhs_type == TYPE_ANY || rhs_type == TYPE_UNKNOWN { skip_check = true }
+						}
+						if !skip_check {
 							if !is_assignable(ctx.reg, rhs_type, attr_type) {
 								emit_diagnostic(ctx, s.loc, "T001", .Error,
 									"Incompatible types in assignment",
