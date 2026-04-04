@@ -1297,6 +1297,8 @@ check_stmt :: proc(
 	case ^parser.Func_Def:
 		func_type := build_func_type(s, ctx)
 		set_name_type(s.name, func_type, ctx)
+		// Check default parameter types against annotations
+		_check_default_param_types(&s.args, s.loc, ctx)
 		// Record @overload signature if decorated (after set_name_type to ensure symbol is in env)
 		if has_overload_decorator(s.decorator_list, ctx.bind_result) {
 			for sym_id in ctx.env.types {
@@ -2756,6 +2758,64 @@ scan_init_attrs :: proc(fd: ^parser.Func_Def, ctx: ^Infer_Context, attrs: ^map[s
 			}
 		case ^parser.With_Stmt:
 			scan_init_attrs_stmts(fd, s.body, ctx, attrs)
+		}
+	}
+}
+
+// Check that default parameter values are assignable to their declared types.
+// e.g., def f(x: B = A()) → error if A is not a subtype of B
+_check_default_param_types :: proc(args: ^parser.Arguments, loc: parser.Src_Loc, ctx: ^Infer_Context) {
+	// defaults apply to the LAST N positional params (posonlyargs + args)
+	n_positional := len(args.posonlyargs) + len(args.args)
+	n_defaults := len(args.defaults)
+	if n_defaults > 0 {
+		for di in 0..<n_defaults {
+			param_idx := n_positional - n_defaults + di
+			if param_idx < 0 { continue }
+			default_expr := args.defaults[di]
+			if default_expr == nil { continue }
+			// Find the corresponding param annotation
+			ann: parser.Expr = nil
+			if param_idx < len(args.posonlyargs) {
+				ann = args.posonlyargs[param_idx].annotation
+			} else {
+				ai := param_idx - len(args.posonlyargs)
+				if ai >= 0 && ai < len(args.args) {
+					ann = args.args[ai].annotation
+				}
+			}
+			if ann == nil { continue }
+			param_type := resolve_annotation(ann, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+			if param_type == TYPE_UNKNOWN || param_type == TYPE_ANY || _is_any_type(param_type, ctx.reg) { continue }
+			default_type := infer_expr(default_expr, ctx, param_type)
+			if default_type == TYPE_UNKNOWN || default_type == TYPE_ANY || _is_any_type(default_type, ctx.reg) { continue }
+			// None defaults are allowed for any type (non-strict-optional mode, mypy default)
+			if default_type == TYPE_NONE { continue }
+			if !is_assignable(ctx.reg, default_type, param_type) {
+				emit_diagnostic(ctx, loc, "T002", .Error,
+					"Incompatible default argument type",
+					fmt_type_mismatch(default_type, param_type, ctx.reg),
+					"Use a compatible default value")
+			}
+		}
+	}
+	// kw_defaults apply to kwonlyargs (1:1 mapping, nil = no default)
+	for ki in 0..<min(len(args.kw_defaults), len(args.kwonlyargs)) {
+		default_expr := args.kw_defaults[ki]
+		if default_expr == nil { continue }
+		ann := args.kwonlyargs[ki].annotation
+		if ann == nil { continue }
+		param_type := resolve_annotation(ann, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		if param_type == TYPE_UNKNOWN || param_type == TYPE_ANY || _is_any_type(param_type, ctx.reg) { continue }
+		default_type := infer_expr(default_expr, ctx, param_type)
+		if default_type == TYPE_UNKNOWN || default_type == TYPE_ANY || _is_any_type(default_type, ctx.reg) { continue }
+		// None defaults are allowed for any type (non-strict-optional mode)
+		if default_type == TYPE_NONE { continue }
+		if !is_assignable(ctx.reg, default_type, param_type) {
+			emit_diagnostic(ctx, loc, "T002", .Error,
+				"Incompatible default argument type",
+				fmt_type_mismatch(default_type, param_type, ctx.reg),
+				"Use a compatible default value")
 		}
 	}
 }
