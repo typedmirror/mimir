@@ -216,6 +216,10 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 				should_flag = len(ri.fields) > 0
 			case DataFrame_Type, Series_Type, Tensor_Type:
 				should_flag = true
+			case Primitive_Type:
+				// Only flag for str — we have comprehensive str method handlers.
+				// Other primitives (bytes, int, float) have methods we don't fully model.
+				if receiver == TYPE_STR { should_flag = true }
 			}
 			// Skip dunder attrs — implicit object methods not tracked yet
 			// Skip private attrs (_prefix) — instance attrs from __init__ not tracked
