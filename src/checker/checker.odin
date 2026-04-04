@@ -1183,16 +1183,17 @@ check_stmt :: proc(
 										}
 									}
 								case Dict_Type:
-									// §3.5: dict["key"] = val → accumulate into TypedDict
+									// §3.5: dict["key"] = val → accumulate into TypedDict (inferred, unnamed)
 									if key, key_ok := sub.slice.(^parser.Constant_Expr); key_ok {
 										if key_name, str_ok := key.value.(string); str_ok {
 											new_fields := make(map[string]Type_ID, 4, ctx.reg.allocator)
 											new_fields[key_name] = rhs_type
-											ctx.env.types[sym_id] = make_typeddict_type(ctx.reg, name.id, new_fields, true)
+											// Use empty name to mark as inferred (not user-defined)
+											ctx.env.types[sym_id] = make_typeddict_type(ctx.reg, "", new_fields, true)
 										}
 									}
 								case TypedDict_Type:
-									// TypedDict subscript assignment: validate value type for existing keys
+									// TypedDict subscript assignment: validate key and value type
 									if key, key_ok := sub.slice.(^parser.Constant_Expr); key_ok {
 										if key_name, str_ok := key.value.(string); str_ok {
 											if field_type, exists := df_info.fields[key_name]; exists {
@@ -1207,9 +1208,16 @@ check_stmt :: proc(
 															"Use the correct type for this field")
 													}
 												}
+											} else if len(df_info.name) > 0 {
+												// Named TypedDict: new keys are invalid
+												emit_diagnostic(ctx, s.loc, "T001", .Error,
+													"Invalid TypedDict key",
+													fmt.aprintf("TypedDict '%s' has no key '%s'",
+														df_info.name, key_name,
+														allocator = ctx.reg.allocator),
+													"Use a valid key from the TypedDict definition")
 											}
-											// Note: new keys are allowed in assignment (accumulation)
-											// Invalid key errors are only for read access (Subscript_Expr in infer.odin)
+											// Update env (accumulate for unnamed, preserve for named)
 											new_fields := make(map[string]Type_ID, len(df_info.fields) + 1, ctx.reg.allocator)
 											for fn, ft in df_info.fields { new_fields[fn] = ft }
 											new_fields[key_name] = rhs_type
