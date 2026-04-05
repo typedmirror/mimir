@@ -53,6 +53,12 @@ check :: proc(
 	result.registry.next_file_id += 1
 	result.registry.current_file_id = result.registry.next_file_id
 
+	// Build type: ignore line set from module
+	type_ignore_lines := make(map[i32]bool, len(module.type_ignores), allocator)
+	for ti in module.type_ignores {
+		type_ignore_lines[ti.lineno] = true
+	}
+
 	// Pre-register all classes so return type annotations can reference them
 	pre_register_classes(module.body, bind_result, &result.registry)
 
@@ -109,6 +115,7 @@ check :: proc(
 			const_map = cm,
 			fixture_types = fixture_ptr,
 			generator_send_types = &generator_send_types if len(generator_send_types) > 0 else nil,
+			type_ignore_lines = &type_ignore_lines if len(type_ignore_lines) > 0 else nil,
 		)
 	}
 
@@ -368,6 +375,12 @@ check_with_imports :: proc(
 		}
 	}
 
+	// Build type: ignore line set from module
+	type_ignore_lines := make(map[i32]bool, len(module.type_ignores), allocator)
+	for ti in module.type_ignores {
+		type_ignore_lines[ti.lineno] = true
+	}
+
 	// Pre-register all classes
 	pre_register_classes(module.body, bind_result, registry)
 
@@ -418,6 +431,7 @@ check_with_imports :: proc(
 			shape_reg     = shape_reg_ptr,
 			const_map     = cm,
 			generator_send_types = gen_send_ptr,
+			type_ignore_lines = &type_ignore_lines if len(type_ignore_lines) > 0 else nil,
 		)
 	}
 
@@ -482,6 +496,7 @@ check_with_imports :: proc(
 				const_map     = fp_cm,
 				caller_param_types = scope_caller_types_multi,
 				generator_send_types = gen_send_ptr,
+				type_ignore_lines = &type_ignore_lines if len(type_ignore_lines) > 0 else nil,
 			)
 		}
 
@@ -570,6 +585,16 @@ check_with_imports :: proc(
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
+	// Filter out diagnostics on # type: ignore lines (per-line suppression only)
+	if len(type_ignore_lines) > 0 {
+		filtered := make([dynamic]core.Diagnostic, 0, len(result.diagnostics), allocator)
+		for d in result.diagnostics {
+			if i32(d.location.line) in type_ignore_lines { continue }
+			append(&filtered, d)
+		}
+		result.diagnostics = filtered
+	}
+
 	// Refresh registry snapshot — now includes all types registered during checking
 	result.registry = registry^
 
@@ -595,6 +620,7 @@ check_scope :: proc(
 	caller_param_types: map[int]Type_ID = nil,
 	fixture_types: ^map[string]Type_ID = nil,
 	generator_send_types: ^map[binder.Scope_ID]Type_ID = nil,
+	type_ignore_lines: ^map[i32]bool = nil,
 ) {
 	// Use shared registry if provided, otherwise use result's own
 	reg := reg_override if reg_override != nil else &result.registry
@@ -706,6 +732,18 @@ check_scope :: proc(
 		// Initialize parameter types for the entry block (after merge to avoid overwrite)
 		if block_id == cfg.entry && scope != nil && (scope.kind == .Function || scope.kind == .Lambda) {
 			init_param_types(scope, bind_result, &env, reg, builtins, func_args, current_class)
+			// Register annotated params in declared_types for reassignment checking
+			for _, sym_id in scope.symbols {
+				sym := binder.result_get_symbol(bind_result, sym_id)
+				if sym == nil { continue }
+				if .Is_Param in sym.flags {
+					if param_type, has := env.types[sym_id]; has {
+						if param_type != TYPE_UNKNOWN && param_type != TYPE_ANY {
+							declared_types[sym_id] = param_type
+						}
+					}
+				}
+			}
 			// §31.2: Inject fixture types for test function params
 			if fixture_types != nil && strings.has_prefix(scope.name, "test_") {
 				inject_fixture_types(scope, bind_result, &env, fixture_types)
@@ -743,7 +781,8 @@ check_scope :: proc(
 			groupby_sources  = &groupby_sources,
 			closed_vars      = &closed_vars,
 			final_vars       = &final_vars,
-				generator_send_types = generator_send_types,
+			generator_send_types = generator_send_types,
+			type_ignore_lines = type_ignore_lines,
 		}
 
 		// Process each statement in the block
@@ -874,6 +913,7 @@ check_scope :: proc(
 					final_vars       = &final_vars,
 					resolved_types   = &resolved,
 					generator_send_types = generator_send_types,
+					type_ignore_lines = type_ignore_lines,
 				}
 
 				for stmt in block.stmts {
@@ -1078,7 +1118,8 @@ check_stmt :: proc(
 					if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
 						if declared, found := ctx.declared_types[sym_id]; found {
 							if declared != TYPE_ANY && !_is_any_type(declared, ctx.reg) {
-								if !is_assignable(ctx.reg, rhs_type, declared) {
+								// None RHS always allowed (non-strict-optional mode)
+								if rhs_type != TYPE_NONE && !is_assignable(ctx.reg, rhs_type, declared) {
 									emit_diagnostic(ctx, s.loc, "T001", .Error,
 										"Incompatible types in assignment",
 										fmt_type_mismatch(rhs_type, declared, ctx.reg),
@@ -1102,7 +1143,7 @@ check_stmt :: proc(
 							// Also skip when assigning Any/Unknown to method
 							if rhs_type == TYPE_ANY || rhs_type == TYPE_UNKNOWN { skip_check = true }
 						}
-						if !skip_check {
+						if !skip_check && rhs_type != TYPE_NONE {
 							if !is_assignable(ctx.reg, rhs_type, attr_type) {
 								emit_diagnostic(ctx, s.loc, "T001", .Error,
 									"Incompatible types in assignment",
@@ -1358,6 +1399,11 @@ check_stmt :: proc(
 
 	case ^parser.Func_Def:
 		func_type := build_func_type(s, ctx)
+		// If any decorator resolves to unknown/Any, override to permissive Callable
+		// (mypy treats unresolved decorators as returning Any, suppressing arg checks)
+		if _has_unknown_decorator(s.decorator_list, ctx) {
+			func_type = TYPE_ANY
+		}
 		set_name_type(s.name, func_type, ctx)
 		// Check default parameter types against annotations
 		_check_default_param_types(&s.args, s.loc, ctx)
@@ -1379,6 +1425,10 @@ check_stmt :: proc(
 
 	case ^parser.Async_Func_Def:
 		func_type := build_async_func_type(s, ctx)
+		// If any decorator resolves to unknown/Any, override to permissive Callable
+		if _has_unknown_decorator(s.decorator_list, ctx) {
+			func_type = TYPE_ANY
+		}
 		set_name_type(s.name, func_type, ctx)
 
 	case ^parser.Class_Def:
@@ -1827,6 +1877,70 @@ has_abstractmethod_decorator :: proc(decorators: []parser.Expr) -> bool {
 	return false
 }
 
+// Check if any decorator on a function resolves to TYPE_UNKNOWN or TYPE_ANY.
+// Known builtins (property, staticmethod, classmethod, overload, final, abstractmethod,
+// dataclass, setter, deleter) are skipped. Locally-defined functions/classes are skipped
+// (forward references in single-pass can't be resolved yet but are NOT truly unknown).
+// Only imported Name_Expr, Attribute_Expr (e.g. @module.decorator), and Call_Expr
+// (e.g. @decorator(...)) that resolve to unknown/Any trigger this.
+// When true, mypy treats the decorated function as returning Any, so we should
+// replace the function's type with TYPE_ANY to avoid FP T004/T002 errors.
+_has_unknown_decorator :: proc(decorators: []parser.Expr, ctx: ^Infer_Context) -> bool {
+	if len(decorators) == 0 { return false }
+	KNOWN_NAMES :: [?]string{
+		"property", "staticmethod", "classmethod", "abstractmethod",
+		"dataclass", "no_type_check",
+	}
+	TYPING_KNOWN :: [?]string{"overload", "final", "dataclass_transform"}
+	for dec in decorators {
+		#partial switch d in dec {
+		case ^parser.Name_Expr:
+			// Skip known builtins
+			is_builtin := false
+			for kn in KNOWN_NAMES {
+				if d.id == kn { is_builtin = true; break }
+			}
+			if is_builtin { continue }
+			// Skip typing-resolved known names
+			if orig, is_typing := ctx.bind_result.typing_names[d.id]; is_typing {
+				is_typing_known := false
+				for tk in TYPING_KNOWN {
+					if orig == tk { is_typing_known = true; break }
+				}
+				if is_typing_known { continue }
+			}
+			// Only check imported symbols — local functions/classes may be forward refs
+			if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(d)); ref_ok {
+				sym := binder.result_get_symbol(ctx.bind_result, sym_id)
+				if sym != nil && (sym.kind == .Import || .Is_Imported in sym.flags) {
+					dec_type := infer_expr(dec, ctx)
+					if dec_type == TYPE_UNKNOWN || dec_type == TYPE_ANY || _is_any_type(dec_type, ctx.reg) {
+						return true
+					}
+				}
+			}
+		case ^parser.Attribute_Expr:
+			// Skip known attrs
+			if d.attr == "property" || d.attr == "setter" || d.attr == "deleter" ||
+			   d.attr == "staticmethod" || d.attr == "classmethod" ||
+			   d.attr == "abstractmethod" || d.attr == "dataclass" ||
+			   d.attr == "overload" || d.attr == "final" { continue }
+			// Infer the attribute expression — if receiver is unresolved import, type is unknown
+			dec_type := infer_expr(dec, ctx)
+			if dec_type == TYPE_UNKNOWN || dec_type == TYPE_ANY || _is_any_type(dec_type, ctx.reg) {
+				return true
+			}
+		case ^parser.Call_Expr:
+			// Decorator call like @decorator(...) — infer the function being called
+			dec_type := infer_expr(d.func, ctx)
+			if dec_type == TYPE_UNKNOWN || dec_type == TYPE_ANY || _is_any_type(dec_type, ctx.reg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Register PEP 695 type parameters as TypeVars in the environment
 _register_type_params :: proc(type_params: []parser.Type_Param, ctx: ^Infer_Context) {
 	if len(type_params) == 0 { return }
@@ -2096,6 +2210,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	bases_dyn := make([dynamic]Type_ID, 0, len(cd.bases), ctx.reg.allocator)
 	type_params_dyn := make([dynamic]Type_ID, 0, 4, ctx.reg.allocator)
 	has_mapping_base := false
+	is_namedtuple := false
 	for base in cd.bases {
 		// Check for Generic[T, U, ...] in bases
 		if sub, ok := base.(^parser.Subscript_Expr); ok {
@@ -2133,6 +2248,11 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		}
 		if base_name_str == "Mapping" || base_name_str == "MutableMapping" || base_name_str == "dict" {
 			has_mapping_base = true
+		}
+		if base_name_str == "NamedTuple" {
+			is_namedtuple = true
+		} else if orig, ok := ctx.bind_result.typing_names[base_name_str]; ok {
+			if orig == "NamedTuple" { is_namedtuple = true }
 		}
 		append(&bases_dyn, infer_expr(base, ctx))
 	}
@@ -2392,6 +2512,22 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		attrs["__eq__"] = make_callable_type(ctx.reg, eq_params, TYPE_BOOL)
 	}
 
+	// Class-syntax NamedTuple: auto-generate __init__ from annotated fields
+	if is_namedtuple && "__init__" not_in attrs {
+		nt_params := make([dynamic]Param_Type, 0, 8, ctx.reg.allocator)
+		for stmt in cd.body {
+			#partial switch s in stmt {
+			case ^parser.Ann_Assign:
+				if name_expr, ok := s.target.(^parser.Name_Expr); ok {
+					field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					has_default := s.value != nil
+					append(&nt_params, Param_Type{name = name_expr.id, type_id = field_type, has_default = has_default})
+				}
+			}
+		}
+		attrs["__init__"] = make_callable_type(ctx.reg, nt_params[:], TYPE_NONE)
+	}
+
 	// Detect @final class decorator
 	class_is_final := has_final_decorator(cd.decorator_list, ctx.bind_result)
 
@@ -2566,6 +2702,10 @@ build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_i
 		#partial switch s in stmt {
 		case ^parser.Func_Def:
 			ft := build_func_type(s, ctx)
+			// If any decorator resolves to unknown/Any, override to permissive Callable
+			if _has_unknown_decorator(s.decorator_list, ctx) {
+				ft = TYPE_ANY
+			}
 			// @property: store return type in attrs (not callable in methods)
 			is_property := false
 			for dec in s.decorator_list {
@@ -2615,6 +2755,10 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 		#partial switch s in stmt {
 		case ^parser.Func_Def:
 			ft := build_func_type(s, ctx)
+			// If any decorator resolves to unknown/Any, override to permissive Callable
+			if _has_unknown_decorator(s.decorator_list, ctx) {
+				ft = TYPE_ANY
+			}
 			// @property: store return type instead of callable (attribute access, not call)
 			// @name.setter / @name.deleter: skip — keep the getter's return type
 			is_property := false
@@ -2646,6 +2790,10 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 			}
 		case ^parser.Async_Func_Def:
 			ft := build_async_func_type(s, ctx)
+			// If any decorator resolves to unknown/Any, override to permissive Callable
+			if _has_unknown_decorator(s.decorator_list, ctx) {
+				ft = TYPE_ANY
+			}
 			// Same property/setter handling as sync methods
 			is_property := false
 			is_setter_or_deleter := false

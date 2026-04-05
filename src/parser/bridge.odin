@@ -55,6 +55,19 @@ parse_native :: proc(path: string, allocator: mem.Allocator) -> (^Module, Parse_
 	}
 
 	mod := parse_module_native(&ctx)
+
+	// Extract # type: ignore lines and store on module
+	ti_map := extract_type_ignore_lines(source, allocator)
+	if len(ti_map) > 0 {
+		ignores := make([]Type_Ignore, len(ti_map), allocator)
+		idx := 0
+		for line in ti_map {
+			ignores[idx] = Type_Ignore{lineno = line}
+			idx += 1
+		}
+		mod.type_ignores = ignores
+	}
+
 	return mod, nil
 }
 
@@ -100,4 +113,40 @@ extract_type_comments :: proc(source: string, allocator: mem.Allocator) -> map[i
 		}
 	}
 	return tc
+}
+
+// Extract lines with `# type: ignore` comments. Returns line→true map.
+extract_type_ignore_lines :: proc(source: string, allocator: mem.Allocator) -> map[i32]bool {
+	ti := make(map[i32]bool, 4, allocator)
+	line: i32 = 1
+	i := 0
+	for i < len(source) {
+		if source[i] == '#' {
+			// Check for "type: ignore" or "type:ignore"
+			j := i + 1
+			for j < len(source) && (source[j] == ' ' || source[j] == '\t') { j += 1 }
+			rest := source[j:]
+			if len(rest) >= 5 && rest[:5] == "type:" {
+				after := rest[5:]
+				k := 0
+				for k < len(after) && (after[k] == ' ' || after[k] == '\t') { k += 1 }
+				after = after[k:]
+				if len(after) >= 6 && after[:6] == "ignore" {
+					ti[line] = true
+				}
+			}
+			for i < len(source) && source[i] != '\n' && source[i] != '\r' { i += 1 }
+		} else if source[i] == '\n' {
+			line += 1
+			i += 1
+			if i < len(source) && source[i] == '\r' { i += 1 }
+		} else if source[i] == '\r' {
+			line += 1
+			i += 1
+			if i < len(source) && source[i] == '\n' { i += 1 }
+		} else {
+			i += 1
+		}
+	}
+	return ti
 }

@@ -36,6 +36,7 @@ Infer_Context :: struct {
 	final_vars:       ^map[binder.Symbol_ID]bool,              // Final[T]: variables that cannot be reassigned
 	resolved_types:   ^map[binder.Symbol_ID]Type_ID,           // Constraint-resolved types for unknown symbols (re-inference pass)
 	generator_send_types: ^map[binder.Scope_ID]Type_ID,      // Generator[Y,S,R] → S per scope
+	type_ignore_lines: ^map[i32]bool,                         // Lines with # type: ignore comments
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -1001,6 +1002,16 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 
 	func_type := infer_expr(e.func, ctx)
 
+	// object() constructor → TYPE_OBJECT. Only match the literal name "object",
+	// not arbitrary expressions that resolve to TYPE_OBJECT (e.g., o() where o: object
+	// after callable() guard, or cls() where cls: type[Self]).
+	if func_type == TYPE_OBJECT {
+		if name_expr, is_name := e.func.(^parser.Name_Expr); is_name && name_expr.id == "object" {
+			for arg in e.args { infer_expr(arg, ctx) }
+			return TYPE_OBJECT
+		}
+	}
+
 	if func_type == TYPE_UNKNOWN || func_type == TYPE_ANY {
 		// Still type-check args
 		for arg in e.args {
@@ -1453,6 +1464,9 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 	n_named_kw := 0
 	has_star_kwargs := false
 	has_star_args := false
+	// Try to expand *star_arg if it's a known-length tuple
+	star_arg_idx := -1
+	star_tuple_elems: []Type_ID
 	for kw in e.keywords {
 		if kw.arg == "" {
 			has_star_kwargs = true
@@ -1460,9 +1474,18 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 			n_named_kw += 1
 		}
 	}
-	for arg in e.args {
-		if _, is_starred := arg.(^parser.Starred_Expr); is_starred {
-			has_star_args = true
+	for arg, idx in e.args {
+		if star, is_starred := arg.(^parser.Starred_Expr); is_starred {
+			star_type := infer_expr(star.value, ctx)
+			st := get_type(ctx.reg, star_type)
+			if tup, is_tuple := st.info.(Tuple_Type); is_tuple && !tup.is_variadic && len(tup.elements) > 0 {
+				// Known-length tuple: expand into positional args
+				star_arg_idx = idx
+				star_tuple_elems = tup.elements
+				n_args += len(tup.elements) - 1  // -1 because *arg already counted as 1
+			} else {
+				has_star_args = true
+			}
 			break
 		}
 	}
@@ -1527,19 +1550,59 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 	// Check positional arg types against param types
 	// For unbound calls, infer arg[0] (self) but don't type-check it against params
 	if unbound_offset > 0 && n_args > 0 { infer_expr(e.args[0], ctx) }
-	arg_check_count := min(n_args - unbound_offset, n_params)
-	for i := 0; i < arg_check_count; i += 1 {
-		param_type := func_info.params[i].type_id
-		arg_type := infer_expr(e.args[i + unbound_offset], ctx, param_type)
-		if _is_any_type(param_type, ctx.reg) || param_type == TYPE_UNKNOWN ||
-		   arg_type == TYPE_UNKNOWN || _is_any_type(arg_type, ctx.reg) ||
-		   _union_has_unknown(arg_type, ctx.reg) {
-			// Skip — Any/Unknown in union means partial resolution, can't verify
-		} else if !is_assignable(ctx.reg, arg_type, param_type) {
-			emit_diagnostic(ctx, e.loc, "T002", .Error,
-				"Incompatible argument type",
-				fmt_type_mismatch(arg_type, param_type, ctx.reg),
-				"Use the correct type")
+	if star_arg_idx >= 0 && star_tuple_elems != nil {
+		// Star-expanded: check args before star, tuple elements, then args after star
+		param_idx := 0
+		for i := 0 + unbound_offset; i < len(e.args); i += 1 {
+			if i == star_arg_idx {
+				// Expand tuple elements against params
+				for elem in star_tuple_elems {
+					if param_idx >= n_params { break }
+					param_type := func_info.params[param_idx].type_id
+					if !_is_any_type(param_type, ctx.reg) && param_type != TYPE_UNKNOWN &&
+					   elem != TYPE_UNKNOWN && !_is_any_type(elem, ctx.reg) &&
+					   !_union_has_unknown(elem, ctx.reg) {
+						if !is_assignable(ctx.reg, elem, param_type) {
+							emit_diagnostic(ctx, e.loc, "T002", .Error,
+								"Incompatible argument type",
+								fmt_type_mismatch(elem, param_type, ctx.reg),
+								"Use the correct type")
+						}
+					}
+					param_idx += 1
+				}
+			} else {
+				if param_idx >= n_params { break }
+				param_type := func_info.params[param_idx].type_id
+				arg_type := infer_expr(e.args[i], ctx, param_type)
+				if !_is_any_type(param_type, ctx.reg) && param_type != TYPE_UNKNOWN &&
+				   arg_type != TYPE_UNKNOWN && !_is_any_type(arg_type, ctx.reg) &&
+				   !_union_has_unknown(arg_type, ctx.reg) {
+					if !is_assignable(ctx.reg, arg_type, param_type) {
+						emit_diagnostic(ctx, e.loc, "T002", .Error,
+							"Incompatible argument type",
+							fmt_type_mismatch(arg_type, param_type, ctx.reg),
+							"Use the correct type")
+					}
+				}
+				param_idx += 1
+			}
+		}
+	} else {
+		arg_check_count := min(n_args - unbound_offset, n_params)
+		for i := 0; i < arg_check_count; i += 1 {
+			param_type := func_info.params[i].type_id
+			arg_type := infer_expr(e.args[i + unbound_offset], ctx, param_type)
+			if _is_any_type(param_type, ctx.reg) || param_type == TYPE_UNKNOWN ||
+			   arg_type == TYPE_UNKNOWN || _is_any_type(arg_type, ctx.reg) ||
+			   _union_has_unknown(arg_type, ctx.reg) {
+				// Skip — Any/Unknown in union means partial resolution, can't verify
+			} else if !is_assignable(ctx.reg, arg_type, param_type) {
+				emit_diagnostic(ctx, e.loc, "T002", .Error,
+					"Incompatible argument type",
+					fmt_type_mismatch(arg_type, param_type, ctx.reg),
+					"Use the correct type")
+			}
 		}
 	}
 
@@ -1972,6 +2035,46 @@ get_iterator_element_type :: proc(iter_type: Type_ID, reg: ^Type_Registry) -> Ty
 	}
 	if iter_type == TYPE_STR { return TYPE_STR }
 	if iter_type == TYPE_BYTES { return TYPE_INT }
+
+	// User-defined iterables: check __iter__ → return type → __next__ → return type
+	#partial switch inst in t.info {
+	case Instance_Type:
+		cls := get_type(reg, inst.class_type)
+		if ci, ci_ok := cls.info.(Class_Type); ci_ok {
+			if iter_method, has := ci.attrs["__iter__"]; has {
+				iter_m := get_type(reg, iter_method)
+				if iter_ct, ok := iter_m.info.(Callable_Type); ok {
+					iter_ret := iter_ct.return_type
+					if iter_ret != TYPE_UNKNOWN && iter_ret != TYPE_ANY {
+						// Check if iterator has __next__
+						rt := get_type(reg, iter_ret)
+						#partial switch ri in rt.info {
+						case Instance_Type:
+							icls := get_type(reg, ri.class_type)
+							if ici, ici_ok := icls.info.(Class_Type); ici_ok {
+								if next_m, has_next := ici.attrs["__next__"]; has_next {
+									next_t := get_type(reg, next_m)
+									if nc, nc_ok := next_t.info.(Callable_Type); nc_ok {
+										if nc.return_type != TYPE_UNKNOWN { return nc.return_type }
+									}
+								}
+							}
+						}
+						// Fallback: use __iter__ return type directly if it resolves
+						return iter_ret
+					}
+				}
+			}
+			// Old-style iteration: __getitem__(int) → element type
+			if getitem_m, has := ci.attrs["__getitem__"]; has {
+				gi_t := get_type(reg, getitem_m)
+				if gi_ct, ok := gi_t.info.(Callable_Type); ok {
+					if gi_ct.return_type != TYPE_UNKNOWN { return gi_ct.return_type }
+				}
+			}
+		}
+	}
+
 	return TYPE_UNKNOWN
 }
 
@@ -2638,6 +2741,10 @@ import "core:fmt"
 
 emit_diagnostic :: proc(ctx: ^Infer_Context, loc: parser.Src_Loc, code: string, severity: core.Severity,
 	what: string, why: string, fix: string) {
+	// Suppress diagnostics on lines with # type: ignore
+	if ctx.type_ignore_lines != nil {
+		if loc.line in ctx.type_ignore_lines^ { return }
+	}
 	append(ctx.diagnostics, core.Diagnostic{
 		severity = severity,
 		location = core.Location{

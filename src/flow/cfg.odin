@@ -756,6 +756,20 @@ check_missing_return :: proc(cfg: ^CFG, scope_name: string, has_return_annotatio
 					if block_ends_with_return(pred) {
 						continue
 					}
+					// Empty join block after if/else: check if ALL predecessors end with return/never
+					// Only for 2-pred blocks (if/else pattern, not match which has N cases)
+					if len(pred.stmts) == 0 && len(pred.preds) == 2 {
+						all_preds_return := true
+						for pp_id in pred.preds {
+							pp := get_block(cfg, pp_id)
+							if pp == nil || !pp.is_reachable { continue }
+							if !block_ends_with_return(pp) {
+								all_preds_return = false
+								break
+							}
+						}
+						if all_preds_return { continue }
+					}
 					// This path reaches exit without return
 					append(diagnostics, core.Diagnostic{
 						severity = .Error,

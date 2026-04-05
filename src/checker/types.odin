@@ -95,16 +95,17 @@ Tuple_Type :: struct {
 }
 
 Class_Type :: struct {
-	name:             string,
-	symbol_id:        binder.Symbol_ID,
-	scope_id:         binder.Scope_ID,
-	bases:            []Type_ID,
-	attrs:            map[string]Type_ID,
-	type_params:      []Type_ID,
-	is_final:         bool,
-	is_enum:          bool,
-	enum_value_type:  Type_ID,  // For IntEnum→TYPE_INT, StrEnum→TYPE_STR, etc.
-	abstract_methods: map[string]bool,
+	name:               string,
+	symbol_id:          binder.Symbol_ID,
+	scope_id:           binder.Scope_ID,
+	bases:              []Type_ID,
+	attrs:              map[string]Type_ID,
+	type_params:        []Type_ID,
+	resolved_type_args: []Type_ID,  // Set by specialize_class — the concrete args this class was specialized with
+	is_final:           bool,
+	is_enum:            bool,
+	enum_value_type:    Type_ID,  // For IntEnum→TYPE_INT, StrEnum→TYPE_STR, etc.
+	abstract_methods:   map[string]bool,
 }
 
 Instance_Type :: struct {
@@ -725,7 +726,34 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 							// Source is unspecialized — assignable to any specialization of same class
 							return true
 						}
-						// Both specialized — check attrs match (invariant)
+						// Both specialized — compare type_args (covariant check)
+						// Skip if either has TypeVarTuple args (variadic — length mismatch expected)
+						if len(src_ci.resolved_type_args) > 0 && len(tgt_ci.resolved_type_args) > 0 {
+							has_tvt := false
+							for sa in src_ci.resolved_type_args {
+								st := get_type(reg, sa)
+								if _, is_tvt := st.info.(TypeVarTuple_Type); is_tvt { has_tvt = true; break }
+							}
+							if !has_tvt {
+								for ta in tgt_ci.resolved_type_args {
+									tt := get_type(reg, ta)
+									if _, is_tvt := tt.info.(TypeVarTuple_Type); is_tvt { has_tvt = true; break }
+								}
+							}
+							if !has_tvt && len(src_ci.resolved_type_args) == len(tgt_ci.resolved_type_args) {
+								args_match := true
+								for i in 0..<len(src_ci.resolved_type_args) {
+									sa := src_ci.resolved_type_args[i]
+									ta := tgt_ci.resolved_type_args[i]
+									if !is_assignable(reg, sa, ta) {
+										args_match = false
+										break
+									}
+								}
+								return args_match
+							}
+						}
+						// Fallback: attrs-based check for classes without resolved_type_args
 						if len(src_ci.attrs) == len(tgt_ci.attrs) {
 							attrs_match := true
 							for attr_name, src_attr_type in src_ci.attrs {
@@ -1411,13 +1439,16 @@ specialize_class :: proc(reg: ^Type_Registry, class_type_id: Type_ID, type_args:
 		new_attrs[name] = substitute_type(reg, attr_type, subs)
 	}
 
-	// Create specialized Class_Type with empty type_params
+	// Create specialized Class_Type with empty type_params but resolved type_args
+	spec_args := make([]Type_ID, len(type_args), reg.allocator)
+	copy(spec_args, type_args)
 	spec_id := register_type(reg, Class_Type{
-		name      = cls.name,
-		symbol_id = cls.symbol_id,
-		scope_id  = cls.scope_id,
-		bases     = cls.bases,
-		attrs     = new_attrs,
+		name               = cls.name,
+		symbol_id          = cls.symbol_id,
+		scope_id           = cls.scope_id,
+		bases              = cls.bases,
+		attrs              = new_attrs,
+		resolved_type_args = spec_args,
 	})
 
 	result := make_instance_type(reg, spec_id)
