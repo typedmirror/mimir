@@ -197,12 +197,20 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			#partial switch ri in rt.info {
 			case Instance_Type:
 				// Only flag if class has known attrs AND attr is not in the map
-				// (attrs with TYPE_UNKNOWN value exist but couldn't be resolved — not a T007)
 				cls := get_type(ctx.reg, ri.class_type)
 				if ci, ci_ok := cls.info.(Class_Type); ci_ok {
 					if len(ci.attrs) > 0 {
 						_, attr_exists := ci.attrs[e.attr]
 						should_flag = !attr_exists
+					}
+					// Suppress T007 when class inherits from Any (all attrs valid)
+					if should_flag {
+						for base_id in ci.bases {
+							if base_id == TYPE_ANY || _is_any_type(base_id, ctx.reg) {
+								should_flag = false
+								break
+							}
+						}
 					}
 				}
 			case Class_Type:
@@ -2995,6 +3003,7 @@ handle_typeddict_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type
 	}
 
 	fields := make(map[string]Type_ID, 8, ctx.reg.allocator)
+	required_fields := make(map[string]bool, 4, ctx.reg.allocator)
 	total := true
 
 	// Second arg: dict of field_name: type
@@ -3010,7 +3019,29 @@ handle_typeddict_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type
 					}
 				}
 				if len(key_name) > 0 {
-					field_type := resolve_annotation(arg.values[i], ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+					// Detect Required[T] / NotRequired[T] wrappers
+					ann := arg.values[i]
+					if sub, sub_ok := ann.(^parser.Subscript_Expr); sub_ok {
+						wrapper_name := get_annotation_name(sub.value)
+						if wrapper_name == "NotRequired" {
+							required_fields[key_name] = false
+							ann = sub.slice
+						} else if wrapper_name == "Required" {
+							required_fields[key_name] = true
+							ann = sub.slice
+						}
+						// Also check typing_names alias
+						if orig, ok := ctx.bind_result.typing_names[wrapper_name]; ok {
+							if orig == "NotRequired" {
+								required_fields[key_name] = false
+								ann = sub.slice
+							} else if orig == "Required" {
+								required_fields[key_name] = true
+								ann = sub.slice
+							}
+						}
+					}
+					field_type := resolve_annotation(ann, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 					fields[key_name] = field_type
 				}
 			}
@@ -3029,7 +3060,7 @@ handle_typeddict_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context) -> Type
 		}
 	}
 
-	return register_type(ctx.reg, TypedDict_Type{name = name, fields = fields, total = total})
+	return register_type(ctx.reg, TypedDict_Type{name = name, fields = fields, total = total, required_fields = required_fields})
 }
 
 // ==================== NamedTuple Functional Syntax ====================
