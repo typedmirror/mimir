@@ -1134,20 +1134,63 @@ check_stmt :: proc(
 					receiver := infer_expr(attr_expr.value, ctx)
 					attr_type := lookup_attribute(receiver, attr_expr.attr, ctx.reg)
 					if attr_type != TYPE_UNKNOWN && attr_type != TYPE_ANY && !_is_any_type(attr_type, ctx.reg) {
+						// Property-aware: check against setter type if this is a property
+						check_type := attr_type
+						is_prop := false
+						rt := get_type(ctx.reg, receiver)
+						if inst, inst_ok := rt.info.(Instance_Type); inst_ok {
+							cls := get_type(ctx.reg, inst.class_type)
+							if ci, ci_ok := cls.info.(Class_Type); ci_ok {
+								if attr_expr.attr in ci.property_names {
+									is_prop = true
+									if st, has_setter := ci.setter_types[attr_expr.attr]; has_setter {
+										check_type = st  // Use setter param type instead of getter return type
+									}
+								}
+							}
+						}
+						// Descriptor protocol: if attr type is a class with __set__,
+						// check against __set__'s value param, not the descriptor class itself
+						if !is_prop {
+							ct := get_type(ctx.reg, check_type)
+							desc_class_id := INVALID_TYPE
+							#partial switch di in ct.info {
+							case Instance_Type:
+								desc_class_id = di.class_type
+							case Class_Type:
+								desc_class_id = check_type
+							}
+							if desc_class_id != INVALID_TYPE {
+								dc := get_type(ctx.reg, desc_class_id)
+								#partial switch &dci in dc.info {
+								case Class_Type:
+									if set_type, has_set := dci.attrs["__set__"]; has_set {
+										set_t := get_type(ctx.reg, set_type)
+										if set_ct, ok := set_t.info.(Callable_Type); ok {
+											// __set__(self, obj, value) → params[0]=obj, params[1]=value
+											if len(set_ct.params) >= 2 {
+												check_type = set_ct.params[1].type_id
+											} else if len(set_ct.params) >= 1 {
+												check_type = set_ct.params[0].type_id
+											}
+										}
+									}
+								}
+							}
+						}
 						// Skip when both attr and RHS are Callable (method override/reassignment)
-						at := get_type(ctx.reg, attr_type)
+						at := get_type(ctx.reg, check_type)
 						skip_check := false
 						if _, ca := at.info.(Callable_Type); ca {
-							rt := get_type(ctx.reg, rhs_type)
-							if _, rc := rt.info.(Callable_Type); rc { skip_check = true }
-							// Also skip when assigning Any/Unknown to method
+							rhs_t := get_type(ctx.reg, rhs_type)
+							if _, rc := rhs_t.info.(Callable_Type); rc { skip_check = true }
 							if rhs_type == TYPE_ANY || rhs_type == TYPE_UNKNOWN { skip_check = true }
 						}
 						if !skip_check && rhs_type != TYPE_NONE {
-							if !is_assignable(ctx.reg, rhs_type, attr_type) {
+							if !is_assignable(ctx.reg, rhs_type, check_type) {
 								emit_diagnostic(ctx, s.loc, "T001", .Error,
 									"Incompatible types in assignment",
-									fmt_type_mismatch(rhs_type, attr_type, ctx.reg),
+									fmt_type_mismatch(rhs_type, check_type, ctx.reg),
 									"Check the attribute type")
 							}
 						}
@@ -1704,6 +1747,53 @@ apply_positive_guard :: proc(
 		}
 		if target, has_target := reg.typeis_targets[func_sym]; has_target {
 			env.types[guard.symbol_id] = target
+		}
+	case .Is_Callable, .Is_Not_Callable:
+		// callable(x) — in true branch, narrow to callable types only
+		// For Union[int, str, Callable]: keep only Callable members
+		// For plain non-callable type (int): set to TYPE_ANY (permissive, avoids T005 FP)
+		current, ok := env.types[guard.symbol_id]
+		if ok {
+			ct := get_type(reg, current)
+			#partial switch u in ct.info {
+			case Union_Type:
+				// Filter union to only callable members
+				callable_members := make([dynamic]Type_ID, 0, len(u.members), reg.allocator)
+				for m in u.members {
+					mt := get_type(reg, m)
+					is_callable := false
+					#partial switch _ in mt.info {
+					case Callable_Type: is_callable = true
+					case Class_Type: is_callable = true
+					case Instance_Type:
+						ic := get_type(reg, mt.info.(Instance_Type).class_type)
+						if ici, ici_ok := ic.info.(Class_Type); ici_ok {
+							if "__call__" in ici.attrs { is_callable = true }
+						}
+					}
+					if is_callable { append(&callable_members, m) }
+				}
+				if len(callable_members) > 0 {
+					if len(callable_members) == 1 {
+						env.types[guard.symbol_id] = callable_members[0]
+					} else {
+						env.types[guard.symbol_id] = make_union_type(reg, callable_members[:])
+					}
+				} else {
+					// No callable members found — treat as TYPE_ANY (permissive)
+					env.types[guard.symbol_id] = TYPE_ANY
+				}
+			case:
+				// Non-union: if not already callable, set to TYPE_ANY
+				is_callable := false
+				#partial switch _ in ct.info {
+				case Callable_Type: is_callable = true
+				case Class_Type: is_callable = true
+				}
+				if !is_callable {
+					env.types[guard.symbol_id] = TYPE_ANY
+				}
+			}
 		}
 	}
 }
@@ -2302,6 +2392,9 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 
 	// Build attrs from class body
 	attrs := make(map[string]Type_ID, 16, ctx.reg.allocator)
+	property_names := make(map[string]bool, 4, ctx.reg.allocator)
+	setter_types := make(map[string]Type_ID, 4, ctx.reg.allocator)
+	final_methods := make(map[string]bool, 4, ctx.reg.allocator)
 
 	// Scan class body for method and attribute definitions
 	// Set class context for Self resolution + cls stripping in method return annotations
@@ -2309,7 +2402,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	saved_class := ctx.current_class
 	ctx.reg.current_resolve_class = class_type_id
 	ctx.current_class = class_type_id
-	scan_class_body_attrs(cd.body, ctx, &attrs)
+	scan_class_body_attrs(cd.body, ctx, &attrs, &property_names, &setter_types, &final_methods)
 	ctx.reg.current_resolve_class = saved_resolve
 	ctx.current_class = saved_class
 
@@ -2352,6 +2445,16 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 				if name not_in attrs {
 					attrs[name] = attr_type
 				}
+			}
+			// Inherit property metadata and final methods
+			for name in base_cls.property_names {
+				if name not_in property_names { property_names[name] = true }
+			}
+			for name, st in base_cls.setter_types {
+				if name not_in setter_types { setter_types[name] = st }
+			}
+			for name in base_cls.final_methods {
+				if name not_in final_methods { final_methods[name] = true }
 			}
 		}
 	}
@@ -2566,16 +2669,27 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 
 	// Check @final method override: if parent has @final method, child can't override
 	for stmt in cd.body {
+		method_name := ""
+		method_loc := parser.Src_Loc{}
 		#partial switch s in stmt {
 		case ^parser.Func_Def:
+			method_name = s.name
+			method_loc = s.loc
+		case ^parser.Async_Func_Def:
+			method_name = s.name
+			method_loc = s.loc
+		}
+		if len(method_name) > 0 {
 			for base_type_id in bases {
 				base_t := get_type(ctx.reg, base_type_id)
 				#partial switch &base_cls in base_t.info {
 				case Class_Type:
-					// Check if base method was @final — we track via a naming convention
-					// For now, check if the base class body had @final on this method
-					// (tracked in the attrs — we don't store final method flags yet,
-					//  but the base's scan would have set it)
+					if method_name in base_cls.final_methods {
+						emit_diagnostic(ctx, method_loc, "T012", .Error,
+							"Cannot override final method",
+							fmt.tprintf("'%s' is declared @final in base class '%s'", method_name, base_cls.name),
+							"Remove the override or the @final decorator from the base class")
+					}
 				}
 			}
 		}
@@ -2590,6 +2704,9 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		info.type_params = type_params
 		info.is_final = class_is_final
 		info.is_enum = is_enum
+		info.property_names = property_names
+		info.setter_types = setter_types
+		info.final_methods = final_methods
 		// Determine enum value type from base names (IntEnum→int, StrEnum→str)
 		if is_enum {
 			for base in cd.bases {
@@ -2750,7 +2867,9 @@ build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_i
 }
 
 // Scan class body for method and attribute definitions, recursing into if/try/with blocks
-scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: ^map[string]Type_ID) {
+scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: ^map[string]Type_ID,
+	property_names: ^map[string]bool = nil, setter_types: ^map[string]Type_ID = nil,
+	final_methods: ^map[string]bool = nil) {
 	for stmt in stmts {
 		#partial switch s in stmt {
 		case ^parser.Func_Def:
@@ -2760,20 +2879,36 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 				ft = TYPE_ANY
 			}
 			// @property: store return type instead of callable (attribute access, not call)
-			// @name.setter / @name.deleter: skip — keep the getter's return type
+			// @name.setter: extract setter value param type
 			is_property := false
-			is_setter_or_deleter := false
+			is_setter := false
+			is_deleter := false
 			for dec in s.decorator_list {
 				#partial switch d in dec {
 				case ^parser.Name_Expr:
 					if d.id == "property" { is_property = true }
 				case ^parser.Attribute_Expr:
 					if d.attr == "property" { is_property = true }
-					if d.attr == "setter" || d.attr == "deleter" { is_setter_or_deleter = true }
+					if d.attr == "setter" { is_setter = true }
+					if d.attr == "deleter" { is_deleter = true }
 				}
 			}
-			if is_setter_or_deleter {
-				// Don't overwrite the property attr — getter's return type is correct
+			if is_setter {
+				// Extract setter value param type (2nd param after self)
+				if setter_types != nil {
+					ft_info := get_type(ctx.reg, ft)
+					if callable, ok := ft_info.info.(Callable_Type); ok {
+						if len(callable.params) >= 1 {
+							// build_func_type strips self, so params[0] is the value param
+							setter_types[s.name] = callable.params[0].type_id
+						}
+					}
+				}
+				// Mark as property name
+				if property_names != nil { property_names[s.name] = true }
+			} else if is_deleter {
+				// Skip — keep getter type, mark as property
+				if property_names != nil { property_names[s.name] = true }
 			} else if is_property {
 				ft_info := get_type(ctx.reg, ft)
 				#partial switch callable in ft_info.info {
@@ -2782,11 +2917,16 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 				case:
 					attrs[s.name] = ft
 				}
+				if property_names != nil { property_names[s.name] = true }
 			} else {
 				attrs[s.name] = ft
 			}
 			if s.name == "__init__" {
 				scan_init_attrs(s, ctx, attrs)
+			}
+			// Track @final methods
+			if final_methods != nil && has_final_decorator(s.decorator_list, ctx.bind_result) {
+				final_methods[s.name] = true
 			}
 		case ^parser.Async_Func_Def:
 			ft := build_async_func_type(s, ctx)
@@ -2796,18 +2936,30 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 			}
 			// Same property/setter handling as sync methods
 			is_property := false
-			is_setter_or_deleter := false
+			is_setter := false
+			is_deleter := false
 			for dec in s.decorator_list {
 				#partial switch d in dec {
 				case ^parser.Name_Expr:
 					if d.id == "property" { is_property = true }
 				case ^parser.Attribute_Expr:
 					if d.attr == "property" { is_property = true }
-					if d.attr == "setter" || d.attr == "deleter" { is_setter_or_deleter = true }
+					if d.attr == "setter" { is_setter = true }
+					if d.attr == "deleter" { is_deleter = true }
 				}
 			}
-			if is_setter_or_deleter {
-				// skip
+			if is_setter {
+				if setter_types != nil {
+					ft_info := get_type(ctx.reg, ft)
+					if callable, ok := ft_info.info.(Callable_Type); ok {
+						if len(callable.params) >= 1 {
+							setter_types[s.name] = callable.params[0].type_id
+						}
+					}
+				}
+				if property_names != nil { property_names[s.name] = true }
+			} else if is_deleter {
+				if property_names != nil { property_names[s.name] = true }
 			} else if is_property {
 				ft_info := get_type(ctx.reg, ft)
 				#partial switch callable in ft_info.info {
@@ -2816,8 +2968,13 @@ scan_class_body_attrs :: proc(stmts: []parser.Stmt, ctx: ^Infer_Context, attrs: 
 				case:
 					attrs[s.name] = ft
 				}
+				if property_names != nil { property_names[s.name] = true }
 			} else {
 				attrs[s.name] = ft
+			}
+			// Track @final methods (async)
+			if final_methods != nil && has_final_decorator(s.decorator_list, ctx.bind_result) {
+				final_methods[s.name] = true
 			}
 		case ^parser.Ann_Assign:
 			declared := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)

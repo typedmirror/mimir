@@ -1,8 +1,8 @@
 {
   "total_run": 6029,
-  "total_passed": 2872,
-  "total_fp": 1040,
-  "total_fn": 5866,
+  "total_passed": 2890,
+  "total_fp": 1001,
+  "total_fn": 5894,
   "results": {
     "testAbstractClassSubclasses": {
       "passed": false,
@@ -224,9 +224,7 @@
       "fn": [
         3
       ],
-      "fp": [
-        4
-      ],
+      "fp": [],
       "file": "check-abstract.test"
     },
     "testReadWriteDeleteAbstractProperty": {
@@ -1236,11 +1234,9 @@
       "file": "check-callable.test"
     },
     "testCallableNotCallable": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        4
-      ],
+      "fp": [],
       "file": "check-callable.test"
     },
     "testUnion": {
@@ -1272,11 +1268,9 @@
       "file": "check-callable.test"
     },
     "testIsinstanceThenCallable": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        9
-      ],
+      "fp": [],
       "file": "check-callable.test"
     },
     "testCallableWithDifferentArgTypes": {
@@ -1411,8 +1405,10 @@
       "file": "check-classes.test"
     },
     "testCallableObject2": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        8
+      ],
       "fp": [],
       "file": "check-callable.test"
     },
@@ -1420,32 +1416,30 @@
       "passed": false,
       "fn": [],
       "fp": [
-        9,
-        12
+        9
       ],
       "file": "check-callable.test"
     },
     "testCallableObjectGeneric": {
       "passed": false,
       "fn": [
-        13
+        10,
+        13,
+        14
       ],
-      "fp": [
-        15
-      ],
+      "fp": [],
       "file": "check-callable.test"
     },
     "testCallablePromote": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        7
-      ],
+      "fp": [],
       "file": "check-callable.test"
     },
     "testCallableTuple": {
       "passed": false,
       "fn": [
+        7,
         9
       ],
       "fp": [],
@@ -2616,11 +2610,9 @@
       "file": "check-classes.test"
     },
     "testSettingDataDescriptor": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        8
-      ],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testReadingDescriptorWithoutDunderGet": {
@@ -2636,12 +2628,9 @@
       "file": "check-classes.test"
     },
     "testSettingGenericDataDescriptor": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        11,
-        13
-      ],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testAccessingNonDataDescriptorSubclass": {
@@ -2651,11 +2640,9 @@
       "file": "check-classes.test"
     },
     "testSettingDataDescriptorSubclass": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        9
-      ],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testReadingDescriptorSubclassWithoutDunderGet": {
@@ -2680,9 +2667,11 @@
       "file": "check-classes.test"
     },
     "testSetDescriptorOnClass": {
-      "passed": true,
+      "passed": false,
       "fn": [],
-      "fp": [],
+      "fp": [
+        10
+      ],
       "file": "check-classes.test"
     },
     "testDescriptorUncallableDunderSet": {
@@ -2692,20 +2681,26 @@
       "file": "check-classes.test"
     },
     "testDescriptorDunderSetTooFewArgs": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        5
+      ],
       "fp": [],
       "file": "check-classes.test"
     },
     "testDescriptorDunderSetTooManyArgs": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        5
+      ],
       "fp": [],
       "file": "check-classes.test"
     },
     "testDescriptorDunderSetWrongArgTypes": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        5
+      ],
       "fp": [],
       "file": "check-classes.test"
     },
@@ -2748,11 +2743,9 @@
       "file": "check-classes.test"
     },
     "testDescriptorGetSetDifferentTypes": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        8
-      ],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testDescriptorGetUnion": {
@@ -4008,27 +4001,21 @@
       "file": "check-classes.test"
     },
     "testOptionalDescriptorsBinder": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        13
-      ],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testUnionDescriptorsBinder": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        15
-      ],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testSubclassDescriptorsBinder": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        15
-      ],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testDecoratedDunderGet": {
@@ -4039,11 +4026,11 @@
     },
     "testDecoratedDunderSet": {
       "passed": false,
-      "fn": [],
+      "fn": [
+        35
+      ],
       "fp": [
-        33,
         36,
-        37,
         38
       ],
       "file": "check-classes.test"
@@ -4683,13 +4670,9 @@
       "file": "check-classes.test"
     },
     "testPropertySetterType": {
-      "passed": false,
-      "fn": [
-        11
-      ],
-      "fp": [
-        9
-      ],
+      "passed": true,
+      "fn": [],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testPropertySetterTypeGeneric": {
@@ -4796,8 +4779,7 @@
     "testPropertyAllowsDeleterBeforeSetter": {
       "passed": false,
       "fn": [
-        14,
-        16
+        14
       ],
       "fp": [
         17
@@ -5645,9 +5627,7 @@
       "fn": [
         22
       ],
-      "fp": [
-        25
-      ],
+      "fp": [],
       "file": "check-dataclass-transform.test"
     },
     "testDataclassTransformUnsupportedDescriptors": {
@@ -6718,6 +6698,7 @@
       "passed": false,
       "fn": [
         7,
+        8,
         9,
         10,
         12
@@ -6816,13 +6797,10 @@
     "testDeprecatedSpecialMethods": {
       "passed": false,
       "fn": [
-        33,
-        34,
         35,
         36,
         38,
-        39,
-        40
+        39
       ],
       "fp": [],
       "file": "check-deprecated.test"
@@ -6832,8 +6810,12 @@
       "fn": [
         30,
         33,
+        34,
+        35,
         38,
-        41
+        41,
+        42,
+        43
       ],
       "fp": [],
       "file": "check-deprecated.test"
@@ -6843,8 +6825,12 @@
       "fn": [
         39,
         42,
+        43,
+        44,
         47,
-        50
+        50,
+        51,
+        52
       ],
       "fp": [],
       "file": "check-deprecated.test"
@@ -6854,8 +6840,12 @@
       "fn": [
         39,
         42,
+        43,
+        44,
         47,
-        50
+        50,
+        51,
+        52
       ],
       "fp": [],
       "file": "check-deprecated.test"
@@ -6875,6 +6865,7 @@
         18,
         19,
         20,
+        21,
         22,
         24,
         27,
@@ -6912,11 +6903,11 @@
         54,
         57,
         58,
+        60,
         63
       ],
       "fp": [
         51,
-        59,
         62
       ],
       "file": "check-deprecated.test"
@@ -10909,19 +10900,14 @@
       "file": "check-final.test"
     },
     "testFinalOverridingMethodRegular": {
-      "passed": false,
-      "fn": [
-        7
-      ],
+      "passed": true,
+      "fn": [],
       "fp": [],
       "file": "check-final.test"
     },
     "testFinalOverridingMethodInitNew": {
-      "passed": false,
-      "fn": [
-        9,
-        10
-      ],
+      "passed": true,
+      "fn": [],
       "fp": [],
       "file": "check-final.test"
     },
@@ -10973,7 +10959,9 @@
       "fn": [
         9
       ],
-      "fp": [],
+      "fp": [
+        10
+      ],
       "file": "check-final.test"
     },
     "testFinalOverridingStaticMethod": {
@@ -10982,7 +10970,10 @@
         12,
         14
       ],
-      "fp": [],
+      "fp": [
+        13,
+        15
+      ],
       "file": "check-final.test"
     },
     "testFinalOverridingProperty": {
@@ -10991,7 +10982,10 @@
         12,
         14
       ],
-      "fp": [],
+      "fp": [
+        13,
+        15
+      ],
       "file": "check-final.test"
     },
     "testFinalOverridingMethodOverloads": {
@@ -10999,7 +10993,11 @@
       "fn": [
         13
       ],
-      "fp": [],
+      "fp": [
+        14,
+        16,
+        17
+      ],
       "file": "check-final.test"
     },
     "testFinalClassNoInheritance": {
@@ -11030,8 +11028,7 @@
     "testFinalCanUseTypingExtensions": {
       "passed": false,
       "fn": [
-        8,
-        14
+        8
       ],
       "fp": [],
       "file": "check-final.test"
@@ -11039,8 +11036,7 @@
     "testFinalCanUseTypingExtensionsAliased": {
       "passed": false,
       "fn": [
-        8,
-        14
+        8
       ],
       "fp": [],
       "file": "check-final.test"
@@ -11092,9 +11088,11 @@
       "file": "check-final.test"
     },
     "testFinalOverrideAllowedForPrivate": {
-      "passed": true,
+      "passed": false,
       "fn": [],
-      "fp": [],
+      "fp": [
+        11
+      ],
       "file": "check-final.test"
     },
     "testFinalWithoutBool": {
@@ -13139,9 +13137,7 @@
       "fn": [],
       "fp": [
         4,
-        5,
-        7,
-        8
+        5
       ],
       "file": "check-functions.test"
     },
@@ -13149,7 +13145,6 @@
       "passed": false,
       "fn": [],
       "fp": [
-        4,
         7,
         8
       ],
@@ -13190,7 +13185,7 @@
       "passed": false,
       "fn": [],
       "fp": [
-        2
+        3
       ],
       "file": "check-functions.test"
     },
@@ -13251,16 +13246,16 @@
       "fn": [],
       "fp": [
         2,
-        4
+        3,
+        4,
+        5
       ],
       "file": "check-functions.test"
     },
     "testForwardRefereceToDecoratedFunctionWithCallExpressionDecorator": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        3
-      ],
+      "fp": [],
       "file": "check-functions.test"
     },
     "testTypeCheckBodyOfConditionalFunction": {
@@ -13827,9 +13822,7 @@
     },
     "testNameForDecoratorMethod": {
       "passed": false,
-      "fn": [
-        6
-      ],
+      "fn": [],
       "fp": [
         7
       ],
@@ -14242,10 +14235,8 @@
       "file": "check-functions.test"
     },
     "testFinalOverrideOnUntypedDef": {
-      "passed": false,
-      "fn": [
-        9
-      ],
+      "passed": true,
+      "fn": [],
       "fp": [],
       "file": "check-functions.test"
     },
@@ -16306,11 +16297,11 @@
     },
     "testPropertyWithGenericSetter": {
       "passed": false,
-      "fn": [],
-      "fp": [
-        20,
-        24
+      "fn": [
+        22,
+        26
       ],
+      "fp": [],
       "file": "check-generics.test"
     },
     "testEmptyParamSpecConsistency": {
@@ -18569,9 +18560,7 @@
     },
     "testMultipassAndDecoratedMethod": {
       "passed": false,
-      "fn": [
-        7
-      ],
+      "fn": [],
       "fp": [
         8
       ],
@@ -19197,43 +19186,41 @@
     },
     "testPartialDefaultDict": {
       "passed": false,
-      "fn": [],
-      "fp": [
-        2
+      "fn": [
+        6,
+        8
       ],
+      "fp": [],
       "file": "check-inference.test"
     },
     "testPartialDefaultDictInconsistentValueTypes": {
+      "passed": false,
+      "fn": [
+        2
+      ],
+      "fp": [],
+      "file": "check-inference.test"
+    },
+    "testPartialDefaultDictListValue": {
       "passed": true,
       "fn": [],
       "fp": [],
       "file": "check-inference.test"
     },
-    "testPartialDefaultDictListValue": {
-      "passed": false,
-      "fn": [],
-      "fp": [
-        2,
-        6
-      ],
-      "file": "check-inference.test"
-    },
     "testPartialDefaultDictListValueStrictOptional": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        2,
-        6
-      ],
+      "fp": [],
       "file": "check-inference.test"
     },
     "testPartialDefaultDictSpecialCases": {
       "passed": false,
       "fn": [
-        11
+        7,
+        11,
+        14
       ],
       "fp": [
-        4,
         5,
         6,
         9
@@ -19243,17 +19230,21 @@
     "testPartialDefaultDictSpecialCases2": {
       "passed": false,
       "fn": [
-        4
+        3,
+        4,
+        7,
+        11,
+        14
       ],
       "fp": [],
       "file": "check-inference.test"
     },
     "testPartialDefaultDictSpecialCase3": {
       "passed": false,
-      "fn": [],
-      "fp": [
-        3
+      "fn": [
+        7
       ],
+      "fp": [],
       "file": "check-inference.test"
     },
     "testInferCallableReturningNone1": {
@@ -21264,12 +21255,11 @@
       "passed": false,
       "fn": [
         11,
-        12
+        12,
+        13
       ],
       "fp": [
-        6,
         7,
-        9,
         10
       ],
       "file": "check-kwargs.test"
@@ -21355,11 +21345,9 @@
       "file": "check-kwargs.test"
     },
     "testBothKindsOfVarArgs": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        5
-      ],
+      "fp": [],
       "file": "check-kwargs.test"
     },
     "testPassingMultipleKeywordVarArgs": {
@@ -24331,11 +24319,9 @@
       "file": "check-narrowing.test"
     },
     "testCustomSetterNarrowingReWidened": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        15
-      ],
+      "fp": [],
       "file": "check-narrowing.test"
     },
     "testNarrowingNotImplemented": {
@@ -24921,6 +24907,7 @@
     "testNewAnalyzerFunctionDecorator": {
       "passed": false,
       "fn": [
+        13,
         15
       ],
       "fp": [
@@ -36708,9 +36695,7 @@
       "fn": [
         25
       ],
-      "fp": [
-        11
-      ],
+      "fp": [],
       "file": "check-selftype.test"
     },
     "testInvalidBaseClass1": {
@@ -38050,11 +38035,9 @@
       "file": "check-super.test"
     },
     "testSuperWithMultipleInheritance": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        9
-      ],
+      "fp": [],
       "file": "check-super.test"
     },
     "testSuperWithNew": {
@@ -41234,27 +41217,23 @@
       "file": "check-typeddict.test"
     },
     "testTypedDictUnpackSame": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        8
-      ],
+      "fp": [],
       "file": "check-typeddict.test"
     },
     "testTypedDictUnpackCompatible": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        11
-      ],
+      "fp": [],
       "file": "check-typeddict.test"
     },
     "testTypedDictUnpackIncompatible": {
       "passed": false,
-      "fn": [],
-      "fp": [
-        12
+      "fn": [
+        13
       ],
+      "fp": [],
       "file": "check-typeddict.test"
     },
     "testTypedDictUnpackNotRequiredKeyIncompatible": {
@@ -41291,24 +41270,22 @@
       "file": "check-typeddict.test"
     },
     "testTypedDictUnpackMultiple": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        16
-      ],
+      "fp": [],
       "file": "check-typeddict.test"
     },
     "testTypedDictUnpackNested": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        13
-      ],
+      "fp": [],
       "file": "check-typeddict.test"
     },
     "testTypedDictUnpackNestedError": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        13
+      ],
       "fp": [],
       "file": "check-typeddict.test"
     },
@@ -45904,10 +45881,10 @@
     },
     "testCallingWithListVarArgs": {
       "passed": false,
-      "fn": [],
-      "fp": [
-        15
+      "fn": [
+        14
       ],
+      "fp": [],
       "file": "check-varargs.test"
     },
     "testCallingWithTupleVarArgs": {
@@ -45936,12 +45913,12 @@
     },
     "testCallingVarArgsFunctionWithListVarArgs": {
       "passed": false,
-      "fn": [],
+      "fn": [
+        12
+      ],
       "fp": [
-        19,
         20,
-        21,
-        22
+        21
       ],
       "file": "check-varargs.test"
     },
@@ -45970,13 +45947,9 @@
       "file": "check-varargs.test"
     },
     "testListVarArgsAndSubtyping": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        15,
-        16,
-        17
-      ],
+      "fp": [],
       "file": "check-varargs.test"
     },
     "testCallerVarArgsAndDefaultArgs": {
@@ -45997,11 +45970,9 @@
       "file": "check-varargs.test"
     },
     "testVarArgsAfterKeywordArgInCall4": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        2
-      ],
+      "fp": [],
       "file": "check-varargs.test"
     },
     "testVarArgsAfterKeywordArgInCall5": {
@@ -46122,9 +46093,7 @@
       "fn": [
         22
       ],
-      "fp": [
-        20
-      ],
+      "fp": [],
       "file": "check-varargs.test"
     },
     "testUnpackKwargsReveal": {

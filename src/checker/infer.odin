@@ -331,6 +331,24 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			case Dict_Type:
 				key_expected = exp_info.key
 				val_expected = exp_info.value
+			case TypedDict_Type:
+				key_expected = TYPE_STR
+				val_expected = TYPE_ANY
+			}
+		}
+		// Dict literal with **unpacking against TypedDict target: be permissive
+		// {**td, "key": val} is the standard TypedDict update pattern
+		has_unpack := false
+		for k in e.keys {
+			if k == nil { has_unpack = true; break }
+		}
+		if has_unpack && expected != TYPE_UNKNOWN {
+			exp_t := get_type(ctx.reg, expected)
+			#partial switch _ in exp_t.info {
+			case TypedDict_Type:
+				// Infer all values for side effects, return expected TypedDict
+				for v in e.values { infer_expr(v, ctx) }
+				return expected
 			}
 		}
 		if len(e.keys) == 0 {
@@ -986,14 +1004,32 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 		}
 	}
 
-	// super() or super(Cls, self) → Instance of first base class in current class context
+	// super() or super(Cls, self) → Instance with merged attrs from all base classes (MRO)
 	if name_expr, ok := e.func.(^parser.Name_Expr); ok && name_expr.id == "super" && (len(e.args) == 0 || len(e.args) == 2) && len(e.keywords) == 0 {
 		if ctx.current_class != INVALID_TYPE {
 			cls := get_type(ctx.reg, ctx.current_class)
 			#partial switch cls_info in cls.info {
 			case Class_Type:
-				if len(cls_info.bases) > 0 {
+				if len(cls_info.bases) == 1 {
 					return make_instance_type(ctx.reg, cls_info.bases[0])
+				}
+				if len(cls_info.bases) > 1 {
+					// Multiple inheritance: merge attrs from all bases
+					merged := make(map[string]Type_ID, 16, ctx.reg.allocator)
+					for base_id in cls_info.bases {
+						bt := get_type(ctx.reg, base_id)
+						if bci, ok := bt.info.(Class_Type); ok {
+							for name, attr_type in bci.attrs {
+								if name not_in merged { merged[name] = attr_type }
+							}
+						}
+					}
+					super_class := register_type(ctx.reg, Class_Type{
+						name  = "super",
+						attrs = merged,
+						bases = cls_info.bases,
+					})
+					return make_instance_type(ctx.reg, super_class)
 				}
 			}
 		}
@@ -1349,6 +1385,12 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 			}
 		}
 
+		// defaultdict: all constructor args are optional (0-2 args valid)
+		if info.name == "defaultdict" {
+			for arg in e.args { infer_expr(arg, ctx) }
+			return make_instance_type(ctx.reg, func_type)
+		}
+
 		// Enum functional form: Enum('Name', 'members', ...) uses metaclass constructor
 		// The __init__ signature doesn't match; skip arg checking for enum class calls
 		if info.is_enum || info.name == "Enum" || info.name == "IntEnum" ||
@@ -1592,7 +1634,25 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 		arg_check_count := min(n_args - unbound_offset, n_params)
 		for i := 0; i < arg_check_count; i += 1 {
 			param_type := func_info.params[i].type_id
-			arg_type := infer_expr(e.args[i + unbound_offset], ctx, param_type)
+			arg := e.args[i + unbound_offset]
+			// For *starred args: check element type, not container type
+			is_starred := false
+			if _, star_ok := arg.(^parser.Starred_Expr); star_ok { is_starred = true }
+			arg_type := infer_expr(arg, ctx, param_type)
+			if is_starred {
+				// Extract element type from container: *list[T] → T, *tuple[T,...] → T
+				at := get_type(ctx.reg, arg_type)
+				#partial switch ai in at.info {
+				case List_Type: arg_type = ai.element
+				case Set_Type: arg_type = ai.element
+				case Tuple_Type:
+					if ai.is_variadic && len(ai.elements) == 1 {
+						arg_type = ai.elements[0]
+					} else if len(ai.elements) > 0 {
+						arg_type = make_union_type(ctx.reg, ai.elements)
+					}
+				}
+			}
 			if _is_any_type(param_type, ctx.reg) || param_type == TYPE_UNKNOWN ||
 			   arg_type == TYPE_UNKNOWN || _is_any_type(arg_type, ctx.reg) ||
 			   _union_has_unknown(arg_type, ctx.reg) {

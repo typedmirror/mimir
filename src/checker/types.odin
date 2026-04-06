@@ -106,6 +106,9 @@ Class_Type :: struct {
 	is_enum:            bool,
 	enum_value_type:    Type_ID,  // For IntEnum→TYPE_INT, StrEnum→TYPE_STR, etc.
 	abstract_methods:   map[string]bool,
+	final_methods:      map[string]bool,    // Methods decorated with @final
+	property_names:     map[string]bool,    // Attrs that are @property (have getter)
+	setter_types:       map[string]Type_ID, // Property setter value param types
 }
 
 Instance_Type :: struct {

@@ -17,6 +17,8 @@ Guard_Kind :: enum u8 {
 	Type_Is_Not,
 	Type_Guard,       // TypeGuard function call — resolved_type has target
 	Type_Is_Guard,    // TypeIs (PEP 742) — narrows in BOTH branches (subtract in false)
+	Is_Callable,      // callable(x) — narrows to callable types only
+	Is_Not_Callable,  // not callable(x) — removes callable types
 }
 
 Guard :: struct {
@@ -121,6 +123,19 @@ analyze_condition :: proc(
 						loc          = loc,
 					})
 				}
+			}
+		} else if is_callable_call(e) && len(e.args) >= 1 {
+			// callable(x) — narrows to callable types in true branch
+			sym_id := expr_to_symbol(e.args[0], bind_result, scope_id)
+			if sym_id != binder.INVALID_SYMBOL {
+				append(guards, Guard{
+					kind         = .Is_Callable,
+					symbol_id    = sym_id,
+					branch_block = branch_block,
+					true_block   = true_block,
+					false_block  = false_block,
+					loc          = loc,
+				})
 			}
 		} else if len(e.args) >= 1 {
 			// Potential TypeGuard call: func(arg) where func returns TypeGuard[T]
@@ -321,6 +336,14 @@ is_isinstance_call :: proc(call: ^parser.Call_Expr, bind_result: ^binder.Bind_Re
 	return false
 }
 
+is_callable_call :: proc(call: ^parser.Call_Expr) -> bool {
+	#partial switch f in call.func {
+	case ^parser.Name_Expr:
+		return f.id == "callable"
+	}
+	return false
+}
+
 is_none_compare :: proc(cmp: ^parser.Compare_Expr) -> bool {
 	if len(cmp.ops) != 1 { return false }
 	op := cmp.ops[0]
@@ -415,6 +438,8 @@ invert_guard_kind :: proc(kind: Guard_Kind) -> Guard_Kind {
 	case .Type_Is_Not:     return .Type_Is
 	case .Type_Guard:      return .Type_Guard  // TypeGuard inversion: no narrowing in false branch
 	case .Type_Is_Guard:   return .Type_Is_Guard // TypeIs: narrowing in both branches
+	case .Is_Callable:     return .Is_Not_Callable
+	case .Is_Not_Callable: return .Is_Callable
 	}
 	return kind
 }
