@@ -401,6 +401,110 @@ compute_merge_result :: proc(reg: ^Type_Registry, left_type: Type_ID, right_type
 	return make_dataframe_type(reg, result_cols)
 }
 
+// ==================== DATA004: Unnecessary DataFrame Copy ====================
+//
+// Detect df.copy() when the result is never modified — suggests removing the copy.
+// Also detects chained .copy() calls (already a copy).
+
+check_unnecessary_copy :: proc(
+	stmts: []parser.Stmt,
+	file_path: string,
+	diagnostics: ^[dynamic]core.Diagnostic,
+) {
+	// Collect variables assigned from .copy() calls
+	copy_vars := make(map[string]parser.Src_Loc, 8, context.temp_allocator)
+	mutated_vars := make(map[string]bool, 8, context.temp_allocator)
+
+	_collect_copy_vars(stmts, &copy_vars, &mutated_vars)
+
+	// Flag copy vars that are never mutated
+	for name, loc in copy_vars {
+		if name not_in mutated_vars {
+			append(diagnostics, core.Diagnostic{
+				severity = .Info,
+				location = core.Location{
+					file   = file_path,
+					line   = int(loc.line),
+					column = int(loc.col),
+				},
+				code = "DATA004",
+				what = fmt.tprintf("DataFrame '%s' copied but never modified", name),
+				why  = ".copy() allocates new memory for the entire DataFrame — unnecessary if the copy is never mutated",
+				fix  = "remove .copy() and use the original DataFrame directly",
+			})
+		}
+	}
+}
+
+@(private = "file")
+_collect_copy_vars :: proc(
+	stmts: []parser.Stmt,
+	copy_vars: ^map[string]parser.Src_Loc,
+	mutated_vars: ^map[string]bool,
+) {
+	DF_MUTATION_METHODS :: [?]string{
+		"drop", "rename", "fillna", "dropna", "sort_values", "reset_index",
+		"assign", "insert", "pop", "update", "replace",
+	}
+
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Assign:
+			if s.value == nil { continue }
+			// x = df.copy()
+			if len(s.targets) == 1 {
+				if name, ok := s.targets[0].(^parser.Name_Expr); ok {
+					if call, cok := s.value.(^parser.Call_Expr); cok {
+						if attr, aok := call.func.(^parser.Attribute_Expr); aok {
+							if attr.attr == "copy" {
+								copy_vars[name.id] = s.loc
+							}
+						}
+					}
+				}
+			}
+			// Check for mutation via subscript assignment: df["col"] = ...
+			for target in s.targets {
+				if sub, ok := target.(^parser.Subscript_Expr); ok {
+					if name, nok := sub.value.(^parser.Name_Expr); nok {
+						mutated_vars[name.id] = true
+					}
+				}
+			}
+		case ^parser.Expr_Stmt:
+			// Check for inplace=True method calls
+			if call, ok := s.value.(^parser.Call_Expr); ok {
+				if attr, aok := call.func.(^parser.Attribute_Expr); aok {
+					if recv, nok := attr.value.(^parser.Name_Expr); nok {
+						for m in DF_MUTATION_METHODS {
+							if attr.attr == m {
+								// Check for inplace=True
+								for kw in call.keywords {
+									if kw.arg == "inplace" {
+										mutated_vars[recv.id] = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		case ^parser.Aug_Assign:
+			// df += something
+			if name, ok := s.target.(^parser.Name_Expr); ok {
+				mutated_vars[name.id] = true
+			}
+		case ^parser.Func_Def:
+			_collect_copy_vars(s.body, copy_vars, mutated_vars)
+		case ^parser.If_Stmt:
+			_collect_copy_vars(s.body, copy_vars, mutated_vars)
+			_collect_copy_vars(s.orelse, copy_vars, mutated_vars)
+		case ^parser.For_Stmt:
+			_collect_copy_vars(s.body, copy_vars, mutated_vars)
+		}
+	}
+}
+
 // Compute renamed DataFrame columns from a rename mapping.
 compute_rename_result :: proc(reg: ^Type_Registry, df_type: Type_ID, rename_map: map[string]string) -> Type_ID {
 	t := get_type(reg, df_type)

@@ -226,7 +226,12 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 			// Skip private attrs (_prefix) — instance attrs from __init__ not tracked
 			is_dunder := len(e.attr) > 4 && e.attr[:2] == "__" && e.attr[len(e.attr)-2:] == "__"
 			is_private := len(e.attr) > 1 && e.attr[0] == '_' && !is_dunder
-			if should_flag && !is_dunder && !is_private {
+			// Skip self.attr in method bodies — attrs may be set dynamically in methods
+			is_self_access := false
+			if name, nok := e.value.(^parser.Name_Expr); nok {
+				if name.id == "self" && ctx.current_class != INVALID_TYPE { is_self_access = true }
+			}
+			if should_flag && !is_dunder && !is_private && !is_self_access {
 				emit_diagnostic(ctx, e.loc, "T007", .Error,
 					"Undefined attribute",
 					fmt.aprintf("Type '%s' has no attribute '%s'",

@@ -50,8 +50,15 @@ format_file :: proc(
 	// Collect AST structural info for formatting decisions
 	info := collect_structure(module, allocator)
 
-	// Pass 1: Trailing whitespace + indentation normalization
+	// Pass 0: Import sorting (stdlib → third-party → local, alphabetical within groups)
 	any_changed := false
+	sorted_lines, sort_changed := sort_imports(lines, module, allocator)
+	if sort_changed {
+		lines = sorted_lines
+		any_changed = true
+	}
+
+	// Pass 1: Trailing whitespace + indentation normalization
 	for i := 0; i < len(lines); i += 1 {
 		new_line := normalize_line(lines[i], config, allocator)
 		if new_line != lines[i] {
@@ -1237,4 +1244,168 @@ get_expr_end :: proc(expr: parser.Expr) -> (int, int) {
 	case ^parser.Slice_Expr:      return int(e.loc.end_line), int(e.loc.end_col)
 	}
 	return 0, 0
+}
+
+// ==================== Pass 0: Import Sorting ====================
+//
+// Groups imports into three sections:
+//   1. __future__ imports
+//   2. stdlib imports  (is_stdlib_module from platform)
+//   3. third-party / local imports
+// Sorts alphabetically within each group. Separates groups with blank lines.
+
+Import_Entry :: struct {
+	line_text:  string,
+	module_name: string,  // top-level module for sorting
+	group:      int,      // 0=future, 1=stdlib, 2=third-party
+	line_idx:   int,      // original line index
+}
+
+sort_imports :: proc(
+	lines: []string,
+	module: ^parser.Module,
+	allocator: mem.Allocator,
+) -> (result: []string, changed: bool) {
+	// Find the contiguous import block at the top of the file
+	// (after docstrings/comments, before first non-import statement)
+	import_start := -1
+	import_end := -1  // exclusive
+
+	for stmt, si in module.body {
+		is_import := false
+		#partial switch s in stmt {
+		case ^parser.Import_Stmt:  is_import = true
+		case ^parser.Import_From:  is_import = true
+		}
+
+		if is_import {
+			line_idx := int(stmt_loc(stmt).line) - 1
+			if import_start < 0 { import_start = line_idx }
+			import_end = line_idx + 1
+		} else if import_start >= 0 {
+			// Non-import after imports — stop
+			break
+		}
+	}
+
+	if import_start < 0 || import_end <= import_start { return lines, false }
+
+	// Collect import entries with their groups
+	entries := make([dynamic]Import_Entry, 0, import_end - import_start, allocator)
+	for stmt in module.body {
+		line_idx := int(stmt_loc(stmt).line) - 1
+		if line_idx < import_start || line_idx >= import_end { continue }
+
+		mod_name := ""
+		#partial switch s in stmt {
+		case ^parser.Import_Stmt:
+			if len(s.names) > 0 { mod_name = s.names[0].name }
+		case ^parser.Import_From:
+			mod_name = s.module
+		case:
+			continue
+		}
+
+		// Determine group
+		group := 2 // default: third-party
+		if mod_name == "__future__" {
+			group = 0
+		} else {
+			// Extract top-level module name
+			top := mod_name
+			for i := 0; i < len(mod_name); i += 1 {
+				if mod_name[i] == '.' { top = mod_name[:i]; break }
+			}
+			if is_stdlib_module(top) { group = 1 }
+		}
+
+		append(&entries, Import_Entry{
+			line_text   = lines[line_idx],
+			module_name = mod_name,
+			group       = group,
+			line_idx    = line_idx,
+		})
+	}
+
+	if len(entries) <= 1 { return lines, false }
+
+	// Sort: by group, then alphabetically by module_name
+	_sort_import_entries(entries[:])
+
+	// Build sorted import lines with group separators
+	sorted := make([dynamic]string, 0, len(entries) + 4, allocator)
+	prev_group := -1
+	for entry in entries {
+		if prev_group >= 0 && entry.group != prev_group {
+			append(&sorted, "") // blank line between groups
+		}
+		append(&sorted, entry.line_text)
+		prev_group = entry.group
+	}
+
+	// Check if anything actually changed
+	old_block := make([dynamic]string, 0, import_end - import_start, allocator)
+	for i := import_start; i < import_end; i += 1 {
+		line := lines[i]
+		// Skip blank lines in the original block for comparison
+		if len(strings.trim_space(line)) > 0 || (len(old_block) > 0) {
+			append(&old_block, line)
+		}
+	}
+
+	// Quick change detection: compare sorted output length and content
+	if len(sorted) == len(old_block) {
+		all_same := true
+		for i := 0; i < len(sorted); i += 1 {
+			if sorted[i] != old_block[i] { all_same = false; break }
+		}
+		if all_same { return lines, false }
+	}
+
+	// Rebuild output: lines before imports + sorted imports + lines after
+	out := make([dynamic]string, 0, len(lines) + 4, allocator)
+	for i := 0; i < import_start; i += 1 { append(&out, lines[i]) }
+	for s in sorted { append(&out, s) }
+	for i := import_end; i < len(lines); i += 1 { append(&out, lines[i]) }
+
+	return out[:], true
+}
+
+// Simple insertion sort for import entries (small N).
+@(private = "file")
+_sort_import_entries :: proc(entries: []Import_Entry) {
+	for i := 1; i < len(entries); i += 1 {
+		j := i
+		for j > 0 && _import_less(entries[j], entries[j - 1]) {
+			entries[j], entries[j - 1] = entries[j - 1], entries[j]
+			j -= 1
+		}
+	}
+}
+
+@(private = "file")
+_import_less :: proc(a, b: Import_Entry) -> bool {
+	if a.group != b.group { return a.group < b.group }
+	return a.module_name < b.module_name
+}
+
+// Helper to get location from any statement.
+@(private = "file")
+stmt_loc :: proc(stmt: parser.Stmt) -> parser.Src_Loc {
+	#partial switch s in stmt {
+	case ^parser.Import_Stmt:    return s.loc
+	case ^parser.Import_From:    return s.loc
+	case ^parser.Func_Def:       return s.loc
+	case ^parser.Async_Func_Def: return s.loc
+	case ^parser.Class_Def:      return s.loc
+	case ^parser.Assign:         return s.loc
+	case ^parser.Ann_Assign:     return s.loc
+	case ^parser.Expr_Stmt:      return s.loc
+	case ^parser.If_Stmt:        return s.loc
+	case ^parser.For_Stmt:       return s.loc
+	case ^parser.While_Stmt:     return s.loc
+	case ^parser.Return_Stmt:    return s.loc
+	case ^parser.Pass_Stmt:      return s.loc
+	}
+	return {}
 }

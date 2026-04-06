@@ -51,6 +51,9 @@ analyze_concurrency :: proc(
 	// Pass 2: run all concurrency rules
 	check_stmts(&ctx, module.body, false)
 
+	// Pass 3: CONC008 — gather shared state mutation
+	check_gather_shared_state(&ctx, module.body)
+
 	return ctx.diagnostics[:]
 }
 
@@ -212,6 +215,100 @@ check_stmts :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, in_async: b
 			}
 		}
 	}
+}
+
+// CONC008: Shared mutable state in gather tasks
+// Pattern: gather(worker(x), worker(y)) where worker mutates a shared list/dict
+check_gather_shared_state :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt) {
+	// Find gather() calls — check in all scopes, but resolve task functions at module level
+	module_stmts := ctx.module.body
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			_check_gather_shared(ctx, s.value, module_stmts)
+		case ^parser.Assign:
+			_check_gather_shared(ctx, s.value, module_stmts)
+		case ^parser.Func_Def:
+			check_gather_shared_state(ctx, s.body)
+		case ^parser.Async_Func_Def:
+			check_gather_shared_state(ctx, s.body)
+		}
+	}
+}
+
+@(private = "file")
+_check_gather_shared :: proc(ctx: ^Concurrency_Context, expr: parser.Expr, scope_stmts: []parser.Stmt) {
+	if expr == nil { return }
+	// Unwrap await
+	inner := expr
+	if aw, ok := inner.(^parser.Await_Expr); ok { inner = aw.value }
+
+	call, call_ok := inner.(^parser.Call_Expr)
+	if !call_ok { return }
+
+	// Check for asyncio.gather() or gather()
+	is_gather := false
+	if attr, ok := call.func.(^parser.Attribute_Expr); ok {
+		if attr.attr == "gather" { is_gather = true }
+	} else if name, ok := call.func.(^parser.Name_Expr); ok {
+		if mod, has := ctx.import_map[name.id]; has && mod == "asyncio" { is_gather = true }
+		if name.id == "gather" { is_gather = true }
+	}
+	if !is_gather || len(call.args) < 2 { return }
+
+	// Collect function names passed to gather as coroutines
+	task_func_names := make([dynamic]string, 0, len(call.args), ctx.allocator)
+	for arg in call.args {
+		if c, ok := arg.(^parser.Call_Expr); ok {
+			if name, nok := c.func.(^parser.Name_Expr); nok {
+				append(&task_func_names, name.id)
+			}
+		}
+	}
+
+	// For each task function, check if its body mutates module-scope variables
+	// Deduplicate: only report once per gather call
+	reported := false
+	for func_name in task_func_names {
+		if reported { break }
+		for stmt in scope_stmts {
+			if reported { break }
+			#partial switch fd in stmt {
+			case ^parser.Func_Def:
+				if fd.name == func_name {
+					if _check_body_for_shared_mutation(ctx, fd.body, call.loc) { reported = true }
+				}
+			case ^parser.Async_Func_Def:
+				if fd.name == func_name {
+					if _check_body_for_shared_mutation(ctx, fd.body, call.loc) { reported = true }
+				}
+			}
+		}
+	}
+}
+
+@(private = "file")
+_check_body_for_shared_mutation :: proc(ctx: ^Concurrency_Context, stmts: []parser.Stmt, gather_loc: parser.Src_Loc) -> bool {
+	MUTATION_METHODS :: [?]string{"append", "extend", "add", "insert", "update", "pop", "remove"}
+	for stmt in stmts {
+		#partial switch s in stmt {
+		case ^parser.Expr_Stmt:
+			if c, ok := s.value.(^parser.Call_Expr); ok {
+				if attr, aok := c.func.(^parser.Attribute_Expr); aok {
+					for m in MUTATION_METHODS {
+						if attr.attr == m {
+							emit(ctx, "CONC008", gather_loc,
+								fmt.tprintf("gather tasks mutate shared state via '.%s()'", attr.attr),
+								"concurrent coroutines sharing mutable state causes race conditions — gather runs tasks concurrently",
+								"use asyncio.Queue, return results from tasks, or use a lock")
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Emit a diagnostic

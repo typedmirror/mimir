@@ -178,7 +178,7 @@ openapi_type_to_python :: proc(openapi_type: string) -> string {
 // ==================== OpenAPI Spec Parsing ====================
 
 find_openapi_spec :: proc(file_path: string, allocator: mem.Allocator) -> string {
-	// Look for openapi.json in same directory as the source file
+	// Look for openapi.json/yaml in same directory as the source file
 	dir := file_path
 	for i := len(dir) - 1; i >= 0; i -= 1 {
 		if dir[i] == '/' {
@@ -187,18 +187,42 @@ find_openapi_spec :: proc(file_path: string, allocator: mem.Allocator) -> string
 		}
 	}
 
-	// Search for openapi.json, openapi.yaml, openapi.yml (JSON only parsed)
+	// Search for openapi.json first, then YAML variants
 	SPEC_NAMES :: [?]string{"openapi.json", "openapi.yaml", "openapi.yml"}
 	for name in SPEC_NAMES {
 		candidate := fmt.tprintf("%s/%s", dir, name)
 		if os.exists(candidate) {
-			// Only parse JSON format — YAML needs external converter
 			if strings.has_suffix(name, ".json") {
 				return candidate
 			}
+			// YAML found — convert to JSON via Python
+			json_path := _convert_yaml_to_json(candidate, allocator)
+			if len(json_path) > 0 { return json_path }
 		}
 	}
 
+	return ""
+}
+
+// Convert a YAML file to JSON using Python's yaml + json modules.
+// Returns path to temp JSON file, or "" if conversion fails.
+@(private = "file")
+_convert_yaml_to_json :: proc(yaml_path: string, allocator: mem.Allocator) -> string {
+	pid := os.get_pid()
+	json_path := fmt.aprintf("/tmp/mimir_openapi_%d.json", pid, allocator = allocator)
+	script := fmt.tprintf(
+		"import yaml, json, sys; data = yaml.safe_load(open('%s')); json.dump(data, open('%s', 'w'))",
+		yaml_path, json_path)
+
+	state, _, _, exec_err := os.process_exec({
+		command = {"python3", "-c", script},
+	}, allocator)
+	if exec_err != nil || state.exit_code != 0 {
+		return ""
+	}
+	if os.is_file(json_path) {
+		return json_path
+	}
 	return ""
 }
 
