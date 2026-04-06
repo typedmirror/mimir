@@ -710,6 +710,23 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 		#partial switch tgt in tgt_type.info {
 		case Instance_Type:
 			if is_class_subtype(reg, src.class_type, tgt.class_type) { return true }
+			// Protocol structural matching: if target class has a Protocol_Type counterpart,
+			// use protocol matching (handles `-> P` return types resolved before build_protocol_class)
+			{
+				tgt_proto_cls := get_type(reg, tgt.class_type)
+				if tgt_pci, tgt_pok := tgt_proto_cls.info.(Class_Type); tgt_pok {
+					qsym := Qualified_Symbol{file_id = reg.current_file_id, sym_id = tgt_pci.symbol_id}
+					if proto_id, has_proto := reg.proto_for_class[qsym]; has_proto {
+						pt := get_type(reg, proto_id)
+						if proto, proto_ok := pt.info.(Protocol_Type); proto_ok {
+							src_proto_cls := get_type(reg, src.class_type)
+							if src_pci, src_pok := src_proto_cls.info.(Class_Type); src_pok {
+								if _match_protocol(&src_pci, &proto, reg) { return true }
+							}
+						}
+					}
+				}
+			}
 			// Generic specialization creates different Type_IDs for same class.
 			// Check if both are specializations of the same base class (same name + symbol_id)
 			// with bidirectional attr compatibility (invariant — prevents G[int] → G[str]).
@@ -965,6 +982,8 @@ _match_protocol :: proc(cls_info: ^Class_Type, proto: ^Protocol_Type, reg: ^Type
 	for method_name, method_type in proto.methods {
 		cls_attr, ok := cls_info.attrs[method_name]
 		if !ok { return false }
+		// TYPE_ANY attrs are uncertain (from unresolved decorators) — don't trust match
+		if cls_attr == TYPE_ANY || _is_any_type(cls_attr, reg) { return false }
 		if method_type != TYPE_UNKNOWN && cls_attr != TYPE_UNKNOWN {
 			if !is_assignable(reg, cls_attr, method_type) { return false }
 		}
@@ -972,6 +991,7 @@ _match_protocol :: proc(cls_info: ^Class_Type, proto: ^Protocol_Type, reg: ^Type
 	for attr_name, attr_type in proto.attrs {
 		cls_attr, ok := cls_info.attrs[attr_name]
 		if !ok { return false }
+		if cls_attr == TYPE_ANY || _is_any_type(cls_attr, reg) { return false }
 		if attr_type != TYPE_UNKNOWN && cls_attr != TYPE_UNKNOWN {
 			if !is_assignable(reg, cls_attr, attr_type) { return false }
 		}

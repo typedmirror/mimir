@@ -2,7 +2,7 @@
   "total_run": 6029,
   "total_passed": 2899,
   "total_fp": 979,
-  "total_fn": 5901,
+  "total_fn": 5902,
   "results": {
     "testAbstractClassSubclasses": {
       "passed": false,
@@ -30247,11 +30247,9 @@
       "file": "check-protocols.test"
     },
     "testSimpleProtocolOneMethod": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        25
-      ],
+      "fp": [],
       "file": "check-protocols.test"
     },
     "testSimpleProtocolOneAbstractMethod": {
@@ -30520,8 +30518,10 @@
       "file": "check-protocols.test"
     },
     "testMutuallyRecursiveProtocolsTypesWithSubteMismatchWriteable": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        14
+      ],
       "fp": [],
       "file": "check-protocols.test"
     },
@@ -30581,10 +30581,8 @@
       "file": "check-protocols.test"
     },
     "testFinalAttributeProtocol": {
-      "passed": false,
-      "fn": [
-        16
-      ],
+      "passed": true,
+      "fn": [],
       "fp": [],
       "file": "check-protocols.test"
     },
@@ -30824,7 +30822,10 @@
       "fn": [
         27
       ],
-      "fp": [],
+      "fp": [
+        23,
+        25
+      ],
       "file": "check-protocols.test"
     },
     "testErrorsForProtocolsInDifferentPlaces": {
@@ -31398,8 +31399,10 @@
       "file": "check-protocols.test"
     },
     "testProtocolCheckDefersNode": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        11
+      ],
       "fp": [],
       "file": "check-protocols.test"
     },
@@ -36673,9 +36676,7 @@
       "fn": [
         25
       ],
-      "fp": [
-        11
-      ],
+      "fp": [],
       "file": "check-selftype.test"
     },
     "testInvalidBaseClass1": {
