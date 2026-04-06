@@ -1,8 +1,8 @@
 {
   "total_run": 6029,
-  "total_passed": 2890,
-  "total_fp": 1001,
-  "total_fn": 5894,
+  "total_passed": 2899,
+  "total_fp": 979,
+  "total_fn": 5901,
   "results": {
     "testAbstractClassSubclasses": {
       "passed": false,
@@ -4125,9 +4125,7 @@
       "fn": [
         3
       ],
-      "fp": [
-        6
-      ],
+      "fp": [],
       "file": "check-classes.test"
     },
     "testNewReturnType1": {
@@ -4340,6 +4338,7 @@
     "testCheckUntypedDefsSelf1": {
       "passed": false,
       "fn": [
+        20,
         24
       ],
       "fp": [],
@@ -16400,11 +16399,9 @@
       "file": "check-ignore.test"
     },
     "testIgnoredModuleDefinesBaseClass1": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        6
-      ],
+      "fp": [],
       "file": "check-ignore.test"
     },
     "testIgnoredModuleDefinesBaseClass2": {
@@ -16422,19 +16419,15 @@
       "file": "check-ignore.test"
     },
     "testIgnoredModuleDefinesBaseClassWithInheritance1": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        7
-      ],
+      "fp": [],
       "file": "check-ignore.test"
     },
     "testIgnoredModuleDefinesBaseClassWithInheritance2": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        7
-      ],
+      "fp": [],
       "file": "check-ignore.test"
     },
     "testCannotIgnoreBlockingError": {
@@ -17037,11 +17030,9 @@
       "file": "check-inference-context.test"
     },
     "testLambdaDeferredCrash": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        5
-      ],
+      "fp": [],
       "file": "check-inference-context.test"
     },
     "testInferTypeVariableFromTwoGenericTypes1": {
@@ -17972,11 +17963,9 @@
       "file": "check-inference.test"
     },
     "testLambdaDeferredSpecialCase": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        5
-      ],
+      "fp": [],
       "file": "check-inference.test"
     },
     "testLambdaJoinWithDynamicConstructor": {
@@ -18141,10 +18130,10 @@
     },
     "testInferListInitializedToEmptyInMethodViaAttribute": {
       "passed": false,
-      "fn": [],
-      "fp": [
-        5
+      "fn": [
+        6
       ],
+      "fp": [],
       "file": "check-inference.test"
     },
     "testInferListInitializedToEmptyInClassBodyAndOverridden": {
@@ -18471,8 +18460,10 @@
       "file": "check-inference.test"
     },
     "testAttributePartiallyInitializedToNone": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        5
+      ],
       "fp": [],
       "file": "check-inference.test"
     },
@@ -18545,9 +18536,7 @@
       "fn": [
         4
       ],
-      "fp": [
-        3
-      ],
+      "fp": [],
       "file": "check-inference.test"
     },
     "testMultipassAndTopLevelVariable": {
@@ -18568,10 +18557,10 @@
     },
     "testMultipassAndDefineAttributeBasedOnNotReadyAttribute": {
       "passed": false,
-      "fn": [],
-      "fp": [
-        3
+      "fn": [
+        9
       ],
+      "fp": [],
       "file": "check-inference.test"
     },
     "testMultipassAndPartialTypes": {
@@ -18611,10 +18600,10 @@
     },
     "testMultipassAndCircularDependency": {
       "passed": false,
-      "fn": [],
-      "fp": [
-        6
+      "fn": [
+        3
       ],
+      "fp": [],
       "file": "check-inference.test"
     },
     "testMultipassAndPartialTypesSpecialCase1": {
@@ -19221,8 +19210,6 @@
         14
       ],
       "fp": [
-        5,
-        6,
         9
       ],
       "file": "check-inference.test"
@@ -22501,19 +22488,15 @@
       "file": "check-modules.test"
     },
     "testDeferredClassContext": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        4
-      ],
+      "fp": [],
       "file": "check-modules.test"
     },
     "testDeferredClassContextUnannotated": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        4
-      ],
+      "fp": [],
       "file": "check-modules.test"
     },
     "testModuleLevelGetattribute": {
@@ -25132,11 +25115,9 @@
       "file": "check-newsemanal.test"
     },
     "testNewAnalyzerClassLevelImport": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        4
-      ],
+      "fp": [],
       "file": "check-newsemanal.test"
     },
     "testNewAnalyzerAliasToNotReadyClass2": {
@@ -26422,8 +26403,10 @@
       "file": "check-optional.test"
     },
     "testNarrowOptionalOutsideLambdaWithDeferred": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        8
+      ],
       "fp": [],
       "file": "check-optional.test"
     },
@@ -34450,8 +34433,7 @@
         99
       ],
       "fp": [
-        94,
-        155
+        94
       ],
       "file": "check-python38.test"
     },
@@ -36051,11 +36033,9 @@
       "file": "check-selftype.test"
     },
     "testSelfTypeProperSupertypeAttributeGeneric": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        10
-      ],
+      "fp": [],
       "file": "check-selftype.test"
     },
     "testSelfTypeRestrictedMethod": {
@@ -36105,9 +36085,7 @@
         24,
         27
       ],
-      "fp": [
-        8
-      ],
+      "fp": [],
       "file": "check-selftype.test"
     },
     "testMixinProtocolSuper": {
@@ -36695,7 +36673,9 @@
       "fn": [
         25
       ],
-      "fp": [],
+      "fp": [
+        11
+      ],
       "file": "check-selftype.test"
     },
     "testInvalidBaseClass1": {
@@ -40918,10 +40898,8 @@
       "file": "check-typeddict.test"
     },
     "testDoesRecognizeRequiredInTypedDictWithAssignment": {
-      "passed": false,
-      "fn": [
-        8
-      ],
+      "passed": true,
+      "fn": [],
       "fp": [],
       "file": "check-typeddict.test"
     },
@@ -40970,11 +40948,9 @@
       "file": "check-typeddict.test"
     },
     "testDoesRecognizeNotRequiredInTypedDictWithAssignment": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        7
-      ],
+      "fp": [],
       "file": "check-typeddict.test"
     },
     "testDoesDisallowNotRequiredOutsideOfTypedDict": {
@@ -44130,13 +44106,9 @@
       "file": "check-typevar-tuple.test"
     },
     "testTypeVarTupleSelfMappedPrefix": {
-      "passed": false,
+      "passed": true,
       "fn": [],
-      "fp": [
-        17,
-        18,
-        19
-      ],
+      "fp": [],
       "file": "check-typevar-tuple.test"
     },
     "testTypeVarTupleProtocolPrefix": {
@@ -44467,7 +44439,6 @@
       "passed": false,
       "fn": [],
       "fp": [
-        6,
         9,
         10
       ],
@@ -45557,8 +45528,11 @@
       "file": "check-unreachable-code.test"
     },
     "testUnreachableFlagMiscTestCaseMissingMethod": {
-      "passed": true,
-      "fn": [],
+      "passed": false,
+      "fn": [
+        4,
+        7
+      ],
       "fp": [],
       "file": "check-unreachable-code.test"
     },
