@@ -2456,6 +2456,14 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 			for name in base_cls.final_methods {
 				if name not_in final_methods { final_methods[name] = true }
 			}
+		case Protocol_Type:
+			// Protocol base: inherit methods and attrs into class attrs
+			for name, method_type in base_cls.methods {
+				if name not_in attrs { attrs[name] = method_type }
+			}
+			for name, attr_type in base_cls.attrs {
+				if name not_in attrs { attrs[name] = attr_type }
+			}
 		}
 	}
 
@@ -2695,6 +2703,59 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		}
 	}
 
+	// Check @override: method must exist in a base class (handles both Class_Type and Protocol_Type)
+	for stmt in cd.body {
+		has_override := false
+		ovr_name := ""
+		ovr_loc := parser.Src_Loc{}
+		#partial switch s in stmt {
+		case ^parser.Func_Def:
+			ovr_name = s.name
+			ovr_loc = s.loc
+			for dec in s.decorator_list {
+				#partial switch d in dec {
+				case ^parser.Name_Expr:
+					if d.id == "override" { has_override = true }
+					if orig, ok := ctx.bind_result.typing_names[d.id]; ok && orig == "override" { has_override = true }
+				case ^parser.Attribute_Expr:
+					if d.attr == "override" { has_override = true }
+				}
+			}
+		case ^parser.Async_Func_Def:
+			ovr_name = s.name
+			ovr_loc = s.loc
+			for dec in s.decorator_list {
+				#partial switch d in dec {
+				case ^parser.Name_Expr:
+					if d.id == "override" { has_override = true }
+					if orig, ok := ctx.bind_result.typing_names[d.id]; ok && orig == "override" { has_override = true }
+				case ^parser.Attribute_Expr:
+					if d.attr == "override" { has_override = true }
+				}
+			}
+		}
+		if has_override && len(ovr_name) > 0 {
+			found := false
+			for base_type_id in bases {
+				base_t := get_type(ctx.reg, base_type_id)
+				#partial switch base_cls in base_t.info {
+				case Class_Type:
+					if ovr_name in base_cls.attrs { found = true }
+				case Protocol_Type:
+					if ovr_name in base_cls.methods || ovr_name in base_cls.attrs { found = true }
+				}
+			}
+			// Also check merged attrs (grandparent methods via inheritance)
+			if !found && ovr_name in attrs { found = true }
+			if !found {
+				emit_diagnostic(ctx, ovr_loc, "T012", .Error,
+					"Method has @override but does not override any base method",
+					fmt.tprintf("'%s' is not defined in any base class", ovr_name),
+					"Remove @override or add the method to a base class")
+			}
+		}
+	}
+
 	// Update placeholder with actual class data
 	ct := get_type(ctx.reg, class_type_id)
 	#partial switch &info in ct.info {
@@ -2860,7 +2921,10 @@ build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_i
 	})
 
 	if sym_id != binder.INVALID_SYMBOL {
-		ctx.reg.class_types[qualify(ctx.reg, sym_id)] = proto_type_id
+		qsym := qualify(ctx.reg, sym_id)
+		ctx.reg.class_types[qsym] = proto_type_id
+		// Map pre-registered Class_Type → Protocol_Type for is_assignable fallback
+		ctx.reg.proto_for_class[qsym] = proto_type_id
 	}
 
 	return proto_type_id

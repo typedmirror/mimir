@@ -239,6 +239,7 @@ Type_Registry :: struct {
 	actor_ref_cache:         map[[2]Type_ID]Type_ID,  // [msg_type, ret_type] → specialized ActorRef Instance_Type
 	typeguard_targets:       map[binder.Symbol_ID]Type_ID,  // func sym → TypeGuard[T] target type
 	typeis_targets:          map[binder.Symbol_ID]Type_ID,  // func sym → TypeIs[T] target type (PEP 742)
+	proto_for_class:         map[Qualified_Symbol]Type_ID,  // Class pre-reg ID → Protocol_Type ID
 	current_resolve_class:   Type_ID,  // Set during class scope processing for Self resolution
 	allocator:      mem.Allocator,
 }
