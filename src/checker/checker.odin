@@ -585,14 +585,22 @@ check_with_imports :: proc(
 	// D001: unused variable detection (DFG-backed)
 	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
 
-	// Filter out diagnostics on # type: ignore lines (per-line suppression only)
+	// Suppress F002 for functions that contain Never-returning calls
+	suppress_f002_for_never(flow_result, &result, bind_result)
+
+	// Filter out diagnostics on # type: ignore lines (per-line + whole-file suppression)
 	if len(type_ignore_lines) > 0 {
-		filtered := make([dynamic]core.Diagnostic, 0, len(result.diagnostics), allocator)
-		for d in result.diagnostics {
-			if i32(d.location.line) in type_ignore_lines { continue }
-			append(&filtered, d)
+		// Line 0 sentinel = whole-file # type: ignore
+		if 0 in type_ignore_lines {
+			result.diagnostics = make([dynamic]core.Diagnostic, 0, allocator)
+		} else {
+			filtered := make([dynamic]core.Diagnostic, 0, len(result.diagnostics), allocator)
+			for d in result.diagnostics {
+				if i32(d.location.line) in type_ignore_lines { continue }
+				append(&filtered, d)
+			}
+			result.diagnostics = filtered
 		}
-		result.diagnostics = filtered
 	}
 
 	// Refresh registry snapshot — now includes all types registered during checking
@@ -931,6 +939,29 @@ check_scope :: proc(
 			}
 
 			// Diagnostics truncated before re-inference (C01 fix) — no dedup needed
+		}
+
+		// Shape constraint resolution — run after type resolution for tensor ops
+		shape_result := resolve_shape_constraints(&cs, reg, file_path, reg.allocator)
+		for d in shape_result.diagnostics {
+			append(&result.diagnostics, d)
+		}
+	}
+
+	// Standalone shape constraint pass — runs for ALL scopes with tensor ops
+	// (the block above only runs when there are unknown symbols)
+	{
+		shape_cs := collect_shape_only_constraints(cfg, bind_result, reg, &result.expr_types, reg.allocator)
+		if len(shape_cs.constraints) > 0 {
+			shape_result := resolve_shape_constraints(&shape_cs, reg, file_path, reg.allocator)
+			for d in shape_result.diagnostics {
+				append(&result.diagnostics, d)
+			}
+			// Device constraint resolution — cross-device operation detection
+			device_diags := resolve_device_constraints(&shape_cs, reg, file_path, reg.allocator)
+			for d in device_diags {
+				append(&result.diagnostics, d)
+			}
 		}
 	}
 
@@ -1999,13 +2030,20 @@ _has_unknown_decorator :: proc(decorators: []parser.Expr, ctx: ^Infer_Context) -
 				}
 				if is_typing_known { continue }
 			}
-			// Only check imported symbols — local functions/classes may be forward refs
+			// Check both imported and local symbols — local unannotated decorators also erase types
 			if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(d)); ref_ok {
 				sym := binder.result_get_symbol(ctx.bind_result, sym_id)
-				if sym != nil && (sym.kind == .Import || .Is_Imported in sym.flags) {
+				if sym != nil {
 					dec_type := infer_expr(dec, ctx)
 					if dec_type == TYPE_UNKNOWN || dec_type == TYPE_ANY || _is_any_type(dec_type, ctx.reg) {
 						return true
+					}
+					// If decorator's return type is Unknown/Any, the decorated function type is erased
+					dt := get_type(ctx.reg, dec_type)
+					if ct, ct_ok := dt.info.(Callable_Type); ct_ok {
+						if ct.return_type == TYPE_UNKNOWN || ct.return_type == TYPE_ANY || _is_any_type(ct.return_type, ctx.reg) {
+							return true
+						}
 					}
 				}
 			}
@@ -2477,6 +2515,16 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 
 	// @dataclass: auto-generate __init__, __repr__, __eq__
 	if is_dataclass {
+		// Check if class defines its own __init__ — if so, skip generation
+		has_custom_init := false
+		for stmt in cd.body {
+			#partial switch s in stmt {
+			case ^parser.Func_Def:
+				if s.name == "__init__" { has_custom_init = true }
+			case ^parser.Async_Func_Def:
+				if s.name == "__init__" { has_custom_init = true }
+			}
+		}
 		init_params := make([dynamic]Param_Type, 0, 8, ctx.reg.allocator)
 
 		// Collect parent dataclass fields first (MRO: parent fields before child)
@@ -2523,8 +2571,9 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 						continue  // Skip sentinel — not a real field
 					}
 
-					// Detect per-field kw_only from field(kw_only=True)
+					// Detect per-field kw_only from field(kw_only=True) and field(init=False)
 					field_is_kw_only := kw_only_active
+					field_init := true  // default: field is included in __init__
 					if s.value != nil {
 						if call, cok := s.value.(^parser.Call_Expr); cok {
 							fn_name := ""
@@ -2541,10 +2590,19 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 											}
 										}
 									}
+									if kw.arg == "init" {
+										if c, ck := kw.value.(^parser.Constant_Expr); ck {
+											if bv, bvk := c.value.(bool); bvk && !bv {
+												field_init = false
+											}
+										}
+									}
 								}
 							}
 						}
 					}
+					// Skip fields with field(init=False) — not included in __init__
+					if !field_init { continue }
 
 					// Resolve annotation — handle InitVar[X] → extract inner type
 					field_type: Type_ID
@@ -2615,7 +2673,9 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 		if has_any_base {
 			append(&init_params, Param_Type{name = "kwargs", type_id = TYPE_ANY, has_default = true, is_variadic = true})
 		}
-		attrs["__init__"] = make_callable_type(ctx.reg, init_params[:], TYPE_NONE)
+		if !has_custom_init {
+			attrs["__init__"] = make_callable_type(ctx.reg, init_params[:], TYPE_NONE)
+		}
 		no_params := make([]Param_Type, 0, ctx.reg.allocator)
 		attrs["__repr__"] = make_callable_type(ctx.reg, no_params, TYPE_STR)
 		eq_params := make([]Param_Type, 1, ctx.reg.allocator)
@@ -2676,6 +2736,7 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 	}
 
 	// Check @final method override: if parent has @final method, child can't override
+	// Python name mangling: __name (2+ leading _, <2 trailing _) → _ClassName__name
 	for stmt in cd.body {
 		method_name := ""
 		method_loc := parser.Src_Loc{}
@@ -2688,11 +2749,30 @@ build_class_type :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context) -> Type_ID 
 			method_loc = s.loc
 		}
 		if len(method_name) > 0 {
+			// Apply name mangling for child method
+			child_mangled := method_name
+			if len(method_name) >= 3 && method_name[:2] == "__" &&
+			   !(len(method_name) >= 4 && method_name[len(method_name)-2:] == "__") {
+				child_mangled = fmt.tprintf("_%s%s", cd.name, method_name)
+			}
 			for base_type_id in bases {
 				base_t := get_type(ctx.reg, base_type_id)
 				#partial switch &base_cls in base_t.info {
 				case Class_Type:
+					// Check with mangled name — parent's __bar is stored as _Parent__bar in final_methods
+					// or as __bar (raw). Check both: the raw name and each base's mangled form
+					base_mangled := method_name
+					if len(method_name) >= 3 && method_name[:2] == "__" &&
+					   !(len(method_name) >= 4 && method_name[len(method_name)-2:] == "__") {
+						base_mangled = fmt.tprintf("_%s%s", base_cls.name, method_name)
+					}
+					// Only flag if mangled names match (same actual method)
+					is_override := false
 					if method_name in base_cls.final_methods {
+						// Raw name match — only flag if mangled forms are the same
+						is_override = (child_mangled == base_mangled)
+					}
+					if is_override {
 						emit_diagnostic(ctx, method_loc, "T012", .Error,
 							"Cannot override final method",
 							fmt.tprintf("'%s' is declared @final in base class '%s'", method_name, base_cls.name),
@@ -2909,6 +2989,30 @@ build_protocol_class :: proc(cd: ^parser.Class_Def, ctx: ^Infer_Context, scope_i
 			if name_expr, ok := s.target.(^parser.Name_Expr); ok {
 				field_type := resolve_annotation(s.annotation, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 				attrs[name_expr.id] = field_type
+			}
+		}
+	}
+
+	// Merge methods/attrs from parent protocols
+	for base_expr in cd.bases {
+		base_name := get_annotation_name(base_expr)
+		if base_name == "Protocol" { continue }  // Skip Protocol itself
+		base_type := resolve_annotation(base_expr, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
+		base_t := get_type(ctx.reg, base_type)
+		#partial switch parent in base_t.info {
+		case Protocol_Type:
+			for name, method_type in parent.methods {
+				if name not_in methods { methods[name] = method_type }
+			}
+			for name, attr_type in parent.attrs {
+				if name not_in attrs { attrs[name] = attr_type }
+			}
+		case Class_Type:
+			// Parent may be registered as Class_Type (pre-protocol build)
+			for name, attr_type in parent.attrs {
+				if name not_in methods && name not_in attrs {
+					attrs[name] = attr_type
+				}
 			}
 		}
 	}

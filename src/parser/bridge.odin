@@ -133,6 +133,18 @@ extract_type_ignore_lines :: proc(source: string, allocator: mem.Allocator) -> m
 				after = after[k:]
 				if len(after) >= 6 && after[:6] == "ignore" {
 					ti[line] = true
+					// Line 1 # type: ignore = whole-file suppression (sentinel: line 0)
+					if line == 1 { ti[0] = true }
+				}
+			}
+			// Check for "mypy: ignore-errors" directive (whole-file error suppression)
+			if len(rest) >= 4 && rest[:4] == "mypy" {
+				after_mypy := rest[4:]
+				mk := 0
+				for mk < len(after_mypy) && (after_mypy[mk] == ' ' || after_mypy[mk] == '\t' || after_mypy[mk] == ':') { mk += 1 }
+				after_mypy = after_mypy[mk:]
+				if len(after_mypy) >= 13 && after_mypy[:13] == "ignore-errors" {
+					ti[0] = true  // Whole-file suppression sentinel
 				}
 			}
 			for i < len(source) && source[i] != '\n' && source[i] != '\r' { i += 1 }

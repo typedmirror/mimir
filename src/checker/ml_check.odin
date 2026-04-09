@@ -52,12 +52,13 @@ analyze_ml :: proc(
 	actx: ^Analysis_Pass_Context,
 	diagnostics: ^[dynamic]core.Diagnostic,
 ) {
-	// Check for sklearn imports (prefix match)
-	has_sklearn := false
+	// Check for sklearn or mimir.ml imports (prefix match)
+	has_ml_imports := false
 	for mod_name in actx.has_import {
-		if len(mod_name) >= 7 && mod_name[:7] == "sklearn" { has_sklearn = true; break }
+		if len(mod_name) >= 7 && mod_name[:7] == "sklearn" { has_ml_imports = true; break }
+		if len(mod_name) >= 8 && mod_name[:8] == "mimir.ml" { has_ml_imports = true; break }
 	}
-	if !has_sklearn { return }
+	if !has_ml_imports { return }
 
 	module := actx.module
 	file_path := actx.file_path

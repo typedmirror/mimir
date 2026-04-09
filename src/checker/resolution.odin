@@ -1,6 +1,7 @@
 package checker
 
 import "core:mem"
+import "core:fmt"
 import parser "mimir:parser"
 import binder "mimir:binder"
 import flow   "mimir:flow"
@@ -791,6 +792,14 @@ resolve_constraints_with_callers :: proc(
 						break
 					}
 				}
+				// Tensor types override primitive candidates from operator inference —
+				// body saw `a @ b` and inferred int/float, but caller provides Tensor
+				if !caller_compatible {
+					ct := get_type(reg, caller_type)
+					if _, is_tensor := ct.info.(Tensor_Type); is_tensor {
+						caller_compatible = true
+					}
+				}
 				if caller_compatible {
 					result[var_info.symbol_id] = caller_type
 					continue
@@ -1095,4 +1104,352 @@ find_unknown_symbols :: proc(
 	}
 
 	return result
+}
+
+// ==================== Shape Constraint Resolution ====================
+//
+// Resolves tensor shape constraints by propagation:
+// 1. Collect known dimensions from Shape_Dim_Eq constraints
+// 2. Propagate through matmul/broadcast/reshape relationships
+// 3. Report shape mismatches as diagnostics
+//
+// Returns: map of Constraint_Var → resolved shape ([]int)
+
+Shape_Resolution :: struct {
+	shapes:      map[Constraint_Var][]int,  // var → resolved shape
+	diagnostics: [dynamic]core.Diagnostic,
+	allocator:   mem.Allocator,
+}
+
+resolve_shape_constraints :: proc(
+	cs: ^Constraint_Set,
+	reg: ^Type_Registry,
+	file_path: string,
+	allocator: mem.Allocator,
+) -> Shape_Resolution {
+	result := Shape_Resolution{
+		shapes      = make(map[Constraint_Var][]int, 8, allocator),
+		diagnostics = make([dynamic]core.Diagnostic, 0, 4, allocator),
+		allocator   = allocator,
+	}
+
+	// Pass 1: Seed known shapes from Shape_Dim_Eq constraints
+	dim_eqs := make(map[Constraint_Var][dynamic]Shape_Dim_Eq, 8, allocator)
+	for c in cs.constraints {
+		if deq, ok := c.(Shape_Dim_Eq); ok {
+			if deq.var not_in dim_eqs {
+				dim_eqs[deq.var] = make([dynamic]Shape_Dim_Eq, 0, 4, allocator)
+			}
+			append(&dim_eqs[deq.var], deq)
+		}
+	}
+
+	// Build shape arrays from dim constraints
+	for var_id, eqs in dim_eqs {
+		if len(eqs) == 0 { continue }
+		max_dim := 0
+		for eq in eqs {
+			if eq.dim_idx > max_dim { max_dim = eq.dim_idx }
+		}
+		shape := make([]int, max_dim + 1, allocator)
+		for i in 0..=max_dim { shape[i] = -1 }
+		for eq in eqs {
+			if eq.size > 0 {
+				if shape[eq.dim_idx] != -1 && shape[eq.dim_idx] != eq.size {
+					append(&result.diagnostics, core.Diagnostic{
+						severity = .Error,
+						location = core.Location{file = file_path, line = int(eq.loc.line), column = int(eq.loc.col)},
+						what = "Shape dimension conflict",
+						why  = fmt.tprintf("Dimension %d has conflicting sizes: %d vs %d",
+							eq.dim_idx, shape[eq.dim_idx], eq.size, ),
+						fix  = "Check tensor shapes at this operation",
+						code = "S001",
+					})
+				}
+				shape[eq.dim_idx] = eq.size
+			}
+		}
+		result.shapes[var_id] = shape
+	}
+
+	// Also seed shapes from forward-inferred Tensor_Types
+	for &var_info in cs.vars {
+		if var_info.id in result.shapes { continue }
+		if var_info.forward_type == TYPE_UNKNOWN { continue }
+		t := get_type(reg, var_info.forward_type)
+		if tt, ok := t.info.(Tensor_Type); ok {
+			if tt.shape != nil && len(tt.shape) > 0 {
+				shape := make([]int, len(tt.shape), allocator)
+				copy(shape, tt.shape)
+				result.shapes[var_info.id] = shape
+			}
+		}
+	}
+
+	// Initialize symbolic dimension map for unification
+	dim_vars := init_dim_var_map(allocator)
+
+	// Pass 2: Propagate through Shape_Matmul constraints
+	for c in cs.constraints {
+		if mm, ok := c.(Shape_Matmul); ok {
+			a_shape, a_ok := result.shapes[mm.a_var]
+			b_shape, b_ok := result.shapes[mm.b_var]
+			if a_ok && b_ok && len(a_shape) >= 1 && len(b_shape) >= 1 {
+				a_inner := resolve_dim(&dim_vars, a_shape[len(a_shape) - 1])
+				b_outer := resolve_dim(&dim_vars, b_shape[0] if len(b_shape) == 1 else b_shape[len(b_shape) - 2])
+				// Try to unify symbolic dims
+				if is_symbolic_dim(a_shape[len(a_shape) - 1]) && b_outer > 0 {
+					bind_dim(&dim_vars, a_shape[len(a_shape) - 1], b_outer)
+					a_inner = b_outer
+				} else if is_symbolic_dim(b_shape[0] if len(b_shape) == 1 else b_shape[len(b_shape) - 2]) && a_inner > 0 {
+					bind_dim(&dim_vars, b_shape[0] if len(b_shape) == 1 else b_shape[len(b_shape) - 2], a_inner)
+					b_outer = a_inner
+				}
+				if a_inner > 0 && b_outer > 0 && a_inner != b_outer {
+					append(&result.diagnostics, core.Diagnostic{
+						severity = .Error,
+						location = core.Location{file = file_path, line = int(mm.loc.line), column = int(mm.loc.col)},
+						what = "Matmul dimension mismatch",
+						why  = fmt.tprintf("Inner dimensions don't match: %d vs %d",
+							a_inner, b_outer, ),
+						fix  = "Check that the inner dimensions of the matmul operands match",
+						code = "S001",
+					})
+				}
+				res_shape := make([]int, 2, allocator)
+				res_shape[0] = a_shape[len(a_shape) - 2] if len(a_shape) >= 2 else 1
+				res_shape[1] = b_shape[len(b_shape) - 1]
+				result.shapes[mm.result_var] = res_shape
+			}
+		}
+	}
+
+	// Pass 3: Propagate through Shape_Broadcast constraints
+	for c in cs.constraints {
+		if bc, ok := c.(Shape_Broadcast); ok {
+			a_shape, a_ok := result.shapes[bc.a_var]
+			b_shape, b_ok := result.shapes[bc.b_var]
+			if a_ok && b_ok {
+				res_shape, compat := _broadcast_shapes(a_shape, b_shape, allocator)
+				if !compat {
+					append(&result.diagnostics, core.Diagnostic{
+						severity = .Error,
+						location = core.Location{file = file_path, line = int(bc.loc.line), column = int(bc.loc.col)},
+						what = "Incompatible shapes for broadcasting",
+						why  = fmt.tprintf("Cannot broadcast shapes %v and %v",
+							a_shape, b_shape, ),
+						fix  = "Ensure tensor shapes are broadcast-compatible (numpy rules)",
+						code = "S002",
+					})
+				} else {
+					result.shapes[bc.result_var] = res_shape
+				}
+			}
+		}
+	}
+
+	// Pass 4: Propagate through Shape_Reshape constraints
+	for c in cs.constraints {
+		if rs, ok := c.(Shape_Reshape); ok {
+			src_shape, src_ok := result.shapes[rs.src_var]
+			if src_ok {
+				src_prod := _shape_product(src_shape)
+				tgt_prod := _shape_product(rs.target_shape)
+				if src_prod > 0 && tgt_prod > 0 && src_prod != tgt_prod {
+					has_wildcard := false
+					for d in rs.target_shape {
+						if d == -1 { has_wildcard = true; break }
+					}
+					if !has_wildcard {
+						append(&result.diagnostics, core.Diagnostic{
+							severity = .Error,
+							location = core.Location{file = file_path, line = int(rs.loc.line), column = int(rs.loc.col)},
+							what = "Reshape element count mismatch",
+							why  = fmt.tprintf("Cannot reshape %v (size %d) to %v (size %d)",
+								src_shape, src_prod, rs.target_shape, tgt_prod, ),
+							fix  = "Ensure reshape target has the same number of elements",
+							code = "S003",
+						})
+					}
+				}
+				result.shapes[rs.result_var] = rs.target_shape
+			}
+		}
+	}
+
+	// Pass 5: Propagate through Shape_Transpose constraints
+	for c in cs.constraints {
+		if tr, ok := c.(Shape_Transpose); ok {
+			src_shape, src_ok := result.shapes[tr.src_var]
+			if src_ok && len(src_shape) > 0 {
+				// Reverse dimensions
+				res_shape := make([]int, len(src_shape), allocator)
+				for i in 0..<len(src_shape) {
+					res_shape[i] = src_shape[len(src_shape) - 1 - i]
+				}
+				result.shapes[tr.result_var] = res_shape
+			}
+		}
+	}
+
+	// Pass 6: Propagate through Shape_Reduce constraints
+	for c in cs.constraints {
+		if rd, ok := c.(Shape_Reduce); ok {
+			src_shape, src_ok := result.shapes[rd.src_var]
+			if src_ok {
+				if rd.axis == -1 {
+					// Reduce all → scalar (0-dim)
+					result.shapes[rd.result_var] = {}
+				} else if rd.axis >= 0 && rd.axis < len(src_shape) {
+					// Remove the reduced axis
+					res_shape := make([]int, len(src_shape) - 1, allocator)
+					ri := 0
+					for i in 0..<len(src_shape) {
+						if i != rd.axis {
+							res_shape[ri] = src_shape[i]
+							ri += 1
+						}
+					}
+					result.shapes[rd.result_var] = res_shape
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+_broadcast_shapes :: proc(a, b: []int, allocator: mem.Allocator) -> ([]int, bool) {
+	max_rank := max(len(a), len(b))
+	result := make([]int, max_rank, allocator)
+	for i := 0; i < max_rank; i += 1 {
+		ai := a[len(a) - 1 - i] if i < len(a) else 1
+		bi := b[len(b) - 1 - i] if i < len(b) else 1
+		if ai == bi {
+			result[max_rank - 1 - i] = ai
+		} else if ai == -1 || bi == -1 {
+			result[max_rank - 1 - i] = -1
+		} else if ai == 1 {
+			result[max_rank - 1 - i] = bi
+		} else if bi == 1 {
+			result[max_rank - 1 - i] = ai
+		} else {
+			return nil, false
+		}
+	}
+	return result, true
+}
+
+_shape_product :: proc(shape: []int) -> int {
+	if shape == nil { return -1 }
+	prod := 1
+	for d in shape {
+		if d < 0 { return -1 }
+		prod *= d
+	}
+	return prod
+}
+
+// ==================== Device Constraint Resolution ====================
+
+resolve_device_constraints :: proc(
+	cs: ^Constraint_Set,
+	reg: ^Type_Registry,
+	file_path: string,
+	allocator: mem.Allocator,
+) -> [dynamic]core.Diagnostic {
+	diagnostics := make([dynamic]core.Diagnostic, 0, 4, allocator)
+
+	// Pass 0: Seed device from Tensor_Type.device on forward-inferred types
+	devices := make(map[Constraint_Var]Device_Kind, 8, allocator)
+	for &var_info in cs.vars {
+		if var_info.forward_type == TYPE_UNKNOWN { continue }
+		t := get_type(reg, var_info.forward_type)
+		if tt, ok := t.info.(Tensor_Type); ok {
+			switch tt.device {
+			case .CPU:   devices[var_info.id] = .CPU
+			case .CUDA:  devices[var_info.id] = .CUDA
+			case .Metal: devices[var_info.id] = .Metal
+			case .Unknown: // no device info
+			}
+		}
+	}
+
+	// Pass 1: Collect device assignments from explicit constraints
+	for c in cs.constraints {
+		#partial switch cv in c {
+		case Device_Eq:
+			if cv.device != .Unknown {
+				if existing, ok := devices[cv.var]; ok {
+					if existing != cv.device {
+						append(&diagnostics, core.Diagnostic{
+							severity = .Error,
+							location = core.Location{file = file_path, line = int(cv.loc.line), column = int(cv.loc.col)},
+							what = "Device conflict",
+							why  = fmt.tprintf("Tensor assigned to both %s and %s", _device_name(existing), _device_name(cv.device)),
+							fix  = "Use .to() to explicitly transfer the tensor to the correct device",
+							code = "S004",
+						})
+					}
+				}
+				devices[cv.var] = cv.device
+			}
+		case Device_Transfer:
+			devices[cv.result_var] = cv.device
+		}
+	}
+
+	// Pass 2: Check cross-device operations in shape constraints
+	// Unknown device is treated as CPU (default for Python tensors)
+	_effective_device :: proc(d: Device_Kind) -> Device_Kind {
+		return .CPU if d == .Unknown else d
+	}
+	for c in cs.constraints {
+		#partial switch cv in c {
+		case Shape_Matmul:
+			a_dev, a_ok := devices[cv.a_var]
+			b_dev, b_ok := devices[cv.b_var]
+			// If either has explicit device, check compatibility (unknown = CPU)
+			eff_a := _effective_device(a_dev if a_ok else .Unknown)
+			eff_b := _effective_device(b_dev if b_ok else .Unknown)
+			if (a_ok || b_ok) && eff_a != eff_b {
+				append(&diagnostics, core.Diagnostic{
+					severity = .Error,
+					location = core.Location{file = file_path, line = int(cv.loc.line), column = int(cv.loc.col)},
+					what = "Cross-device operation",
+					why  = fmt.tprintf("Matmul operands on different devices: %s and %s", _device_name(eff_a), _device_name(eff_b)),
+					fix  = "Move both tensors to the same device with .to() or .cuda()/.cpu()",
+					code = "S004",
+				})
+			}
+		case Shape_Broadcast:
+			a_dev, a_ok := devices[cv.a_var]
+			b_dev, b_ok := devices[cv.b_var]
+			bc_eff_a := _effective_device(a_dev if a_ok else .Unknown)
+			bc_eff_b := _effective_device(b_dev if b_ok else .Unknown)
+			if (a_ok || b_ok) && bc_eff_a != bc_eff_b {
+				append(&diagnostics, core.Diagnostic{
+					severity = .Error,
+					location = core.Location{file = file_path, line = int(cv.loc.line), column = int(cv.loc.col)},
+					what = "Cross-device operation",
+					why  = fmt.tprintf("Elementwise operands on different devices: %s and %s", _device_name(bc_eff_a), _device_name(bc_eff_b)),
+					fix  = "Move both tensors to the same device with .to() or .cuda()/.cpu()",
+					code = "S004",
+				})
+			}
+		}
+	}
+
+	return diagnostics
+}
+
+_device_name :: proc(d: Device_Kind) -> string {
+	switch d {
+	case .CPU:     return "CPU"
+	case .CUDA:    return "CUDA"
+	case .Metal:   return "Metal"
+	case .Vulkan:  return "Vulkan"
+	case .Unknown: return "unknown"
+	}
+	return "unknown"
 }

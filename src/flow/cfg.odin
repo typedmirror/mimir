@@ -222,6 +222,27 @@ process_stmt :: proc(b: ^CFG_Builder, stmt: parser.Stmt) -> Block_ID {
 		}
 		return INVALID_BLOCK
 
+	// Assert False — terminates like raise
+	case ^parser.Assert_Stmt:
+		add_stmt(b.cfg, b.current, stmt)
+		// assert False — always terminates (like raise AssertionError)
+		if c, ok := s.test.(^parser.Constant_Expr); ok {
+			if bval, bok := c.value.(bool); bok && !bval {
+				add_edge(b.cfg, b.current, b.cfg.exit, .Exception)
+				return INVALID_BLOCK
+			}
+		}
+		// assert_never(...) — always terminates
+		if call, ok := s.test.(^parser.Call_Expr); ok {
+			if name, nok := call.func.(^parser.Name_Expr); nok {
+				if name.id == "assert_never" {
+					add_edge(b.cfg, b.current, b.cfg.exit, .Exception)
+					return INVALID_BLOCK
+				}
+			}
+		}
+		return b.current
+
 	// All straight-line statements
 	case:
 		add_stmt(b.cfg, b.current, stmt)
@@ -712,12 +733,24 @@ emit_unreachable :: proc(b: ^CFG_Builder, stmt: parser.Stmt) {
 	loc := stmt_loc(stmt)
 	if loc.line == 0 { return }
 
+	// Suppress F001 at module scope — module-level unreachable code after raise is common
+	if b.cfg.scope_name == "<module>" { return }
+
 	// Suppress for yield/yield_from after raise — common generator idiom
 	// (yield makes the function a generator even though it's unreachable)
 	if expr_stmt, ok := stmt.(^parser.Expr_Stmt); ok {
 		#partial switch _ in expr_stmt.value {
 		case ^parser.Yield_Expr, ^parser.Yield_From_Expr:
 			return
+		}
+	}
+
+	// Suppress for return NotImplemented — common dunder pattern
+	if ret_stmt, ok := stmt.(^parser.Return_Stmt); ok {
+		if ret_stmt.value != nil {
+			if name, nok := ret_stmt.value.(^parser.Name_Expr); nok {
+				if name.id == "NotImplemented" { return }
+			}
 		}
 	}
 

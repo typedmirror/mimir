@@ -37,6 +37,7 @@ Infer_Context :: struct {
 	resolved_types:   ^map[binder.Symbol_ID]Type_ID,           // Constraint-resolved types for unknown symbols (re-inference pass)
 	generator_send_types: ^map[binder.Scope_ID]Type_ID,      // Generator[Y,S,R] → S per scope
 	type_ignore_lines: ^map[i32]bool,                         // Lines with # type: ignore comments
+	is_untyped_scope: bool,                                   // True if function has no annotations (suppress T001-T007)
 }
 
 infer_expr :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_ID = TYPE_UNKNOWN) -> Type_ID {
@@ -65,10 +66,16 @@ infer_expr_inner :: proc(expr: parser.Expr, ctx: ^Infer_Context, expected: Type_
 		if result == TYPE_UNKNOWN && left != TYPE_UNKNOWN && right != TYPE_UNKNOWN &&
 		   !_is_any_type(left, ctx.reg) && !_is_any_type(right, ctx.reg) &&
 		   !_union_has_unknown(left, ctx.reg) && !_union_has_unknown(right, ctx.reg) {
-			emit_diagnostic(ctx, e.loc, "T005", .Error,
-				"Unsupported operand types",
-				fmt_binop_error(e.op, left, right, ctx.reg),
-				"Check operand types or add explicit conversion")
+			// Suppress T005 for @ (matmul) on primitive types when params may be re-resolved
+			// (constraint resolution may have incorrectly resolved to int; caller may provide Tensor)
+			suppress_matmul := e.op == .Mat_Mult && (left == TYPE_INT || left == TYPE_FLOAT || left == TYPE_BOOL) &&
+			                   (right == TYPE_INT || right == TYPE_FLOAT || right == TYPE_BOOL)
+			if !suppress_matmul {
+				emit_diagnostic(ctx, e.loc, "T005", .Error,
+					"Unsupported operand types",
+					fmt_binop_error(e.op, left, right, ctx.reg),
+					"Check operand types or add explicit conversion")
+			}
 		}
 		// Refine tensor binop shapes (infer_binop returns shape-erased)
 		if result != TYPE_UNKNOWN {
@@ -638,6 +645,10 @@ infer_name :: proc(e: ^parser.Name_Expr, ctx: ^Infer_Context) -> Type_ID {
 	if tid, ok := ctx.builtins.names[e.id]; ok {
 		return tid
 	}
+	// Typing names used as values (e.g., class Foo(Any))
+	if orig, is_typing := ctx.bind_result.typing_names[e.id]; is_typing {
+		if orig == "Any" { return TYPE_ANY }
+	}
 	// Special constants
 	switch e.id {
 	case "True", "False": return TYPE_BOOL
@@ -781,6 +792,30 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 			return make_tensor_type(reg, l_tensor.element_type, {})
 		}
 	}
+	// Series elementwise ops: Series + Series → Series (numeric promotion)
+	if l_series, l_ok := lt.info.(Series_Type); l_ok {
+		if _, r_ok := rt.info.(Series_Type); r_ok {
+			return make_series_type(reg, l_series.element)
+		}
+		// Series + scalar → Series
+		if is_numeric(reg, right) {
+			return make_series_type(reg, l_series.element)
+		}
+	}
+	if _, r_ok := rt.info.(Series_Type); r_ok {
+		// scalar + Series → Series
+		if is_numeric(reg, left) {
+			r_series := rt.info.(Series_Type)
+			return make_series_type(reg, r_series.element)
+		}
+	}
+	// DataFrame + scalar → DataFrame
+	if _, l_ok := lt.info.(DataFrame_Type); l_ok {
+		return left
+	}
+	if _, r_ok := rt.info.(DataFrame_Type); r_ok {
+		return right
+	}
 
 	// Dunder method dispatch: try __add__/__radd__ etc. on Instance/Class types
 	dunder := _binop_dunder(op)
@@ -792,6 +827,24 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 			mt := get_type(reg, method_type)
 			if ct, ok := mt.info.(Callable_Type); ok {
 				return ct.return_type
+			}
+		}
+		// Fallback: if left is an instance with primitive base (NewType), try base type's operator
+		if method_type == TYPE_UNKNOWN {
+			lt := get_type(reg, left)
+			if inst, iok := lt.info.(Instance_Type); iok {
+				cls := get_type(reg, inst.class_type)
+				if ci, ciok := cls.info.(Class_Type); ciok {
+					for base in ci.bases {
+						base_method := lookup_attribute(base, dunder, reg)
+						if base_method != TYPE_UNKNOWN {
+							bmt := get_type(reg, base_method)
+							if ct, ok := bmt.info.(Callable_Type); ok {
+								return ct.return_type
+							}
+						}
+					}
+				}
 			}
 		}
 		// Try right.__radd__(left)
@@ -1357,18 +1410,27 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 		return func_type
 
 	case Class_Type:
-		// Check abstract class instantiation
+		// Check abstract class instantiation (skip if any base is Any — might implement methods)
 		if len(info.abstract_methods) > 0 {
-			names_dyn := make([dynamic]string, 0, len(info.abstract_methods), ctx.reg.allocator)
-			for name, is_abstract in info.abstract_methods {
-				if is_abstract { append(&names_dyn, name) }
+			has_any_base := false
+			for b in info.bases {
+				if b == TYPE_ANY || _is_any_type(b, ctx.reg) {
+					has_any_base = true
+					break
+				}
 			}
-			if len(names_dyn) > 0 {
-				emit_diagnostic(ctx, e.loc, "T013", .Error,
-					"Cannot instantiate abstract class",
-					fmt.tprintf("'%s' has unimplemented abstract method(s): %s",
-						info.name, strings.join(names_dyn[:], ", ", allocator = ctx.reg.allocator)),
-					"Implement all abstract methods in a concrete subclass")
+			if !has_any_base {
+				names_dyn := make([dynamic]string, 0, len(info.abstract_methods), ctx.reg.allocator)
+				for name, is_abstract in info.abstract_methods {
+					if is_abstract { append(&names_dyn, name) }
+				}
+				if len(names_dyn) > 0 {
+					emit_diagnostic(ctx, e.loc, "T013", .Error,
+						"Cannot instantiate abstract class",
+						fmt.tprintf("'%s' has unimplemented abstract method(s): %s",
+							info.name, strings.join(names_dyn[:], ", ", allocator = ctx.reg.allocator)),
+						"Implement all abstract methods in a concrete subclass")
+				}
 			}
 		}
 
@@ -1482,6 +1544,9 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 }
 
 check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^Infer_Context) {
+	// Callable[..., T] — accepts any arguments, skip all checking
+	if func_info.is_ellipsis { return }
+
 	// Skip arg count checking if all params are TYPE_ANY (stub/unresolved function)
 	// These are placeholder signatures from typeshed or unresolved imports — arg count is unknown
 	if len(func_info.params) > 0 {
@@ -1535,13 +1600,14 @@ check_call_args :: proc(e: ^parser.Call_Expr, func_info: ^Callable_Type, ctx: ^I
 			st := get_type(ctx.reg, star_type)
 			if tup, is_tuple := st.info.(Tuple_Type); is_tuple && !tup.is_variadic && len(tup.elements) > 0 {
 				// Known-length tuple: expand into positional args
-				star_arg_idx = idx
-				star_tuple_elems = tup.elements
+				if star_arg_idx < 0 {
+					star_arg_idx = idx
+					star_tuple_elems = tup.elements
+				}
 				n_args += len(tup.elements) - 1  // -1 because *arg already counted as 1
 			} else {
 				has_star_args = true
 			}
-			break
 		}
 	}
 	n_total := n_args + n_named_kw
@@ -1995,8 +2061,17 @@ lookup_attribute :: proc(receiver: Type_ID, attr: string, reg: ^Type_Registry) -
 			if attr_type, ok := cls_info.attrs[attr]; ok {
 				return attr_type
 			}
-			// __getattr__ fallback: if class or any base defines __getattr__, any attribute is valid
+			// Any-base fallback: if class inherits from Any, all attrs are valid
+			for base_id in cls_info.bases {
+				if base_id == TYPE_ANY || _is_any_type(base_id, reg) {
+					return TYPE_ANY
+				}
+			}
+			// __getattr__/__getattribute__ fallback: any attribute is valid
 			if _, has_getattr := cls_info.attrs["__getattr__"]; has_getattr {
+				return TYPE_ANY
+			}
+			if _, has_getattribute := cls_info.attrs["__getattribute__"]; has_getattribute {
 				return TYPE_ANY
 			}
 			// Check base classes for __getattr__
@@ -2816,7 +2891,15 @@ emit_diagnostic :: proc(ctx: ^Infer_Context, loc: parser.Src_Loc, code: string, 
 	what: string, why: string, fix: string) {
 	// Suppress diagnostics on lines with # type: ignore
 	if ctx.type_ignore_lines != nil {
+		// Line 0 sentinel = whole-file # type: ignore (line 1)
+		if 0 in ctx.type_ignore_lines^ { return }
 		if loc.line in ctx.type_ignore_lines^ { return }
+		// Multi-line expressions: check if any line in [line, end_line] has type: ignore
+		if loc.end_line > loc.line {
+			for l := loc.line + 1; l <= loc.end_line; l += 1 {
+				if l in ctx.type_ignore_lines^ { return }
+			}
+		}
 	}
 	append(ctx.diagnostics, core.Diagnostic{
 		severity = severity,

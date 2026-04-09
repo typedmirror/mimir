@@ -433,6 +433,16 @@
       "gap_score": 0.37142857142857144
     },
     {
+      "feature": "decorator_property",
+      "pass": 43,
+      "fail": 92,
+      "total": 135,
+      "fail_rate": 0.6814814814814815,
+      "d1fp": 6,
+      "d1fn": 40,
+      "gap_score": 0.36296296296296293
+    },
+    {
       "feature": "base_A_subscript",
       "pass": 12,
       "fail": 25,
@@ -441,16 +451,6 @@
       "d1fp": 4,
       "d1fn": 8,
       "gap_score": 0.3513513513513513
-    },
-    {
-      "feature": "decorator_property",
-      "pass": 44,
-      "fail": 91,
-      "total": 135,
-      "fail_rate": 0.674074074074074,
-      "d1fp": 6,
-      "d1fn": 39,
-      "gap_score": 0.3481481481481481
     },
     {
       "feature": "call_assert_type",
@@ -578,7 +578,7 @@
       "fail": 105,
       "total": 163,
       "fail_rate": 0.6441717791411042,
-      "d1fp": 21,
+      "d1fp": 20,
       "d1fn": 38,
       "gap_score": 0.28834355828220853
     },
@@ -818,7 +818,7 @@
       "fail": 787,
       "total": 1377,
       "fail_rate": 0.5715323166303559,
-      "d1fp": 49,
+      "d1fp": 48,
       "d1fn": 396,
       "gap_score": 0.14306463326071173
     },
@@ -879,7 +879,7 @@
       "total": 1545,
       "fail_rate": 0.566990291262136,
       "d1fp": 61,
-      "d1fn": 381,
+      "d1fn": 380,
       "gap_score": 0.13398058252427186
     },
     {
@@ -1004,13 +1004,13 @@
     },
     {
       "feature": "ann_None",
-      "pass": 944,
-      "fail": 1109,
+      "pass": 946,
+      "fail": 1107,
       "total": 2053,
-      "fail_rate": 0.5401850949829518,
-      "d1fp": 59,
-      "d1fn": 492,
-      "gap_score": 0.0803701899659035
+      "fail_rate": 0.5392109108621529,
+      "d1fp": 58,
+      "d1fn": 490,
+      "gap_score": 0.07842182172430584
     },
     {
       "feature": "ann_Type_subscript",
@@ -1054,13 +1054,13 @@
     },
     {
       "feature": "ellipsis_body_stub",
-      "pass": 590,
-      "fail": 666,
+      "pass": 589,
+      "fail": 667,
       "total": 1256,
-      "fail_rate": 0.5302547770700637,
+      "fail_rate": 0.5310509554140127,
       "d1fp": 57,
-      "d1fn": 251,
-      "gap_score": 0.06050955414012743
+      "d1fn": 252,
+      "gap_score": 0.062101910828025464
     },
     {
       "feature": "typing_Dict",
@@ -1078,19 +1078,19 @@
       "fail": 1850,
       "total": 3551,
       "fail_rate": 0.5209800056322162,
-      "d1fp": 121,
+      "d1fp": 120,
       "d1fn": 831,
       "gap_score": 0.04196001126443255
     },
     {
       "feature": "annotated_assign",
-      "pass": 1244,
-      "fail": 1345,
+      "pass": 1245,
+      "fail": 1344,
       "total": 2589,
-      "fail_rate": 0.5195056006179992,
-      "d1fp": 74,
-      "d1fn": 524,
-      "gap_score": 0.03901120123599844
+      "fail_rate": 0.5191193511008111,
+      "d1fp": 73,
+      "d1fn": 523,
+      "gap_score": 0.03823870220162223
     },
     {
       "feature": "callable_guard",
@@ -1114,13 +1114,13 @@
     },
     {
       "feature": "param_annotation",
-      "pass": 1294,
-      "fail": 1346,
+      "pass": 1295,
+      "fail": 1345,
       "total": 2640,
-      "fail_rate": 0.5098484848484849,
-      "d1fp": 96,
-      "d1fn": 594,
-      "gap_score": 0.019696969696969713
+      "fail_rate": 0.509469696969697,
+      "d1fp": 95,
+      "d1fn": 593,
+      "gap_score": 0.018939393939393978
     },
     {
       "feature": "typing_Concatenate",
@@ -1289,7 +1289,7 @@
       "total": 1279,
       "fail_rate": 0.48240813135261923,
       "d1fp": 46,
-      "d1fn": 270,
+      "d1fn": 269,
       "gap_score": -0.035183737294761486
     },
     {
@@ -1319,7 +1319,7 @@
       "total": 63,
       "fail_rate": 0.47619047619047616,
       "d1fp": 3,
-      "d1fn": 16,
+      "d1fn": 15,
       "gap_score": -0.04761904761904767
     },
     {
@@ -1329,18 +1329,18 @@
       "total": 63,
       "fail_rate": 0.47619047619047616,
       "d1fp": 3,
-      "d1fn": 16,
+      "d1fn": 15,
       "gap_score": -0.04761904761904767
     },
     {
       "feature": "typing_Callable",
-      "pass": 286,
-      "fail": 258,
+      "pass": 285,
+      "fail": 259,
       "total": 544,
-      "fail_rate": 0.4742647058823529,
+      "fail_rate": 0.47610294117647056,
       "d1fp": 24,
-      "d1fn": 90,
-      "gap_score": -0.05147058823529416
+      "d1fn": 91,
+      "gap_score": -0.047794117647058876
     },
     {
       "feature": "base_IntEnum",
@@ -1409,7 +1409,7 @@
       "total": 290,
       "fail_rate": 0.4689655172413793,
       "d1fp": 16,
-      "d1fn": 52,
+      "d1fn": 51,
       "gap_score": -0.06206896551724134
     },
     {
@@ -1434,13 +1434,13 @@
     },
     {
       "feature": "ann_Callable_subscript",
-      "pass": 243,
-      "fail": 207,
+      "pass": 242,
+      "fail": 208,
       "total": 450,
-      "fail_rate": 0.46,
+      "fail_rate": 0.4622222222222222,
       "d1fp": 22,
-      "d1fn": 75,
-      "gap_score": -0.08000000000000002
+      "d1fn": 76,
+      "gap_score": -0.0755555555555556
     },
     {
       "feature": "decorator_s",

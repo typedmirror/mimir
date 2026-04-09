@@ -142,8 +142,13 @@ def parse_test_file(filepath: str) -> list[TestCase]:
                         code_lines.append(clean)
                     prev_error_line = 0
                 else:
-                    code_lines.append(line)
-                    prev_error_line = 0
+                    # Bare continuation line after # E: ... \ — skip as code
+                    if prev_error_line > 0:
+                        line_num -= 1  # don't count as a code line
+                        prev_error_line = 0
+                    else:
+                        code_lines.append(line)
+                        prev_error_line = 0
 
         if has_extra_files:
             skip = True

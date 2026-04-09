@@ -32,6 +32,16 @@ Constraint :: union {
 	Type_Subtype,    // Phase II: var <: type (from call-site argument matching)
 	Supports_Op,     // Phase II: var supports binary/unary operation
 	Dict_Key_Set,    // Phase III: x["key"] = val → TypedDict inference (§3.5)
+	// Shape constraints — tensor dimension propagation for GPU compilation
+	Shape_Dim_Eq,    // var[dim_idx] == concrete_size
+	Shape_Matmul,    // result = a @ b (inner dim relationship)
+	Shape_Broadcast, // result = broadcast(a, b)
+	Shape_Reshape,   // result = reshape(src, target_shape)
+	Shape_Transpose, // result = src.T (reverse dimensions)
+	Shape_Reduce,    // result = sum/mean(src, axis) (collapse dimensions)
+	// Device constraints — CPU/GPU placement tracking
+	Device_Eq,       // var is on a specific device
+	Device_Transfer, // result = var.to(device) or var.cuda() / var.cpu()
 }
 
 Has_Method :: struct {
@@ -98,6 +108,143 @@ Dict_Key_Set :: struct {
 	loc:        parser.Src_Loc,
 }
 
+// ==================== Shape Constraints ====================
+// Tensor dimension propagation: connects type checker → GPU compiler.
+// Collected from tensor ops (matmul, broadcasting, reshape).
+// Resolved by propagation to produce concrete shapes for GPU memory planning.
+
+// var[dim_idx] == size (from annotation or literal shape)
+Shape_Dim_Eq :: struct {
+	var:       Constraint_Var,
+	dim_idx:   int,           // which dimension (0-indexed)
+	size:      int,           // concrete size (-1 = symbolic/unknown)
+	loc:       parser.Src_Loc,
+}
+
+// result = a @ b → result.shape[-2] = a.shape[-2], result.shape[-1] = b.shape[-1],
+// constraint: a.shape[-1] == b.shape[-2]
+Shape_Matmul :: struct {
+	result_var: Constraint_Var,
+	a_var:      Constraint_Var,
+	b_var:      Constraint_Var,
+	loc:        parser.Src_Loc,
+}
+
+// result = broadcast(a, b) — numpy broadcasting rules
+Shape_Broadcast :: struct {
+	result_var: Constraint_Var,
+	a_var:      Constraint_Var,
+	b_var:      Constraint_Var,
+	loc:        parser.Src_Loc,
+}
+
+// result = reshape(src, target_shape) — element count conservation
+Shape_Reshape :: struct {
+	result_var:   Constraint_Var,
+	src_var:      Constraint_Var,
+	target_shape: []int,         // target shape (-1 = infer)
+	loc:          parser.Src_Loc,
+}
+
+// result = transpose(src) — reverse dimensions
+Shape_Transpose :: struct {
+	result_var: Constraint_Var,
+	src_var:    Constraint_Var,
+	loc:        parser.Src_Loc,
+}
+
+// result = reduce(src, axis) — collapse one or all dimensions
+Shape_Reduce :: struct {
+	result_var: Constraint_Var,
+	src_var:    Constraint_Var,
+	axis:       int,             // which axis to reduce (-1 = all → scalar)
+	loc:        parser.Src_Loc,
+}
+
+// ==================== Symbolic Dimension Variables ====================
+// Represent dimension variables (N, M, K) as negative IDs in shape arrays.
+// -1 = unknown (existing), -2..-N = symbolic dimension vars.
+// When two shapes are matched (matmul, broadcast), symbolic dims can unify.
+
+SYMBOLIC_DIM_BASE :: -2  // First symbolic dim is -2, next is -3, etc.
+
+Dim_Var_Map :: struct {
+	next_id:    int,                      // next symbolic dim ID (starts at -2, decrements)
+	name_to_id: map[string]int,           // "N" → -2, "M" → -3
+	bindings:   map[int]int,              // dim_id → concrete value (resolved at call site)
+	allocator:  mem.Allocator,
+}
+
+init_dim_var_map :: proc(allocator: mem.Allocator) -> Dim_Var_Map {
+	return Dim_Var_Map{
+		next_id    = SYMBOLIC_DIM_BASE,
+		name_to_id = make(map[string]int, 8, allocator),
+		bindings   = make(map[int]int, 8, allocator),
+		allocator  = allocator,
+	}
+}
+
+get_or_create_dim_var :: proc(dvm: ^Dim_Var_Map, name: string) -> int {
+	if id, ok := dvm.name_to_id[name]; ok {
+		return id
+	}
+	id := dvm.next_id
+	dvm.next_id -= 1
+	dvm.name_to_id[name] = id
+	return id
+}
+
+// Check if a dimension value is symbolic (negative, not -1)
+is_symbolic_dim :: proc(dim: int) -> bool {
+	return dim <= SYMBOLIC_DIM_BASE
+}
+
+// Bind a symbolic dim to a concrete value. Returns false if already bound to a different value.
+bind_dim :: proc(dvm: ^Dim_Var_Map, dim_id: int, value: int) -> bool {
+	if existing, ok := dvm.bindings[dim_id]; ok {
+		return existing == value
+	}
+	dvm.bindings[dim_id] = value
+	return true
+}
+
+// Resolve a dimension: if symbolic and bound, return concrete value. Otherwise return as-is.
+resolve_dim :: proc(dvm: ^Dim_Var_Map, dim: int) -> int {
+	if is_symbolic_dim(dim) {
+		if val, ok := dvm.bindings[dim]; ok {
+			return val
+		}
+	}
+	return dim
+}
+
+// ==================== Device Constraints ====================
+// Track CPU/GPU device placement on tensors.
+// Cross-device operations (CPU tensor @ GPU tensor) are caught at compile time.
+
+Device_Kind :: enum u8 {
+	Unknown,
+	CPU,
+	CUDA,     // NVIDIA GPU
+	Metal,    // Apple GPU
+	Vulkan,   // Cross-platform GPU
+}
+
+// var is on a specific device (from annotation, .cuda(), .to(device), etc.)
+Device_Eq :: struct {
+	var:    Constraint_Var,
+	device: Device_Kind,
+	loc:    parser.Src_Loc,
+}
+
+// result = src.to(device) or src.cuda() or src.cpu()
+Device_Transfer :: struct {
+	result_var: Constraint_Var,
+	src_var:    Constraint_Var,
+	device:     Device_Kind,
+	loc:        parser.Src_Loc,
+}
+
 // ==================== Constraint Set ====================
 
 Constraint_Set :: struct {
@@ -141,19 +288,44 @@ add_constraint :: proc(cs: ^Constraint_Set, c: Constraint) {
 	// Index by constraint variable
 	var_id: Constraint_Var
 	#partial switch cv in c {
-	case Has_Method:    var_id = cv.var
-	case Has_Attr:      var_id = cv.var
-	case Callable_With: var_id = cv.var
-	case Iterable_Of:   var_id = cv.var
-	case Subscriptable: var_id = cv.var
-	case Type_Subtype:  var_id = cv.var
-	case Supports_Op:   var_id = cv.var
-	case Dict_Key_Set:  var_id = cv.var
+	case Has_Method:      var_id = cv.var
+	case Has_Attr:        var_id = cv.var
+	case Callable_With:   var_id = cv.var
+	case Iterable_Of:     var_id = cv.var
+	case Subscriptable:   var_id = cv.var
+	case Type_Subtype:    var_id = cv.var
+	case Supports_Op:     var_id = cv.var
+	case Dict_Key_Set:    var_id = cv.var
+	case Shape_Dim_Eq:    var_id = cv.var
+	case Shape_Matmul:    var_id = cv.result_var
+	case Shape_Broadcast: var_id = cv.result_var
+	case Shape_Reshape:   var_id = cv.result_var
+	case Shape_Transpose: var_id = cv.result_var
+	case Shape_Reduce:    var_id = cv.result_var
+	case Device_Eq:       var_id = cv.var
+	case Device_Transfer: var_id = cv.result_var
 	}
 	if var_id != INVALID_CONSTRAINT_VAR {
 		if vc, ok := &cs.var_constraints[var_id]; ok {
 			append(vc, idx)
 		}
+	}
+	// Shape constraints also index the operand vars
+	#partial switch cv in c {
+	case Shape_Matmul:
+		if vc, ok := &cs.var_constraints[cv.a_var]; ok { append(vc, idx) }
+		if vc, ok := &cs.var_constraints[cv.b_var]; ok { append(vc, idx) }
+	case Shape_Broadcast:
+		if vc, ok := &cs.var_constraints[cv.a_var]; ok { append(vc, idx) }
+		if vc, ok := &cs.var_constraints[cv.b_var]; ok { append(vc, idx) }
+	case Shape_Reshape:
+		if vc, ok := &cs.var_constraints[cv.src_var]; ok { append(vc, idx) }
+	case Shape_Transpose:
+		if vc, ok := &cs.var_constraints[cv.src_var]; ok { append(vc, idx) }
+	case Shape_Reduce:
+		if vc, ok := &cs.var_constraints[cv.src_var]; ok { append(vc, idx) }
+	case Device_Transfer:
+		if vc, ok := &cs.var_constraints[cv.src_var]; ok { append(vc, idx) }
 	}
 }
 
@@ -447,6 +619,8 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 
 		// f(x) where f has typed params → Type_Subtype(x, param_type)
 		collect_callsite_constraints(e, ctx)
+		// Shape constraints for reshape calls
+		collect_reshape_shape(e, ctx)
 
 		// x(args) → Callable_With (when x is an unknown param called directly)
 		if name, ok := e.func.(^parser.Name_Expr); ok {
@@ -518,6 +692,8 @@ collect_expr_constraints :: proc(expr: parser.Expr, raw_ctx: rawptr) {
 	case ^parser.Bin_Op_Expr:
 		// x + 1 → Supports_Op(x, Add, int)
 		collect_binop_constraint(e, ctx)
+		// Shape constraints for tensor ops (matmul, broadcasting)
+		collect_tensor_binop_shape(e, ctx)
 
 	case ^parser.Unary_Op_Expr:
 		// -x → Supports_Op(x, Sub, UNKNOWN) — numeric unary
@@ -817,4 +993,417 @@ get_expr_loc :: proc(expr: parser.Expr) -> parser.Src_Loc {
 	case ^parser.Lambda_Expr:     return e.loc
 	}
 	return {}
+}
+
+// ==================== Standalone Shape Constraint Collection ====================
+// Collects shape constraints for ALL tensor operations in a scope,
+// regardless of whether any symbols are TYPE_UNKNOWN.
+// This ensures @ operator shape checking works on fully-typed tensor code.
+
+collect_shape_only_constraints :: proc(
+	cfg: ^flow.CFG,
+	bind_result: ^binder.Bind_Result,
+	reg: ^Type_Registry,
+	expr_types: ^map[rawptr]Type_ID,
+	allocator: mem.Allocator,
+) -> Constraint_Set {
+	cs := init_constraint_set(allocator)
+
+	ctx := Collect_Context{
+		cs           = &cs,
+		bind_result  = bind_result,
+		reg          = reg,
+		expr_types   = expr_types,
+		symbol_types = nil,
+		unknown_syms = {},
+		scope_id     = cfg.scope_id,
+	}
+
+	// Walk all reachable blocks, collecting shape constraints from expressions
+	shape_visitor := core.AST_Visitor{
+		visit_expr = _shape_only_expr_visitor,
+		ctx        = &ctx,
+	}
+	for &block in cfg.blocks {
+		if !block.is_reachable { continue }
+		for stmt in block.stmts {
+			core.walk_stmt(&shape_visitor, stmt)
+		}
+	}
+
+	return cs
+}
+
+_shape_only_expr_visitor :: proc(expr: parser.Expr, raw_ctx: rawptr) {
+	if expr == nil { return }
+	ctx := cast(^Collect_Context)raw_ctx
+
+	#partial switch e in expr {
+	case ^parser.Bin_Op_Expr:
+		collect_tensor_binop_shape(e, ctx)
+		collect_cross_device_binop(e, ctx)
+	case ^parser.Call_Expr:
+		collect_reshape_shape(e, ctx)
+		collect_reduction_shape(e, ctx)
+		collect_device_transfer(e, ctx)
+	case ^parser.Attribute_Expr:
+		collect_transpose_shape(e, ctx)
+	}
+}
+
+// ==================== Shape Constraint Collection ====================
+
+// Check if a type is a Tensor_Type and return its shape info
+_is_tensor_type :: proc(type_id: Type_ID, reg: ^Type_Registry) -> (^Tensor_Type, bool) {
+	if type_id == TYPE_UNKNOWN || type_id == TYPE_ANY { return nil, false }
+	t := get_type(reg, type_id)
+	if tt, ok := &t.info.(Tensor_Type); ok {
+		return tt, true
+	}
+	return nil, false
+}
+
+// Get or create a constraint var for a tensor expression (not just unknown params)
+_get_tensor_var :: proc(expr: parser.Expr, ctx: ^Collect_Context) -> (Constraint_Var, bool) {
+	// Try to resolve to a symbol
+	sym_id := resolve_to_symbol(expr, ctx.bind_result)
+	if sym_id != binder.INVALID_SYMBOL {
+		fwd_type := TYPE_UNKNOWN
+		if t, found := ctx.expr_types[expr_to_rawptr(expr)]; found {
+			fwd_type = t
+		}
+		return get_or_create_var(ctx.cs, sym_id, ctx.scope_id, fwd_type), true
+	}
+	return INVALID_CONSTRAINT_VAR, false
+}
+
+// Collect shape constraints from tensor binary ops: @ (matmul), + * / (broadcasting)
+collect_tensor_binop_shape :: proc(e: ^parser.Bin_Op_Expr, ctx: ^Collect_Context) {
+	// Get types of left and right operands
+	left_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(e.left)]; found {
+		left_type = t
+	}
+	right_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(e.right)]; found {
+		right_type = t
+	}
+
+	// Only proceed if at least one operand is a tensor
+	left_tensor, left_is_tensor := _is_tensor_type(left_type, ctx.reg)
+	right_tensor, right_is_tensor := _is_tensor_type(right_type, ctx.reg)
+	if !left_is_tensor && !right_is_tensor { return }
+
+	// Get constraint vars for operands and result
+	a_var, a_ok := _get_tensor_var(e.left, ctx)
+	b_var, b_ok := _get_tensor_var(e.right, ctx)
+	if !a_ok || !b_ok { return }
+
+	// Get or create result var
+	result_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(parser.Expr(e))]; found {
+		result_type = t
+	}
+	// For the result, we need a synthetic constraint var
+	// Use the expression's rawptr as a pseudo-symbol
+	result_var := Constraint_Var(u32(len(ctx.cs.vars)) + 1)
+	append(&ctx.cs.vars, Constraint_Var_Info{
+		id           = result_var,
+		symbol_id    = binder.INVALID_SYMBOL,
+		scope_id     = ctx.scope_id,
+		forward_type = result_type,
+	})
+	ctx.cs.var_constraints[result_var] = make([dynamic]int, 0, 4, ctx.cs.allocator)
+
+	// Seed Shape_Dim_Eq from known tensor shapes
+	if left_is_tensor && left_tensor.shape != nil {
+		for dim, idx in left_tensor.shape {
+			if dim > 0 {
+				add_constraint(ctx.cs, Shape_Dim_Eq{var = a_var, dim_idx = idx, size = dim, loc = e.loc})
+			}
+		}
+	}
+	if right_is_tensor && right_tensor.shape != nil {
+		for dim, idx in right_tensor.shape {
+			if dim > 0 {
+				add_constraint(ctx.cs, Shape_Dim_Eq{var = b_var, dim_idx = idx, size = dim, loc = e.loc})
+			}
+		}
+	}
+
+	if e.op == .Mat_Mult {
+		// @ operator → matmul shape constraint
+		add_constraint(ctx.cs, Shape_Matmul{
+			result_var = result_var,
+			a_var      = a_var,
+			b_var      = b_var,
+			loc        = e.loc,
+		})
+	} else if e.op == .Add || e.op == .Sub || e.op == .Mult || e.op == .Div {
+		// Elementwise ops → broadcasting shape constraint
+		if left_is_tensor && right_is_tensor {
+			add_constraint(ctx.cs, Shape_Broadcast{
+				result_var = result_var,
+				a_var      = a_var,
+				b_var      = b_var,
+				loc        = e.loc,
+			})
+		}
+	}
+}
+
+// Collect shape constraints from x.reshape(shape) calls
+collect_reshape_shape :: proc(e: ^parser.Call_Expr, ctx: ^Collect_Context) {
+	// Check for x.reshape(shape_tuple) pattern
+	attr, is_attr := e.func.(^parser.Attribute_Expr)
+	if !is_attr || attr.attr != "reshape" { return }
+
+	// Check that receiver is a tensor
+	recv_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(attr.value)]; found {
+		recv_type = t
+	}
+	if _, is_tensor := _is_tensor_type(recv_type, ctx.reg); !is_tensor { return }
+
+	// Extract target shape from arguments
+	target_shape := make([dynamic]int, 0, 4, ctx.cs.allocator)
+	for arg in e.args {
+		if c, ok := arg.(^parser.Constant_Expr); ok {
+			if iv, iok := c.value.(i64); iok {
+				append(&target_shape, int(iv))
+				continue
+			}
+		}
+		// Tuple argument: reshape((2, 3, 4))
+		if tup, tok := arg.(^parser.Tuple_Expr); tok {
+			for elt in tup.elts {
+				if c, ok := elt.(^parser.Constant_Expr); ok {
+					if iv, iok := c.value.(i64); iok {
+						append(&target_shape, int(iv))
+						continue
+					}
+				}
+				append(&target_shape, -1)  // symbolic
+			}
+			break
+		}
+		append(&target_shape, -1)  // unknown dim
+	}
+	if len(target_shape) == 0 { return }
+
+	// Get constraint vars
+	src_var, src_ok := _get_tensor_var(attr.value, ctx)
+	if !src_ok { return }
+
+	result_var := Constraint_Var(u32(len(ctx.cs.vars)) + 1)
+	result_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(parser.Expr(e))]; found {
+		result_type = t
+	}
+	append(&ctx.cs.vars, Constraint_Var_Info{
+		id           = result_var,
+		symbol_id    = binder.INVALID_SYMBOL,
+		scope_id     = ctx.scope_id,
+		forward_type = result_type,
+	})
+	ctx.cs.var_constraints[result_var] = make([dynamic]int, 0, 4, ctx.cs.allocator)
+
+	ts := make([]int, len(target_shape), ctx.cs.allocator)
+	copy(ts, target_shape[:])
+	add_constraint(ctx.cs, Shape_Reshape{
+		result_var   = result_var,
+		src_var      = src_var,
+		target_shape = ts,
+		loc          = e.loc,
+	})
+}
+
+// Collect shape constraints from x.T attribute access (transpose)
+collect_transpose_shape :: proc(e: ^parser.Attribute_Expr, ctx: ^Collect_Context) {
+	if e.attr != "T" && e.attr != "transpose" { return }
+
+	// Check that receiver is a tensor
+	recv_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(e.value)]; found {
+		recv_type = t
+	}
+	if _, is_tensor := _is_tensor_type(recv_type, ctx.reg); !is_tensor { return }
+
+	src_var, src_ok := _get_tensor_var(e.value, ctx)
+	if !src_ok { return }
+
+	result_var := Constraint_Var(u32(len(ctx.cs.vars)) + 1)
+	result_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(parser.Expr(e))]; found {
+		result_type = t
+	}
+	append(&ctx.cs.vars, Constraint_Var_Info{
+		id           = result_var,
+		symbol_id    = binder.INVALID_SYMBOL,
+		scope_id     = ctx.scope_id,
+		forward_type = result_type,
+	})
+	ctx.cs.var_constraints[result_var] = make([dynamic]int, 0, 4, ctx.cs.allocator)
+
+	add_constraint(ctx.cs, Shape_Transpose{
+		result_var = result_var,
+		src_var    = src_var,
+		loc        = e.loc,
+	})
+}
+
+// Collect shape constraints from sum/mean/max/min reduction calls
+collect_reduction_shape :: proc(e: ^parser.Call_Expr, ctx: ^Collect_Context) {
+	// Check for x.sum(axis=N) or sum(x, axis=N) patterns
+	method_name := ""
+	recv_expr: parser.Expr = nil
+
+	// Pattern 1: x.sum(axis=0)
+	if attr, is_attr := e.func.(^parser.Attribute_Expr); is_attr {
+		switch attr.attr {
+		case "sum", "mean", "max", "min", "prod", "std", "var":
+			method_name = attr.attr
+			recv_expr = attr.value
+		}
+	}
+	if method_name == "" || recv_expr == nil { return }
+
+	// Check receiver is tensor
+	recv_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(recv_expr)]; found {
+		recv_type = t
+	}
+	if _, is_tensor := _is_tensor_type(recv_type, ctx.reg); !is_tensor { return }
+
+	src_var, src_ok := _get_tensor_var(recv_expr, ctx)
+	if !src_ok { return }
+
+	// Extract axis from arguments (positional or keyword)
+	axis := -1  // -1 = reduce all dims → scalar
+	if len(e.args) > 0 {
+		if c, ok := e.args[0].(^parser.Constant_Expr); ok {
+			if iv, iok := c.value.(i64); iok {
+				axis = int(iv)
+			}
+		}
+	}
+	for kw in e.keywords {
+		if kw.arg == "axis" {
+			if c, ok := kw.value.(^parser.Constant_Expr); ok {
+				if iv, iok := c.value.(i64); iok {
+					axis = int(iv)
+				}
+			}
+		}
+	}
+
+	result_var := Constraint_Var(u32(len(ctx.cs.vars)) + 1)
+	result_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(parser.Expr(e))]; found {
+		result_type = t
+	}
+	append(&ctx.cs.vars, Constraint_Var_Info{
+		id           = result_var,
+		symbol_id    = binder.INVALID_SYMBOL,
+		scope_id     = ctx.scope_id,
+		forward_type = result_type,
+	})
+	ctx.cs.var_constraints[result_var] = make([dynamic]int, 0, 4, ctx.cs.allocator)
+
+	add_constraint(ctx.cs, Shape_Reduce{
+		result_var = result_var,
+		src_var    = src_var,
+		axis       = axis,
+		loc        = e.loc,
+	})
+}
+
+// ==================== Device Constraint Collection ====================
+
+// Detect .cuda(), .cpu(), .to("cuda"), .to(device) calls on tensors
+collect_device_transfer :: proc(e: ^parser.Call_Expr, ctx: ^Collect_Context) {
+	attr, is_attr := e.func.(^parser.Attribute_Expr)
+	if !is_attr { return }
+
+	// Check receiver is tensor
+	recv_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(attr.value)]; found {
+		recv_type = t
+	}
+	if _, is_tensor := _is_tensor_type(recv_type, ctx.reg); !is_tensor { return }
+
+	device := Device_Kind.Unknown
+	switch attr.attr {
+	case "cuda": device = .CUDA
+	case "cpu":  device = .CPU
+	case "to":
+		// .to("cuda"), .to("cpu"), .to(device)
+		if len(e.args) > 0 {
+			if c, ok := e.args[0].(^parser.Constant_Expr); ok {
+				if sv, sok := c.value.(string); sok {
+					switch sv {
+					case "cuda", "gpu": device = .CUDA
+					case "cpu":         device = .CPU
+					case "metal", "mps": device = .Metal
+					}
+				}
+			}
+		}
+	}
+	if device == .Unknown { return }
+
+	src_var, src_ok := _get_tensor_var(attr.value, ctx)
+	if !src_ok { return }
+
+	// Create result var
+	result_var := Constraint_Var(u32(len(ctx.cs.vars)) + 1)
+	result_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(parser.Expr(e))]; found {
+		result_type = t
+	}
+	append(&ctx.cs.vars, Constraint_Var_Info{
+		id           = result_var,
+		symbol_id    = binder.INVALID_SYMBOL,
+		scope_id     = ctx.scope_id,
+		forward_type = result_type,
+	})
+	ctx.cs.var_constraints[result_var] = make([dynamic]int, 0, 4, ctx.cs.allocator)
+
+	// Mark source device (inferred from pre-transfer state)
+	add_constraint(ctx.cs, Device_Transfer{
+		result_var = result_var,
+		src_var    = src_var,
+		device     = device,
+		loc        = e.loc,
+	})
+	// Mark result as on target device
+	add_constraint(ctx.cs, Device_Eq{
+		var    = result_var,
+		device = device,
+		loc    = e.loc,
+	})
+}
+
+// Detect cross-device tensor operations: CPU tensor @ GPU tensor → error
+collect_cross_device_binop :: proc(e: ^parser.Bin_Op_Expr, ctx: ^Collect_Context) {
+	// Only check tensor binary ops
+	left_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(e.left)]; found {
+		left_type = t
+	}
+	right_type := TYPE_UNKNOWN
+	if t, found := ctx.expr_types[expr_to_rawptr(e.right)]; found {
+		right_type = t
+	}
+	left_tensor, l_ok := _is_tensor_type(left_type, ctx.reg)
+	right_tensor, r_ok := _is_tensor_type(right_type, ctx.reg)
+	_, _ = left_tensor, right_tensor  // suppress unused
+	if !l_ok || !r_ok { return }
+
+	// Both operands need device constraints for cross-device detection
+	// (actual validation happens in resolve_device_constraints)
+	a_var, a_ok := _get_tensor_var(e.left, ctx)
+	b_var, b_ok := _get_tensor_var(e.right, ctx)
+	if !a_ok || !b_ok { return }
+	_, _ = a_var, b_var  // registered — device resolution will check them
 }

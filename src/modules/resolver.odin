@@ -155,16 +155,18 @@ resolve_imports :: proc(
 		if !has_exports { continue }
 
 		if edge.is_whole {
-			// "import X" — create a Module_Type with X's exports
-			// Find the symbol for the imported module name
+			// "import X" or "import X.Y as Z"
+			// Use local_name from binder if available (handles aliases correctly)
 			local_name := imp.module_name
-			// For "import os.path", binder uses first component "os"
-			// Find the dot and truncate
 			for j := 0; j < len(local_name); j += 1 {
 				if local_name[j] == '.' {
 					local_name = local_name[:j]
 					break
 				}
+			}
+			// If binder recorded a local_name (alias), use that for scope lookup
+			if len(imp.local_name) > 0 {
+				local_name = imp.local_name
 			}
 
 			if sym_id, ok := mod_scope.symbols[local_name]; ok {

@@ -9,6 +9,7 @@ Import_Record :: struct {
 	level:       int,
 	loc:         parser.Src_Loc,
 	is_star:     bool,
+	local_name:  string,  // For whole imports: the local symbol name (alias or first component)
 }
 
 Import_Name :: struct {
@@ -38,6 +39,7 @@ record_import :: proc(b: ^Binder, stmt: ^parser.Import_Stmt) {
 			module_name = alias.name,
 			level       = 0,
 			loc         = stmt.loc,
+			local_name  = bound_name,
 		})
 	}
 }

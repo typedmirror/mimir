@@ -76,6 +76,7 @@ Union_Type :: struct {
 Callable_Type :: struct {
 	params:      []Param_Type,
 	return_type: Type_ID,
+	is_ellipsis: bool,  // Callable[..., T] — accepts any arguments
 }
 
 Param_Type :: struct {
@@ -151,10 +152,18 @@ Protocol_Type :: struct {
 	attrs:   map[string]Type_ID,
 }
 
+Tensor_Device :: enum u8 {
+	Unknown,    // default — no device info
+	CPU,
+	CUDA,
+	Metal,
+}
+
 Tensor_Type :: struct {
 	element_type: Type_ID,     // float32, float16, int32, etc.
 	shape:        []int,       // concrete dimensions (-1 = symbolic/unknown)
 	ndim:         int,         // number of dimensions (len(shape), cached)
+	device:       Tensor_Device,  // CPU/GPU placement (Unknown = untracked)
 }
 
 DataFrame_Type :: struct {
@@ -642,7 +651,12 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 				       src.return_type == TYPE_UNKNOWN || tgt.return_type == TYPE_UNKNOWN
 			}
 
-			// Target with 0 params (from Callable[..., T] or unresolved): just check return
+			// Ellipsis callable: Callable[..., T] — accepts any params, just check return
+			if src.is_ellipsis || tgt.is_ellipsis {
+				return is_assignable(reg, src.return_type, tgt.return_type) ||
+				       src.return_type == TYPE_UNKNOWN || tgt.return_type == TYPE_UNKNOWN
+			}
+			// Target with 0 params (from unresolved): just check return
 			if len(tgt.params) == 0 && len(src.params) > 0 {
 				return is_assignable(reg, src.return_type, tgt.return_type) ||
 				       src.return_type == TYPE_UNKNOWN || tgt.return_type == TYPE_UNKNOWN

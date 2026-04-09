@@ -1757,8 +1757,18 @@ cmd_check_single :: proc(
 	}
 
 	bind_result := binder.bind(module, file, arena.allocator)
-	for d in bind_result.diagnostics {
-		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
+	// Filter binder diagnostics by # type: ignore (whole-file and per-line)
+	has_whole_file_ignore := false
+	binder_ignore_lines := make(map[i32]bool, len(module.type_ignores), arena.allocator)
+	for ti in module.type_ignores {
+		binder_ignore_lines[ti.lineno] = true
+	}
+	if 0 in binder_ignore_lines { has_whole_file_ignore = true }
+	if !has_whole_file_ignore {
+		for d in bind_result.diagnostics {
+			if i32(d.location.line) in binder_ignore_lines { continue }
+			_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
+		}
 	}
 
 	flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
@@ -1862,8 +1872,10 @@ cmd_check_single :: proc(
 	)
 
 	// Emit flow diagnostics AFTER checker (checker may suppress F002 for Never-returning calls)
-	for d in flow_result.diagnostics {
-		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
+	if !has_whole_file_ignore {
+		for d in flow_result.diagnostics {
+			_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
+		}
 	}
 	// Deduplicate checker diagnostics — convergence loop can emit duplicates
 	check_seen := make(map[u64]bool, len(check_result.diagnostics), arena.allocator)

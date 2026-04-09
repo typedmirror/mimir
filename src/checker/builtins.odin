@@ -316,8 +316,13 @@ resolve_annotation :: proc(
 						}
 						return make_callable_type(reg, param_types, ret_type)
 					case:
-						// Callable[..., ret] — Ellipsis or unparseable params
-						return make_callable_type(reg, {}, ret_type)
+						// Callable[..., ret] — Ellipsis or unparseable params (accepts any args)
+						ct_id := make_callable_type(reg, {}, ret_type)
+						ct := get_type(reg, ct_id)
+						if ci, cok := &ct.info.(Callable_Type); cok {
+							ci.is_ellipsis = true
+						}
+						return ct_id
 					}
 				}
 			}

@@ -93,6 +93,29 @@ resolve_tensor_attr :: proc(reg: ^Type_Registry, tensor: ^Tensor_Type, attr: str
 	case "item":
 		return make_callable_type(reg, no_params, tensor.element_type)
 
+	// Device transfer (PyTorch-compatible) — returns tensor with device field set
+	case "cuda":
+		cuda_tensor := register_type(reg, Tensor_Type{
+			element_type = tensor.element_type, shape = tensor.shape, ndim = tensor.ndim,
+			device = .CUDA,
+		})
+		return make_callable_type(reg, no_params, cuda_tensor)
+	case "cpu":
+		cpu_tensor := register_type(reg, Tensor_Type{
+			element_type = tensor.element_type, shape = tensor.shape, ndim = tensor.ndim,
+			device = .CPU,
+		})
+		return make_callable_type(reg, no_params, cpu_tensor)
+	case "to":
+		// .to("cuda") / .to("cpu") — device resolved at constraint level, return same shape
+		return make_callable_type(reg,
+			{Param_Type{name = "device", type_id = TYPE_STR}},
+			same_tensor)
+	case "device":
+		return TYPE_STR
+	case "is_cuda":
+		return TYPE_BOOL
+
 	// Boolean methods
 	case "any":
 		return make_callable_type(reg,

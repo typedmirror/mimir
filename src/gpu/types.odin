@@ -117,7 +117,8 @@ resolve_gpu_dtype :: proc(expr: parser.Expr, ctx: ^GPU_Type_Context) -> checker.
 	return checker.INVALID_TYPE
 }
 
-// Helper: extract integer constant from an expression.
+// Helper: extract integer constant or symbolic dimension from an expression.
+// Returns positive int for concrete dims, <= SYMBOLIC_DIM_BASE for symbolic dims, -1 for unknown.
 extract_int_constant :: proc(expr: parser.Expr) -> int {
 	#partial switch e in expr {
 	case ^parser.Constant_Expr:
@@ -130,8 +131,23 @@ extract_int_constant :: proc(expr: parser.Expr) -> int {
 			inner := extract_int_constant(e.operand)
 			return -inner
 		}
+	case ^parser.Name_Expr:
+		// Symbolic dimension variable: single uppercase letter → deterministic ID
+		// N → -2, M → -3, K → -4, B → -5, C → -6, etc.
+		if len(e.id) == 1 {
+			ch := e.id[0]
+			if ch >= 'A' && ch <= 'Z' {
+				return checker.SYMBOLIC_DIM_BASE - int(ch - 'A')
+			}
+		}
+		// Multi-char symbolic dim names: hash to a negative ID
+		if len(e.id) > 0 && e.id[0] >= 'A' && e.id[0] <= 'Z' {
+			h := 0
+			for c in e.id { h = h * 31 + int(c) }
+			return checker.SYMBOLIC_DIM_BASE - (h % 1000) - 26
+		}
 	}
-	return -1 // unknown/symbolic
+	return -1 // unknown
 }
 
 // Helper to treat a ^Name_Expr as Expr for dtype resolution.

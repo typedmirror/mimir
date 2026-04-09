@@ -60,6 +60,14 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	// Register mimir.ml
 	register_mimir_ml(&vreg, reg)
 
+	// Register torch ecosystem
+	register_torch(&vreg, reg)
+	register_torch_nn(&vreg, reg)
+	register_torch_nn_functional(&vreg, reg)
+	register_torch_optim(&vreg, reg)
+	register_torch_cuda(&vreg, reg)
+	register_torch_utils_data(&vreg, reg)
+
 	return vreg
 }
 
@@ -97,8 +105,8 @@ resolve_virtual_imports :: proc(
 		if !vm_ok { continue }
 
 		if len(imp.names) == 0 {
-			// "import mimir.X" — create nested Module_Type so mimir.X.func works
-			// The binder creates a symbol for the top-level "mimir"
+			// "import mimir.X" or "import torch.nn as nn"
+			// Use local_name from binder if available (handles aliases correctly)
 			local_name := imp.module_name
 			dot_idx := -1
 			for i := 0; i < len(local_name); i += 1 {
@@ -110,17 +118,26 @@ resolve_virtual_imports :: proc(
 			bound_name := local_name[:dot_idx] if dot_idx >= 0 else local_name
 			sub_name := local_name[dot_idx+1:] if dot_idx >= 0 else ""
 
-			if sym_id, found := mod_scope.symbols[bound_name]; found {
-				// Create Module_Type for the sub-module (mimir.X)
+			// If binder recorded a local_name (alias), use that for scope lookup
+			lookup_name := bound_name
+			is_aliased := len(imp.local_name) > 0 && imp.local_name != bound_name
+			if is_aliased {
+				lookup_name = imp.local_name
+			}
+
+			if sym_id, found := mod_scope.symbols[lookup_name]; found {
+				// Create Module_Type for the sub-module
 				child_module_id := register_type(reg, Module_Type{
 					name    = imp.module_name,
 					exports = vm.exports,
 				})
 
-				if dot_idx >= 0 && len(sub_name) > 0 {
-					// Build nested: mimir → {X: Module_Type(mimir.X)}
+				if is_aliased {
+					// Aliased import: "import torch.nn as nn" → nn = Module_Type(torch.nn)
+					result[sym_id] = child_module_id
+				} else if dot_idx >= 0 && len(sub_name) > 0 {
+					// Non-aliased dotted: "import mimir.array" → mimir = {array: Module_Type}
 					if existing_id, has_existing := result[sym_id]; has_existing {
-						// Already have a parent Module_Type for "mimir" — add sub-module in-place
 						existing_type := get_type(reg, existing_id)
 						if existing_type != nil {
 							#partial switch &mod in existing_type.info {
@@ -129,7 +146,6 @@ resolve_virtual_imports :: proc(
 							}
 						}
 					} else {
-						// First sub-module — create parent Module_Type
 						parent_exports := make(map[string]Type_ID, 4, reg.allocator)
 						parent_exports[sub_name] = child_module_id
 						parent_id := register_type(reg, Module_Type{
@@ -1458,6 +1474,1016 @@ register_mimir_ml :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 
 	vreg.modules["mimir.ml"] = Virtual_Module{
 		name    = "mimir.ml",
+		exports = exports,
+	}
+}
+
+// ==================== torch ====================
+
+register_torch :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 64, reg.allocator)
+
+	tensor_f64  := make_tensor_type(reg, TYPE_FLOAT, {})
+	tensor_int  := make_tensor_type(reg, TYPE_INT, {})
+	tensor_bool := make_tensor_type(reg, TYPE_BOOL, {})
+	no_params   := make([]Param_Type, 0, reg.allocator)
+
+	// Common params
+	shape_param := Param_Type{name = "size", type_id = TYPE_ANY}
+	dtype_param := Param_Type{name = "dtype", type_id = TYPE_ANY, has_default = true}
+	device_param := Param_Type{name = "device", type_id = TYPE_ANY, has_default = true}
+	requires_grad_param := Param_Type{name = "requires_grad", type_id = TYPE_BOOL, has_default = true}
+
+	// ---- Tensor creation ----
+	create_params := []Param_Type{shape_param, dtype_param, device_param, requires_grad_param}
+	exports["zeros"]    = make_callable_type(reg, create_params, tensor_f64)
+	exports["ones"]     = make_callable_type(reg, create_params, tensor_f64)
+	exports["randn"]    = make_callable_type(reg, create_params, tensor_f64)
+	exports["empty"]    = make_callable_type(reg, create_params, tensor_f64)
+	exports["rand"]     = make_callable_type(reg, create_params, tensor_f64)
+	exports["full"]     = make_callable_type(reg,
+		{shape_param, Param_Type{name = "fill_value", type_id = TYPE_FLOAT}, dtype_param, device_param},
+		tensor_f64)
+	exports["arange"]   = make_callable_type(reg,
+		{Param_Type{name = "start", type_id = TYPE_FLOAT},
+		 Param_Type{name = "end", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "step", type_id = TYPE_FLOAT, has_default = true},
+		 dtype_param, device_param},
+		tensor_f64)
+	exports["linspace"] = make_callable_type(reg,
+		{Param_Type{name = "start", type_id = TYPE_FLOAT},
+		 Param_Type{name = "end", type_id = TYPE_FLOAT},
+		 Param_Type{name = "steps", type_id = TYPE_INT},
+		 dtype_param, device_param},
+		tensor_f64)
+	exports["eye"]      = make_callable_type(reg,
+		{Param_Type{name = "n", type_id = TYPE_INT},
+		 Param_Type{name = "m", type_id = TYPE_INT, has_default = true},
+		 dtype_param, device_param},
+		tensor_f64)
+
+	// Tensor from data
+	exports["tensor"]     = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY}, dtype_param, device_param, requires_grad_param},
+		tensor_f64)
+	exports["as_tensor"]  = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY}, dtype_param, device_param},
+		tensor_f64)
+	exports["from_numpy"] = make_callable_type(reg,
+		{Param_Type{name = "ndarray", type_id = TYPE_ANY}},
+		tensor_f64)
+
+	// ---- Composition ----
+	exports["cat"]   = make_callable_type(reg,
+		{Param_Type{name = "tensors", type_id = TYPE_ANY},
+		 Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["stack"] = make_callable_type(reg,
+		{Param_Type{name = "tensors", type_id = TYPE_ANY},
+		 Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["chunk"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64},
+		 Param_Type{name = "chunks", type_id = TYPE_INT},
+		 Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		make_list_type(reg, tensor_f64))
+	exports["split"] = make_callable_type(reg,
+		{Param_Type{name = "tensor", type_id = tensor_f64},
+		 Param_Type{name = "split_size_or_sections", type_id = TYPE_ANY},
+		 Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		make_list_type(reg, tensor_f64))
+	exports["unsqueeze"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64},
+		 Param_Type{name = "dim", type_id = TYPE_INT}},
+		tensor_f64)
+	exports["squeeze"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64},
+		 Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["reshape"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64},
+		 Param_Type{name = "shape", type_id = TYPE_ANY}},
+		tensor_f64)
+	exports["transpose"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64},
+		 Param_Type{name = "dim0", type_id = TYPE_INT},
+		 Param_Type{name = "dim1", type_id = TYPE_INT}},
+		tensor_f64)
+	exports["permute"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64},
+		 Param_Type{name = "dims", type_id = TYPE_ANY}},
+		tensor_f64)
+
+	// ---- Math ----
+	t_param := Param_Type{name = "input", type_id = tensor_f64}
+	exports["matmul"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "other", type_id = tensor_f64}},
+		tensor_f64)
+	exports["mm"]     = make_callable_type(reg,
+		{t_param, Param_Type{name = "mat2", type_id = tensor_f64}},
+		tensor_f64)
+	exports["bmm"]    = make_callable_type(reg,
+		{t_param, Param_Type{name = "mat2", type_id = tensor_f64}},
+		tensor_f64)
+	exports["einsum"] = make_callable_type(reg,
+		{Param_Type{name = "equation", type_id = TYPE_STR},
+		 Param_Type{name = "operands", type_id = TYPE_ANY}},
+		tensor_f64)
+	exports["abs"]    = make_callable_type(reg, {t_param}, tensor_f64)
+	exports["sqrt"]   = make_callable_type(reg, {t_param}, tensor_f64)
+	exports["exp"]    = make_callable_type(reg, {t_param}, tensor_f64)
+	exports["log"]    = make_callable_type(reg, {t_param}, tensor_f64)
+	exports["pow"]    = make_callable_type(reg,
+		{t_param, Param_Type{name = "exponent", type_id = TYPE_FLOAT}},
+		tensor_f64)
+	exports["clamp"]  = make_callable_type(reg,
+		{t_param,
+		 Param_Type{name = "min", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "max", type_id = TYPE_FLOAT, has_default = true}},
+		tensor_f64)
+
+	// ---- Reductions ----
+	axis_param := Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}
+	keepdim_param := Param_Type{name = "keepdim", type_id = TYPE_BOOL, has_default = true}
+	exports["sum"]     = make_callable_type(reg, {t_param, axis_param, keepdim_param}, tensor_f64)
+	exports["mean"]    = make_callable_type(reg, {t_param, axis_param, keepdim_param}, tensor_f64)
+	exports["max"]     = make_callable_type(reg, {t_param, axis_param, keepdim_param}, tensor_f64)
+	exports["min"]     = make_callable_type(reg, {t_param, axis_param, keepdim_param}, tensor_f64)
+	exports["argmax"]  = make_callable_type(reg, {t_param, axis_param, keepdim_param}, tensor_int)
+	exports["argmin"]  = make_callable_type(reg, {t_param, axis_param, keepdim_param}, tensor_int)
+	exports["norm"]    = make_callable_type(reg,
+		{t_param, Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true}, axis_param, keepdim_param},
+		tensor_f64)
+
+	// ---- Comparison ----
+	exports["eq"]      = make_callable_type(reg, {t_param, Param_Type{name = "other", type_id = tensor_f64}}, tensor_bool)
+	exports["ne"]      = make_callable_type(reg, {t_param, Param_Type{name = "other", type_id = tensor_f64}}, tensor_bool)
+	exports["gt"]      = make_callable_type(reg, {t_param, Param_Type{name = "other", type_id = tensor_f64}}, tensor_bool)
+	exports["lt"]      = make_callable_type(reg, {t_param, Param_Type{name = "other", type_id = tensor_f64}}, tensor_bool)
+	exports["ge"]      = make_callable_type(reg, {t_param, Param_Type{name = "other", type_id = tensor_f64}}, tensor_bool)
+	exports["le"]      = make_callable_type(reg, {t_param, Param_Type{name = "other", type_id = tensor_f64}}, tensor_bool)
+	exports["isnan"]   = make_callable_type(reg, {t_param}, tensor_bool)
+	exports["isinf"]   = make_callable_type(reg, {t_param}, tensor_bool)
+	exports["allclose"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "other", type_id = tensor_f64},
+		 Param_Type{name = "rtol", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "atol", type_id = TYPE_FLOAT, has_default = true}},
+		TYPE_BOOL)
+	exports["where"] = make_callable_type(reg,
+		{Param_Type{name = "condition", type_id = tensor_bool},
+		 Param_Type{name = "input", type_id = tensor_f64},
+		 Param_Type{name = "other", type_id = tensor_f64}},
+		tensor_f64)
+
+	// ---- Tensor class (for isinstance and type annotations) ----
+	tensor_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	tensor_attrs["__call__"] = make_callable_type(reg,
+		{Param_Type{name = "data", type_id = TYPE_ANY}}, tensor_f64)
+	tensor_class := register_type(reg, Class_Type{
+		name  = "Tensor",
+		attrs = tensor_attrs,
+	})
+	exports["Tensor"] = tensor_class
+
+	// ---- Dtype constants ----
+	exports["float32"]  = TYPE_ANY
+	exports["float64"]  = TYPE_ANY
+	exports["float16"]  = TYPE_ANY
+	exports["bfloat16"] = TYPE_ANY
+	exports["int32"]    = TYPE_ANY
+	exports["int64"]    = TYPE_ANY
+	exports["int16"]    = TYPE_ANY
+	exports["int8"]     = TYPE_ANY
+	exports["uint8"]    = TYPE_ANY
+	exports["bool"]     = TYPE_ANY
+	exports["long"]     = TYPE_ANY
+	exports["float"]    = TYPE_ANY
+	exports["int"]      = TYPE_ANY
+
+	// ---- Context managers ----
+	exports["no_grad"]     = make_callable_type(reg, no_params, TYPE_ANY)
+	exports["enable_grad"] = make_callable_type(reg, no_params, TYPE_ANY)
+	exports["set_grad_enabled"] = make_callable_type(reg,
+		{Param_Type{name = "mode", type_id = TYPE_BOOL}}, TYPE_ANY)
+
+	// ---- Utility ----
+	exports["save"] = make_callable_type(reg,
+		{Param_Type{name = "obj", type_id = TYPE_ANY},
+		 Param_Type{name = "f", type_id = TYPE_STR}},
+		TYPE_NONE)
+	exports["load"] = make_callable_type(reg,
+		{Param_Type{name = "f", type_id = TYPE_STR},
+		 Param_Type{name = "map_location", type_id = TYPE_ANY, has_default = true}},
+		TYPE_ANY)
+	exports["manual_seed"] = make_callable_type(reg,
+		{Param_Type{name = "seed", type_id = TYPE_INT}},
+		TYPE_NONE)
+	exports["is_tensor"] = make_callable_type(reg,
+		{Param_Type{name = "obj", type_id = TYPE_ANY}},
+		TYPE_BOOL)
+
+	// ---- Integer tensor creation ----
+	exports["randint"] = make_callable_type(reg,
+		{Param_Type{name = "low", type_id = TYPE_INT},
+		 Param_Type{name = "high", type_id = TYPE_INT},
+		 Param_Type{name = "size", type_id = TYPE_ANY},
+		 dtype_param, device_param},
+		tensor_int)
+	exports["zeros_like"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64}, dtype_param, device_param},
+		tensor_f64)
+	exports["ones_like"]  = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64}, dtype_param, device_param},
+		tensor_f64)
+	exports["randn_like"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64}, dtype_param, device_param},
+		tensor_f64)
+	exports["empty_like"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64}, dtype_param, device_param},
+		tensor_f64)
+	exports["rand_like"]  = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64}, dtype_param, device_param},
+		tensor_f64)
+
+	// ---- Device ----
+	exports["device"] = make_callable_type(reg,
+		{Param_Type{name = "type", type_id = TYPE_STR}},
+		TYPE_ANY)
+
+	vreg.modules["torch"] = Virtual_Module{
+		name    = "torch",
+		exports = exports,
+	}
+}
+
+// ==================== torch.nn ====================
+
+register_torch_nn :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 64, reg.allocator)
+
+	tensor_f64 := make_tensor_type(reg, TYPE_FLOAT, {})
+	no_params  := make([]Param_Type, 0, reg.allocator)
+
+	// ---- Module base class ----
+	module_attrs := make(map[string]Type_ID, 24, reg.allocator)
+	module_attrs["forward"]           = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = TYPE_ANY}}, tensor_f64)
+	module_attrs["__call__"]          = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = TYPE_ANY}}, tensor_f64)
+	module_attrs["parameters"]        = make_callable_type(reg, no_params,
+		make_list_type(reg, tensor_f64))
+	module_attrs["named_parameters"]  = make_callable_type(reg, no_params,
+		make_list_type(reg, make_tuple_type(reg, {TYPE_STR, tensor_f64}, false)))
+	module_attrs["children"]          = make_callable_type(reg, no_params, TYPE_ANY)
+	module_attrs["modules"]           = make_callable_type(reg, no_params, TYPE_ANY)
+	module_attrs["train"]             = make_callable_type(reg,
+		{Param_Type{name = "mode", type_id = TYPE_BOOL, has_default = true}}, TYPE_ANY)
+	module_attrs["eval"]              = make_callable_type(reg, no_params, TYPE_ANY)
+	module_attrs["to"]                = make_callable_type(reg,
+		{Param_Type{name = "device", type_id = TYPE_ANY}}, TYPE_ANY)
+	module_attrs["cuda"]              = make_callable_type(reg, no_params, TYPE_ANY)
+	module_attrs["cpu"]               = make_callable_type(reg, no_params, TYPE_ANY)
+	module_attrs["state_dict"]        = make_callable_type(reg, no_params,
+		make_dict_type(reg, TYPE_STR, tensor_f64))
+	module_attrs["load_state_dict"]   = make_callable_type(reg,
+		{Param_Type{name = "state_dict", type_id = make_dict_type(reg, TYPE_STR, tensor_f64)},
+		 Param_Type{name = "strict", type_id = TYPE_BOOL, has_default = true}},
+		TYPE_NONE)
+	module_attrs["zero_grad"]         = make_callable_type(reg,
+		{Param_Type{name = "set_to_none", type_id = TYPE_BOOL, has_default = true}},
+		TYPE_NONE)
+	module_attrs["register_buffer"]   = make_callable_type(reg,
+		{Param_Type{name = "name", type_id = TYPE_STR},
+		 Param_Type{name = "tensor", type_id = TYPE_ANY}},
+		TYPE_NONE)
+	module_attrs["register_parameter"] = make_callable_type(reg,
+		{Param_Type{name = "name", type_id = TYPE_STR},
+		 Param_Type{name = "param", type_id = TYPE_ANY}},
+		TYPE_NONE)
+	module_attrs["apply"]             = make_callable_type(reg,
+		{Param_Type{name = "fn", type_id = TYPE_ANY}}, TYPE_ANY)
+	module_attrs["requires_grad_"]    = make_callable_type(reg,
+		{Param_Type{name = "requires_grad", type_id = TYPE_BOOL, has_default = true}}, TYPE_ANY)
+	module_attrs["training"]          = TYPE_BOOL
+
+	module_class := register_type(reg, Class_Type{
+		name  = "Module",
+		attrs = module_attrs,
+	})
+	exports["Module"] = module_class
+
+	// ---- Layer registration helper ----
+	_register_nn_layer :: proc(
+		reg: ^Type_Registry, exports: ^map[string]Type_ID,
+		name: string, init_params: []Param_Type,
+		module_attrs: map[string]Type_ID, tensor_type: Type_ID,
+		module_class: Type_ID,
+	) {
+		layer_attrs := make(map[string]Type_ID, len(module_attrs) + 4, reg.allocator)
+		for k, v in module_attrs { layer_attrs[k] = v }
+		layer_attrs["__call__"] = make_callable_type(reg,
+			{Param_Type{name = "input", type_id = tensor_type}}, tensor_type)
+		layer_attrs["forward"]  = make_callable_type(reg,
+			{Param_Type{name = "input", type_id = tensor_type}}, tensor_type)
+
+		// __init__ so the checker can validate constructor args
+		init_ps := make([]Param_Type, len(init_params), reg.allocator)
+		copy(init_ps, init_params)
+		layer_attrs["__init__"] = make_callable_type(reg, init_ps, TYPE_NONE)
+
+		bases := make([]Type_ID, 1, reg.allocator)
+		bases[0] = module_class
+
+		class_id := register_type(reg, Class_Type{
+			name  = name,
+			attrs = layer_attrs,
+			bases = bases,
+		})
+		exports[name] = class_id
+	}
+
+	// ---- Linear layers ----
+	_register_nn_layer(reg, &exports, "Linear", {
+		Param_Type{name = "in_features",  type_id = TYPE_INT},
+		Param_Type{name = "out_features", type_id = TYPE_INT},
+		Param_Type{name = "bias", type_id = TYPE_BOOL, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "Bilinear", {
+		Param_Type{name = "in1_features", type_id = TYPE_INT},
+		Param_Type{name = "in2_features", type_id = TYPE_INT},
+		Param_Type{name = "out_features", type_id = TYPE_INT},
+		Param_Type{name = "bias", type_id = TYPE_BOOL, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	// ---- Convolution layers ----
+	_register_nn_layer(reg, &exports, "Conv1d", {
+		Param_Type{name = "in_channels",  type_id = TYPE_INT},
+		Param_Type{name = "out_channels", type_id = TYPE_INT},
+		Param_Type{name = "kernel_size",  type_id = TYPE_INT},
+		Param_Type{name = "stride",  type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "padding", type_id = TYPE_INT, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "Conv2d", {
+		Param_Type{name = "in_channels",  type_id = TYPE_INT},
+		Param_Type{name = "out_channels", type_id = TYPE_INT},
+		Param_Type{name = "kernel_size",  type_id = TYPE_INT},
+		Param_Type{name = "stride",  type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "padding", type_id = TYPE_INT, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	// ---- Normalization layers ----
+	_register_nn_layer(reg, &exports, "BatchNorm1d", {
+		Param_Type{name = "num_features", type_id = TYPE_INT},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "BatchNorm2d", {
+		Param_Type{name = "num_features", type_id = TYPE_INT},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "LayerNorm", {
+		Param_Type{name = "normalized_shape", type_id = TYPE_ANY},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "GroupNorm", {
+		Param_Type{name = "num_groups", type_id = TYPE_INT},
+		Param_Type{name = "num_channels", type_id = TYPE_INT},
+	}, module_attrs, tensor_f64, module_class)
+
+	// ---- Dropout layers ----
+	_register_nn_layer(reg, &exports, "Dropout", {
+		Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "Dropout2d", {
+		Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	// ---- Recurrent layers ----
+	_register_nn_layer(reg, &exports, "LSTM", {
+		Param_Type{name = "input_size",  type_id = TYPE_INT},
+		Param_Type{name = "hidden_size", type_id = TYPE_INT},
+		Param_Type{name = "num_layers",  type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "batch_first", type_id = TYPE_BOOL, has_default = true},
+		Param_Type{name = "dropout",     type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "bidirectional", type_id = TYPE_BOOL, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "GRU", {
+		Param_Type{name = "input_size",  type_id = TYPE_INT},
+		Param_Type{name = "hidden_size", type_id = TYPE_INT},
+		Param_Type{name = "num_layers",  type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "batch_first", type_id = TYPE_BOOL, has_default = true},
+		Param_Type{name = "dropout",     type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "bidirectional", type_id = TYPE_BOOL, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	// ---- Attention / Transformer ----
+	_register_nn_layer(reg, &exports, "MultiheadAttention", {
+		Param_Type{name = "embed_dim",  type_id = TYPE_INT},
+		Param_Type{name = "num_heads",  type_id = TYPE_INT},
+		Param_Type{name = "dropout",    type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "batch_first", type_id = TYPE_BOOL, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "TransformerEncoderLayer", {
+		Param_Type{name = "d_model", type_id = TYPE_INT},
+		Param_Type{name = "nhead",   type_id = TYPE_INT},
+		Param_Type{name = "dim_feedforward", type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "dropout", type_id = TYPE_FLOAT, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "TransformerDecoderLayer", {
+		Param_Type{name = "d_model", type_id = TYPE_INT},
+		Param_Type{name = "nhead",   type_id = TYPE_INT},
+		Param_Type{name = "dim_feedforward", type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "dropout", type_id = TYPE_FLOAT, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "TransformerEncoder", {
+		Param_Type{name = "encoder_layer", type_id = TYPE_ANY},
+		Param_Type{name = "num_layers",    type_id = TYPE_INT},
+	}, module_attrs, tensor_f64, module_class)
+
+	_register_nn_layer(reg, &exports, "TransformerDecoder", {
+		Param_Type{name = "decoder_layer", type_id = TYPE_ANY},
+		Param_Type{name = "num_layers",    type_id = TYPE_INT},
+	}, module_attrs, tensor_f64, module_class)
+
+	// ---- Embedding ----
+	_register_nn_layer(reg, &exports, "Embedding", {
+		Param_Type{name = "num_embeddings", type_id = TYPE_INT},
+		Param_Type{name = "embedding_dim",  type_id = TYPE_INT},
+		Param_Type{name = "padding_idx",    type_id = TYPE_INT, has_default = true},
+	}, module_attrs, tensor_f64, module_class)
+
+	// ---- Activation modules ----
+	act_names := [?]string{"ReLU", "GELU", "SiLU", "Sigmoid", "Tanh", "LeakyReLU", "ELU", "PReLU", "Mish"}
+	for name in act_names {
+		_register_nn_layer(reg, &exports, name, {}, module_attrs, tensor_f64, module_class)
+	}
+
+	// Softmax / LogSoftmax need dim
+	softmax_init := []Param_Type{Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}}
+	_register_nn_layer(reg, &exports, "Softmax", softmax_init, module_attrs, tensor_f64, module_class)
+	_register_nn_layer(reg, &exports, "LogSoftmax", softmax_init, module_attrs, tensor_f64, module_class)
+
+	// ---- Loss modules ----
+	_register_loss :: proc(
+		reg: ^Type_Registry, exports: ^map[string]Type_ID,
+		name: string, extra_params: []Param_Type,
+		module_attrs: map[string]Type_ID, tensor_type: Type_ID,
+		module_class: Type_ID,
+	) {
+		loss_attrs := make(map[string]Type_ID, len(module_attrs) + 4, reg.allocator)
+		for k, v in module_attrs { loss_attrs[k] = v }
+		loss_attrs["__call__"] = make_callable_type(reg,
+			{Param_Type{name = "input", type_id = tensor_type},
+			 Param_Type{name = "target", type_id = tensor_type}},
+			tensor_type)
+		loss_attrs["forward"]  = make_callable_type(reg,
+			{Param_Type{name = "input", type_id = tensor_type},
+			 Param_Type{name = "target", type_id = tensor_type}},
+			tensor_type)
+
+		init_ps := make([]Param_Type, len(extra_params), reg.allocator)
+		copy(init_ps, extra_params)
+		if len(init_ps) > 0 {
+			loss_attrs["__init__"] = make_callable_type(reg, init_ps, TYPE_NONE)
+		}
+
+		bases := make([]Type_ID, 1, reg.allocator)
+		bases[0] = module_class
+
+		class_id := register_type(reg, Class_Type{
+			name  = name,
+			attrs = loss_attrs,
+			bases = bases,
+		})
+		exports[name] = class_id
+	}
+
+	reduction_param := Param_Type{name = "reduction", type_id = TYPE_STR, has_default = true}
+	_register_loss(reg, &exports, "CrossEntropyLoss",
+		{Param_Type{name = "weight", type_id = TYPE_ANY, has_default = true}, reduction_param},
+		module_attrs, tensor_f64, module_class)
+	_register_loss(reg, &exports, "MSELoss", {reduction_param}, module_attrs, tensor_f64, module_class)
+	_register_loss(reg, &exports, "L1Loss", {reduction_param}, module_attrs, tensor_f64, module_class)
+	_register_loss(reg, &exports, "NLLLoss",
+		{Param_Type{name = "weight", type_id = TYPE_ANY, has_default = true}, reduction_param},
+		module_attrs, tensor_f64, module_class)
+	_register_loss(reg, &exports, "BCELoss", {reduction_param}, module_attrs, tensor_f64, module_class)
+	_register_loss(reg, &exports, "BCEWithLogitsLoss", {reduction_param}, module_attrs, tensor_f64, module_class)
+	_register_loss(reg, &exports, "SmoothL1Loss", {reduction_param}, module_attrs, tensor_f64, module_class)
+	_register_loss(reg, &exports, "HuberLoss", {reduction_param}, module_attrs, tensor_f64, module_class)
+
+	// ---- Containers ----
+	// Sequential: accepts *modules, callable Tensor → Tensor
+	seq_attrs := make(map[string]Type_ID, len(module_attrs) + 2, reg.allocator)
+	for k, v in module_attrs { seq_attrs[k] = v }
+	seq_attrs["__call__"] = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64}}, tensor_f64)
+	seq_attrs["forward"]  = make_callable_type(reg,
+		{Param_Type{name = "input", type_id = tensor_f64}}, tensor_f64)
+	seq_attrs["__getitem__"] = make_callable_type(reg,
+		{Param_Type{name = "idx", type_id = TYPE_INT}}, TYPE_ANY)
+	seq_attrs["__len__"] = make_callable_type(reg, no_params, TYPE_INT)
+
+	seq_bases := make([]Type_ID, 1, reg.allocator)
+	seq_bases[0] = module_class
+	seq_class := register_type(reg, Class_Type{
+		name  = "Sequential",
+		attrs = seq_attrs,
+		bases = seq_bases,
+	})
+	exports["Sequential"] = seq_class
+
+	// ModuleList
+	modlist_attrs := make(map[string]Type_ID, len(module_attrs) + 4, reg.allocator)
+	for k, v in module_attrs { modlist_attrs[k] = v }
+	modlist_attrs["append"]      = make_callable_type(reg,
+		{Param_Type{name = "module", type_id = TYPE_ANY}}, TYPE_ANY)
+	modlist_attrs["__getitem__"] = make_callable_type(reg,
+		{Param_Type{name = "idx", type_id = TYPE_INT}}, TYPE_ANY)
+	modlist_attrs["__len__"]     = make_callable_type(reg, no_params, TYPE_INT)
+	modlist_attrs["__iter__"]    = make_callable_type(reg, no_params, TYPE_ANY)
+
+	modlist_bases := make([]Type_ID, 1, reg.allocator)
+	modlist_bases[0] = module_class
+	modlist_class := register_type(reg, Class_Type{
+		name  = "ModuleList",
+		attrs = modlist_attrs,
+		bases = modlist_bases,
+	})
+	exports["ModuleList"] = modlist_class
+
+	// ModuleDict
+	moddict_attrs := make(map[string]Type_ID, len(module_attrs) + 4, reg.allocator)
+	for k, v in module_attrs { moddict_attrs[k] = v }
+	moddict_attrs["__getitem__"]  = make_callable_type(reg,
+		{Param_Type{name = "key", type_id = TYPE_STR}}, TYPE_ANY)
+	moddict_attrs["__setitem__"]  = make_callable_type(reg,
+		{Param_Type{name = "key", type_id = TYPE_STR},
+		 Param_Type{name = "module", type_id = TYPE_ANY}}, TYPE_NONE)
+	moddict_attrs["__len__"]      = make_callable_type(reg, no_params, TYPE_INT)
+
+	moddict_bases := make([]Type_ID, 1, reg.allocator)
+	moddict_bases[0] = module_class
+	moddict_class := register_type(reg, Class_Type{
+		name  = "ModuleDict",
+		attrs = moddict_attrs,
+		bases = moddict_bases,
+	})
+	exports["ModuleDict"] = moddict_class
+
+	// Parameter (wraps a tensor with requires_grad=True)
+	param_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	param_attrs["data"]          = tensor_f64
+	param_attrs["grad"]          = tensor_f64
+	param_attrs["requires_grad"] = TYPE_BOOL
+
+	param_class := register_type(reg, Class_Type{
+		name  = "Parameter",
+		attrs = param_attrs,
+	})
+	exports["Parameter"] = param_class
+
+	vreg.modules["torch.nn"] = Virtual_Module{
+		name    = "torch.nn",
+		exports = exports,
+	}
+}
+
+// ==================== torch.nn.functional ====================
+
+register_torch_nn_functional :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 32, reg.allocator)
+
+	tensor_f64  := make_tensor_type(reg, TYPE_FLOAT, {})
+	tensor_bool := make_tensor_type(reg, TYPE_BOOL, {})
+	t_param := Param_Type{name = "input", type_id = tensor_f64}
+	inplace_param := Param_Type{name = "inplace", type_id = TYPE_BOOL, has_default = true}
+
+	// ---- Activations (Tensor → Tensor) ----
+	exports["relu"]       = make_callable_type(reg, {t_param, inplace_param}, tensor_f64)
+	exports["gelu"]       = make_callable_type(reg, {t_param}, tensor_f64)
+	exports["silu"]       = make_callable_type(reg, {t_param, inplace_param}, tensor_f64)
+	exports["sigmoid"]    = make_callable_type(reg, {t_param}, tensor_f64)
+	exports["tanh"]       = make_callable_type(reg, {t_param}, tensor_f64)
+	exports["leaky_relu"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "negative_slope", type_id = TYPE_FLOAT, has_default = true}, inplace_param},
+		tensor_f64)
+	exports["elu"]        = make_callable_type(reg,
+		{t_param, Param_Type{name = "alpha", type_id = TYPE_FLOAT, has_default = true}, inplace_param},
+		tensor_f64)
+	exports["softmax"]    = make_callable_type(reg,
+		{t_param, Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["log_softmax"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["softplus"]    = make_callable_type(reg, {t_param}, tensor_f64)
+
+	// ---- Loss functions ----
+	target_param := Param_Type{name = "target", type_id = tensor_f64}
+	reduction_param := Param_Type{name = "reduction", type_id = TYPE_STR, has_default = true}
+	exports["cross_entropy"]          = make_callable_type(reg, {t_param, target_param, reduction_param}, tensor_f64)
+	exports["mse_loss"]               = make_callable_type(reg, {t_param, target_param, reduction_param}, tensor_f64)
+	exports["l1_loss"]                = make_callable_type(reg, {t_param, target_param, reduction_param}, tensor_f64)
+	exports["nll_loss"]               = make_callable_type(reg, {t_param, target_param, reduction_param}, tensor_f64)
+	exports["binary_cross_entropy"]   = make_callable_type(reg, {t_param, target_param, reduction_param}, tensor_f64)
+	exports["smooth_l1_loss"]         = make_callable_type(reg, {t_param, target_param, reduction_param}, tensor_f64)
+
+	// ---- Pooling ----
+	exports["max_pool1d"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "kernel_size", type_id = TYPE_INT},
+		 Param_Type{name = "stride", type_id = TYPE_INT, has_default = true},
+		 Param_Type{name = "padding", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["max_pool2d"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "kernel_size", type_id = TYPE_INT},
+		 Param_Type{name = "stride", type_id = TYPE_INT, has_default = true},
+		 Param_Type{name = "padding", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["avg_pool2d"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "kernel_size", type_id = TYPE_INT},
+		 Param_Type{name = "stride", type_id = TYPE_INT, has_default = true},
+		 Param_Type{name = "padding", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+	exports["adaptive_avg_pool2d"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "output_size", type_id = TYPE_ANY}},
+		tensor_f64)
+	exports["adaptive_avg_pool1d"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "output_size", type_id = TYPE_ANY}},
+		tensor_f64)
+
+	// ---- Normalization ----
+	exports["batch_norm"] = make_callable_type(reg,
+		{t_param,
+		 Param_Type{name = "running_mean", type_id = TYPE_ANY},
+		 Param_Type{name = "running_var", type_id = TYPE_ANY},
+		 Param_Type{name = "weight", type_id = TYPE_ANY, has_default = true},
+		 Param_Type{name = "bias", type_id = TYPE_ANY, has_default = true}},
+		tensor_f64)
+	exports["layer_norm"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "normalized_shape", type_id = TYPE_ANY}},
+		tensor_f64)
+	exports["normalize"] = make_callable_type(reg,
+		{t_param,
+		 Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "dim", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+
+	// ---- Dropout ----
+	exports["dropout"] = make_callable_type(reg,
+		{t_param,
+		 Param_Type{name = "p", type_id = TYPE_FLOAT, has_default = true},
+		 Param_Type{name = "training", type_id = TYPE_BOOL, has_default = true},
+		 inplace_param},
+		tensor_f64)
+
+	// ---- Linear ----
+	exports["linear"] = make_callable_type(reg,
+		{t_param,
+		 Param_Type{name = "weight", type_id = tensor_f64},
+		 Param_Type{name = "bias", type_id = TYPE_ANY, has_default = true}},
+		tensor_f64)
+
+	// ---- Padding ----
+	exports["pad"] = make_callable_type(reg,
+		{t_param,
+		 Param_Type{name = "pad", type_id = TYPE_ANY},
+		 Param_Type{name = "mode", type_id = TYPE_STR, has_default = true},
+		 Param_Type{name = "value", type_id = TYPE_FLOAT, has_default = true}},
+		tensor_f64)
+
+	// ---- Interpolation ----
+	exports["interpolate"] = make_callable_type(reg,
+		{t_param,
+		 Param_Type{name = "size", type_id = TYPE_ANY, has_default = true},
+		 Param_Type{name = "scale_factor", type_id = TYPE_ANY, has_default = true},
+		 Param_Type{name = "mode", type_id = TYPE_STR, has_default = true}},
+		tensor_f64)
+
+	// ---- Embedding ----
+	exports["embedding"] = make_callable_type(reg,
+		{t_param,
+		 Param_Type{name = "weight", type_id = tensor_f64}},
+		tensor_f64)
+
+	// ---- one_hot ----
+	exports["one_hot"] = make_callable_type(reg,
+		{t_param, Param_Type{name = "num_classes", type_id = TYPE_INT, has_default = true}},
+		tensor_f64)
+
+	vreg.modules["torch.nn.functional"] = Virtual_Module{
+		name    = "torch.nn.functional",
+		exports = exports,
+	}
+}
+
+// ==================== torch.optim ====================
+
+register_torch_optim :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 16, reg.allocator)
+
+	no_params := make([]Param_Type, 0, reg.allocator)
+
+	// Common optimizer attrs
+	opt_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	opt_attrs["step"]           = make_callable_type(reg, no_params, TYPE_NONE)
+	opt_attrs["zero_grad"]      = make_callable_type(reg,
+		{Param_Type{name = "set_to_none", type_id = TYPE_BOOL, has_default = true}},
+		TYPE_NONE)
+	opt_attrs["state_dict"]     = make_callable_type(reg, no_params, TYPE_ANY)
+	opt_attrs["load_state_dict"] = make_callable_type(reg,
+		{Param_Type{name = "state_dict", type_id = TYPE_ANY}}, TYPE_NONE)
+	opt_attrs["param_groups"]   = TYPE_ANY
+
+	params_param := Param_Type{name = "params", type_id = TYPE_ANY}
+
+	_register_optim :: proc(
+		reg: ^Type_Registry, exports: ^map[string]Type_ID,
+		name: string, init_params: []Param_Type,
+		opt_attrs: map[string]Type_ID,
+	) {
+		attrs := make(map[string]Type_ID, len(opt_attrs) + 2, reg.allocator)
+		for k, v in opt_attrs { attrs[k] = v }
+
+		init_ps := make([]Param_Type, len(init_params), reg.allocator)
+		copy(init_ps, init_params)
+		attrs["__init__"] = make_callable_type(reg, init_ps, TYPE_NONE)
+
+		class_id := register_type(reg, Class_Type{
+			name  = name,
+			attrs = attrs,
+		})
+		exports[name] = class_id
+	}
+
+	_register_optim(reg, &exports, "SGD", {
+		params_param,
+		Param_Type{name = "lr", type_id = TYPE_FLOAT},
+		Param_Type{name = "momentum",     type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "weight_decay", type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "dampening",    type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "nesterov",     type_id = TYPE_BOOL, has_default = true},
+	}, opt_attrs)
+
+	_register_optim(reg, &exports, "Adam", {
+		params_param,
+		Param_Type{name = "lr",    type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "betas", type_id = TYPE_ANY,   has_default = true},
+		Param_Type{name = "eps",   type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "weight_decay", type_id = TYPE_FLOAT, has_default = true},
+	}, opt_attrs)
+
+	_register_optim(reg, &exports, "AdamW", {
+		params_param,
+		Param_Type{name = "lr",           type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "betas",        type_id = TYPE_ANY,   has_default = true},
+		Param_Type{name = "eps",          type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "weight_decay", type_id = TYPE_FLOAT, has_default = true},
+	}, opt_attrs)
+
+	_register_optim(reg, &exports, "RMSprop", {
+		params_param,
+		Param_Type{name = "lr",      type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "alpha",   type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "eps",     type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "momentum", type_id = TYPE_FLOAT, has_default = true},
+	}, opt_attrs)
+
+	_register_optim(reg, &exports, "Adagrad", {
+		params_param,
+		Param_Type{name = "lr",           type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "weight_decay", type_id = TYPE_FLOAT, has_default = true},
+	}, opt_attrs)
+
+	// ---- LR Schedulers ----
+	sched_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	sched_attrs["step"]         = make_callable_type(reg, no_params, TYPE_NONE)
+	sched_attrs["get_last_lr"]  = make_callable_type(reg, no_params,
+		make_list_type(reg, TYPE_FLOAT))
+	sched_attrs["state_dict"]   = make_callable_type(reg, no_params, TYPE_ANY)
+	sched_attrs["load_state_dict"] = make_callable_type(reg,
+		{Param_Type{name = "state_dict", type_id = TYPE_ANY}}, TYPE_NONE)
+
+	// Build lr_scheduler as a sub-module
+	sched_exports := make(map[string]Type_ID, 8, reg.allocator)
+
+	_register_scheduler :: proc(
+		reg: ^Type_Registry, exports: ^map[string]Type_ID,
+		name: string, init_params: []Param_Type,
+		sched_attrs: map[string]Type_ID,
+	) {
+		attrs := make(map[string]Type_ID, len(sched_attrs) + 2, reg.allocator)
+		for k, v in sched_attrs { attrs[k] = v }
+		init_ps := make([]Param_Type, len(init_params), reg.allocator)
+		copy(init_ps, init_params)
+		attrs["__init__"] = make_callable_type(reg, init_ps, TYPE_NONE)
+
+		class_id := register_type(reg, Class_Type{
+			name  = name,
+			attrs = attrs,
+		})
+		exports[name] = class_id
+	}
+
+	opt_param := Param_Type{name = "optimizer", type_id = TYPE_ANY}
+	_register_scheduler(reg, &sched_exports, "StepLR", {
+		opt_param,
+		Param_Type{name = "step_size", type_id = TYPE_INT},
+		Param_Type{name = "gamma", type_id = TYPE_FLOAT, has_default = true},
+	}, sched_attrs)
+
+	_register_scheduler(reg, &sched_exports, "CosineAnnealingLR", {
+		opt_param,
+		Param_Type{name = "T_max", type_id = TYPE_INT},
+		Param_Type{name = "eta_min", type_id = TYPE_FLOAT, has_default = true},
+	}, sched_attrs)
+
+	_register_scheduler(reg, &sched_exports, "ExponentialLR", {
+		opt_param,
+		Param_Type{name = "gamma", type_id = TYPE_FLOAT},
+	}, sched_attrs)
+
+	_register_scheduler(reg, &sched_exports, "ReduceLROnPlateau", {
+		opt_param,
+		Param_Type{name = "mode", type_id = TYPE_STR, has_default = true},
+		Param_Type{name = "factor", type_id = TYPE_FLOAT, has_default = true},
+		Param_Type{name = "patience", type_id = TYPE_INT, has_default = true},
+	}, sched_attrs)
+
+	_register_scheduler(reg, &sched_exports, "OneCycleLR", {
+		opt_param,
+		Param_Type{name = "max_lr", type_id = TYPE_FLOAT},
+		Param_Type{name = "total_steps", type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "epochs", type_id = TYPE_INT, has_default = true},
+	}, sched_attrs)
+
+	// Register lr_scheduler as a nested Module_Type in exports
+	sched_module := register_type(reg, Module_Type{
+		name    = "lr_scheduler",
+		exports = sched_exports,
+	})
+	exports["lr_scheduler"] = sched_module
+
+	vreg.modules["torch.optim"] = Virtual_Module{
+		name    = "torch.optim",
+		exports = exports,
+	}
+}
+
+// ==================== torch.cuda ====================
+
+register_torch_cuda :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 16, reg.allocator)
+
+	no_params := make([]Param_Type, 0, reg.allocator)
+
+	exports["is_available"]    = make_callable_type(reg, no_params, TYPE_BOOL)
+	exports["device_count"]    = make_callable_type(reg, no_params, TYPE_INT)
+	exports["current_device"]  = make_callable_type(reg, no_params, TYPE_INT)
+	exports["set_device"]      = make_callable_type(reg,
+		{Param_Type{name = "device", type_id = TYPE_INT}}, TYPE_NONE)
+	exports["synchronize"]     = make_callable_type(reg, no_params, TYPE_NONE)
+	exports["empty_cache"]     = make_callable_type(reg, no_params, TYPE_NONE)
+	exports["memory_allocated"] = make_callable_type(reg,
+		{Param_Type{name = "device", type_id = TYPE_ANY, has_default = true}}, TYPE_INT)
+	exports["memory_reserved"] = make_callable_type(reg,
+		{Param_Type{name = "device", type_id = TYPE_ANY, has_default = true}}, TYPE_INT)
+	exports["max_memory_allocated"] = make_callable_type(reg,
+		{Param_Type{name = "device", type_id = TYPE_ANY, has_default = true}}, TYPE_INT)
+	exports["reset_peak_memory_stats"] = make_callable_type(reg,
+		{Param_Type{name = "device", type_id = TYPE_ANY, has_default = true}}, TYPE_NONE)
+
+	vreg.modules["torch.cuda"] = Virtual_Module{
+		name    = "torch.cuda",
+		exports = exports,
+	}
+}
+
+// ==================== torch.utils.data ====================
+
+register_torch_utils_data :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
+	exports := make(map[string]Type_ID, 16, reg.allocator)
+
+	tensor_f64 := make_tensor_type(reg, TYPE_FLOAT, {})
+	no_params  := make([]Param_Type, 0, reg.allocator)
+
+	// ---- Dataset base class ----
+	dataset_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	dataset_attrs["__getitem__"] = make_callable_type(reg,
+		{Param_Type{name = "index", type_id = TYPE_INT}}, TYPE_ANY)
+	dataset_attrs["__len__"]     = make_callable_type(reg, no_params, TYPE_INT)
+
+	dataset_class := register_type(reg, Class_Type{
+		name  = "Dataset",
+		attrs = dataset_attrs,
+	})
+	exports["Dataset"] = dataset_class
+
+	// ---- TensorDataset ----
+	td_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	for k, v in dataset_attrs { td_attrs[k] = v }
+	td_attrs["tensors"] = TYPE_ANY
+
+	td_bases := make([]Type_ID, 1, reg.allocator)
+	td_bases[0] = dataset_class
+	td_class := register_type(reg, Class_Type{
+		name  = "TensorDataset",
+		attrs = td_attrs,
+		bases = td_bases,
+	})
+	exports["TensorDataset"] = td_class
+
+	// ---- DataLoader ----
+	dl_attrs := make(map[string]Type_ID, 8, reg.allocator)
+	dl_attrs["__iter__"]  = make_callable_type(reg, no_params, TYPE_ANY)
+	dl_attrs["__len__"]   = make_callable_type(reg, no_params, TYPE_INT)
+	dl_attrs["dataset"]   = TYPE_ANY
+	dl_attrs["batch_size"] = TYPE_INT
+
+	dl_init := []Param_Type{
+		Param_Type{name = "dataset", type_id = TYPE_ANY},
+		Param_Type{name = "batch_size", type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "shuffle", type_id = TYPE_BOOL, has_default = true},
+		Param_Type{name = "num_workers", type_id = TYPE_INT, has_default = true},
+		Param_Type{name = "pin_memory", type_id = TYPE_BOOL, has_default = true},
+		Param_Type{name = "drop_last", type_id = TYPE_BOOL, has_default = true},
+		Param_Type{name = "collate_fn", type_id = TYPE_ANY, has_default = true},
+	}
+	init_ps := make([]Param_Type, len(dl_init), reg.allocator)
+	copy(init_ps, dl_init)
+	dl_attrs["__init__"] = make_callable_type(reg, init_ps, TYPE_NONE)
+
+	dl_class := register_type(reg, Class_Type{
+		name  = "DataLoader",
+		attrs = dl_attrs,
+	})
+	exports["DataLoader"] = dl_class
+
+	// ---- Subset ----
+	subset_attrs := make(map[string]Type_ID, 4, reg.allocator)
+	for k, v in dataset_attrs { subset_attrs[k] = v }
+	subset_attrs["dataset"] = TYPE_ANY
+	subset_attrs["indices"] = TYPE_ANY
+
+	subset_bases := make([]Type_ID, 1, reg.allocator)
+	subset_bases[0] = dataset_class
+	subset_class := register_type(reg, Class_Type{
+		name  = "Subset",
+		attrs = subset_attrs,
+		bases = subset_bases,
+	})
+	exports["Subset"] = subset_class
+
+	// ---- Utility functions ----
+	exports["random_split"] = make_callable_type(reg,
+		{Param_Type{name = "dataset", type_id = TYPE_ANY},
+		 Param_Type{name = "lengths", type_id = TYPE_ANY},
+		 Param_Type{name = "generator", type_id = TYPE_ANY, has_default = true}},
+		make_list_type(reg, TYPE_ANY))
+
+	// ---- Sampler base class ----
+	sampler_attrs := make(map[string]Type_ID, 2, reg.allocator)
+	sampler_attrs["__iter__"] = make_callable_type(reg, no_params, TYPE_ANY)
+	sampler_attrs["__len__"]  = make_callable_type(reg, no_params, TYPE_INT)
+
+	sampler_class := register_type(reg, Class_Type{
+		name  = "Sampler",
+		attrs = sampler_attrs,
+	})
+	exports["Sampler"] = sampler_class
+
+	// RandomSampler
+	rs_attrs := make(map[string]Type_ID, 2, reg.allocator)
+	for k, v in sampler_attrs { rs_attrs[k] = v }
+	rs_bases := make([]Type_ID, 1, reg.allocator)
+	rs_bases[0] = sampler_class
+	rs_class := register_type(reg, Class_Type{
+		name  = "RandomSampler",
+		attrs = rs_attrs,
+		bases = rs_bases,
+	})
+	exports["RandomSampler"] = rs_class
+
+	// SequentialSampler
+	ss_attrs := make(map[string]Type_ID, 2, reg.allocator)
+	for k, v in sampler_attrs { ss_attrs[k] = v }
+	ss_bases := make([]Type_ID, 1, reg.allocator)
+	ss_bases[0] = sampler_class
+	ss_class := register_type(reg, Class_Type{
+		name  = "SequentialSampler",
+		attrs = ss_attrs,
+		bases = ss_bases,
+	})
+	exports["SequentialSampler"] = ss_class
+
+	vreg.modules["torch.utils.data"] = Virtual_Module{
+		name    = "torch.utils.data",
 		exports = exports,
 	}
 }
