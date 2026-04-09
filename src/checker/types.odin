@@ -4,6 +4,7 @@ import "core:mem"
 import "core:fmt"
 import "core:hash"
 import "core:slice"
+import "core:strings"
 
 import binder "mimir:binder"
 
@@ -354,10 +355,14 @@ make_union_type :: proc(reg: ^Type_Registry, members_in: []Type_ID) -> Type_ID {
 			}
 			if match { return cached }
 		}
-		// Hash collision — fall through to register new type
+		// Hash collision — register new type but DON'T overwrite cache
+		// (preserves type identity for the existing cached entry)
+		members_slice := make([]Type_ID, len(flat), reg.allocator)
+		copy(members_slice, flat[:])
+		return register_type(reg, Union_Type{members = members_slice})
 	}
 
-	// Register
+	// Register and cache
 	members_slice := make([]Type_ID, len(flat), reg.allocator)
 	copy(members_slice, flat[:])
 	id := register_type(reg, Union_Type{members = members_slice})
@@ -435,6 +440,10 @@ make_tensor_type :: proc(reg: ^Type_Registry, element_type: Type_ID, shape: []in
 				if match { return cached }
 			}
 		}
+		// Hash collision — register without overwriting cache
+		s := make([]int, len(shape), reg.allocator)
+		copy(s, shape)
+		return register_type(reg, Tensor_Type{element_type = element_type, shape = s, ndim = len(shape)})
 	}
 	s := make([]int, len(shape), reg.allocator)
 	copy(s, shape)
@@ -459,7 +468,6 @@ make_series_type :: proc(reg: ^Type_Registry, element: Type_ID, name: string = "
 
 is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> bool {
 	if source == target { return true }
-	if source == target { return true } // same type
 	if target == TYPE_ANY || target == TYPE_UNKNOWN { return true }
 	if source == TYPE_ANY || source == TYPE_UNKNOWN { return true }
 	if source == TYPE_NEVER { return true } // bottom type
@@ -543,12 +551,16 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			if src.key == TYPE_STR || src.key == TYPE_ANY || src.key == TYPE_UNKNOWN {
 				return true
 			}
-		case Instance_Type, Class_Type:
-			// Dict[str, V] → Instance/Class: allow when dict has string keys or unknown
-			// Covers TypedDict class syntax (pre-registered as Class_Type before
-			// being converted to TypedDict_Type during check_scope)
-			if src.key == TYPE_STR || src.key == TYPE_ANY || src.key == TYPE_UNKNOWN {
-				return true
+		case Instance_Type:
+			// Dict[str, V] → Instance: only if the underlying class is a TypedDict
+			// (TypedDicts start as Class_Type before conversion to TypedDict_Type)
+			inst_cls := get_type(reg, tgt.class_type)
+			if cls_info, cls_ok := inst_cls.info.(Class_Type); cls_ok {
+				if strings.has_suffix(cls_info.name, "Dict") || strings.has_suffix(cls_info.name, "dict") {
+					if src.key == TYPE_STR || src.key == TYPE_ANY || src.key == TYPE_UNKNOWN {
+						return true
+					}
+				}
 			}
 		}
 	}
@@ -1477,6 +1489,12 @@ specialize_class :: proc(reg: ^Type_Registry, class_type_id: Type_ID, type_args:
 		new_attrs[name] = substitute_type(reg, attr_type, subs)
 	}
 
+	// Substitute type args in bases (so Foo[int] has specialized base chain)
+	new_bases := make([]Type_ID, len(cls.bases), reg.allocator)
+	for i := 0; i < len(cls.bases); i += 1 {
+		new_bases[i] = substitute_type(reg, cls.bases[i], subs)
+	}
+
 	// Create specialized Class_Type with empty type_params but resolved type_args
 	spec_args := make([]Type_ID, len(type_args), reg.allocator)
 	copy(spec_args, type_args)
@@ -1484,7 +1502,7 @@ specialize_class :: proc(reg: ^Type_Registry, class_type_id: Type_ID, type_args:
 		name               = cls.name,
 		symbol_id          = cls.symbol_id,
 		scope_id           = cls.scope_id,
-		bases              = cls.bases,
+		bases              = new_bases,
 		attrs              = new_attrs,
 		resolved_type_args = spec_args,
 	})

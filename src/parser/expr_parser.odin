@@ -1277,20 +1277,98 @@ _make_const_none :: proc(ctx: ^Parser_Context, loc: Src_Loc) -> Expr {
 // Extract string content from a quoted string token (strip quotes + prefix)
 _extract_string_content :: proc(text: string, allocator: mem.Allocator) -> string {
 	s := text
-	// Skip prefix chars
+	// Detect raw string prefix (r/R, possibly after b/B/u/U)
+	is_raw := false
 	for len(s) > 0 && s[0] != '\'' && s[0] != '"' {
+		if s[0] == 'r' || s[0] == 'R' { is_raw = true }
 		s = s[1:]
 	}
 	if len(s) == 0 { return "" }
 
 	quote := s[0]
+	content: string
 	// Triple-quoted
 	if len(s) >= 6 && s[1] == quote && s[2] == quote {
-		return strings.clone(s[3:len(s)-3], allocator)
+		content = s[3:len(s)-3]
+	} else if len(s) >= 2 {
+		// Single-quoted
+		content = s[1:len(s)-1]
+	} else {
+		return ""
 	}
-	// Single-quoted
-	if len(s) >= 2 {
-		return strings.clone(s[1:len(s)-1], allocator)
+
+	// Raw strings: no escape processing
+	if is_raw {
+		return strings.clone(content, allocator)
 	}
-	return ""
+
+	// Process escape sequences for non-raw strings
+	return _process_escapes(content, allocator)
+}
+
+// Process Python escape sequences in string content.
+_process_escapes :: proc(s: string, allocator: mem.Allocator) -> string {
+	// Fast path: no backslashes → no escapes to process
+	has_backslash := false
+	for i := 0; i < len(s); i += 1 {
+		if s[i] == '\\' { has_backslash = true; break }
+	}
+	if !has_backslash {
+		return strings.clone(s, allocator)
+	}
+
+	buf := make([dynamic]u8, 0, len(s), allocator)
+	i := 0
+	for i < len(s) {
+		if s[i] == '\\' && i + 1 < len(s) {
+			i += 1
+			switch s[i] {
+			case 'n':  append(&buf, '\n'); i += 1
+			case 't':  append(&buf, '\t'); i += 1
+			case 'r':  append(&buf, '\r'); i += 1
+			case '\\': append(&buf, '\\'); i += 1
+			case '\'': append(&buf, '\''); i += 1
+			case '"':  append(&buf, '"');  i += 1
+			case '0':  append(&buf, 0);    i += 1
+			case 'a':  append(&buf, '\a'); i += 1
+			case 'b':  append(&buf, '\b'); i += 1
+			case 'f':  append(&buf, '\f'); i += 1
+			case 'v':  append(&buf, '\v'); i += 1
+			case 'x':
+				// \xNN — 2 hex digits
+				if i + 2 < len(s) {
+					hi := _hex_digit(s[i+1])
+					lo := _hex_digit(s[i+2])
+					if hi >= 0 && lo >= 0 {
+						append(&buf, u8(hi * 16 + lo))
+						i += 3
+					} else {
+						append(&buf, '\\')
+						append(&buf, 'x')
+						i += 1
+					}
+				} else {
+					append(&buf, '\\')
+					append(&buf, 'x')
+					i += 1
+				}
+			case:
+				// Unknown escape — keep as-is (Python behavior)
+				append(&buf, '\\')
+				append(&buf, s[i])
+				i += 1
+			}
+		} else {
+			append(&buf, s[i])
+			i += 1
+		}
+	}
+	return string(buf[:])
+}
+
+_hex_digit :: proc(c: u8) -> int {
+	if c >= '0' && c <= '9' { return int(c - '0') }
+	if c >= 'a' && c <= 'f' { return int(c - 'a' + 10) }
+	if c >= 'A' && c <= 'F' { return int(c - 'A' + 10) }
+	return -1
 }
