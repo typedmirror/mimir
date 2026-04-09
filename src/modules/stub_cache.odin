@@ -177,11 +177,16 @@ write_stub_cache :: proc(
 @(private = "file")
 _cache_path :: proc(module_name: string, cache_dir: string, cache_key: string, allocator: mem.Allocator) -> string {
 	safe_name := module_name
-	// Replace dots with underscores for filename safety
-	buf := make([dynamic]u8, 0, len(module_name), allocator)
-	for c in module_name {
-		if c == '.' { append(&buf, '_') }
-		else { append(&buf, u8(c)) }
+	// Replace dots with double-dash for filename safety (avoids collision
+	// between "foo.bar" and "foo_bar" which both mapped to "foo_bar" before)
+	buf := make([dynamic]u8, 0, len(module_name) + 4, allocator)
+	for i := 0; i < len(module_name); i += 1 {
+		if module_name[i] == '.' {
+			append(&buf, '-')
+			append(&buf, '-')
+		} else {
+			append(&buf, module_name[i])
+		}
 	}
 	safe_name = string(buf[:])
 

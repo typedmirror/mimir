@@ -134,6 +134,15 @@ version_satisfies :: proc(v: Version, constraints: []Constraint) -> bool {
 	return true
 }
 
+// Check if a version string satisfies a constraint string.
+_version_str_satisfies :: proc(version_str: string, constraint_str: string) -> bool {
+	ver, ver_ok := parse_version(version_str)
+	if !ver_ok { return true } // can't parse → don't flag conflict
+	constraints, con_ok := parse_constraint(constraint_str)
+	if !con_ok { return true }
+	return version_satisfies(ver, constraints)
+}
+
 // ==================== PyPI JSON API ====================
 
 PyPI_Package :: struct {
@@ -352,7 +361,16 @@ resolve_native :: proc(deps: []Dep_Spec, allocator: mem.Allocator) -> ([]Locked_
 		qi += 1
 
 		pkg_name := strings.to_lower(dep.name, allocator)
-		if pkg_name in resolved { continue } // already resolved
+		if existing, already := resolved[pkg_name]; already {
+			// Check for version conflict: if the new dep has a constraint,
+			// verify the already-resolved version satisfies it
+			if len(dep.constraint) > 0 && !_version_str_satisfies(existing.version, dep.constraint) {
+				return nil, Platform_Error_Data{msg = fmt.tprintf(
+					"version conflict: '%s' resolved to %s but '%s' requires %s",
+					pkg_name, existing.version, dep.name, dep.constraint)}
+			}
+			continue
+		}
 
 		// Query PyPI
 		pkg, query_err := query_pypi(dep.name, dep.constraint, allocator)

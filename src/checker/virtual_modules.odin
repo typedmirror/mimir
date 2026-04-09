@@ -1346,8 +1346,9 @@ register_mimir_ml :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 		name  = "Module",
 		attrs = module_attrs,
 	})
-	module_inst := make_instance_type(reg, module_class)
-	exports["Module"] = make_callable_type(reg, no_params, module_inst)
+	// Export as Class_Type directly (consistent with torch.nn.Module)
+	// so class MyModel(Module): works for subclassing
+	exports["Module"] = module_class
 
 	// ---- Layer classes ----
 	// Helper: register a layer class that is callable (Tensor → Tensor) + has Module methods
