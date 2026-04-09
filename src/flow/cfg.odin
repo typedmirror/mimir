@@ -460,9 +460,11 @@ process_with :: proc(b: ^CFG_Builder, s: ^parser.With_Stmt, stmt: parser.Stmt) -
 		add_edge(b.cfg, body_block_id, after, .Exception)
 	}
 
-	// If body terminates (return/raise), the with block doesn't fall through
-	if body_end == INVALID_BLOCK {
-		return INVALID_BLOCK
+	// Even if body terminates (return/raise), __exit__ always runs and may
+	// suppress exceptions, making code after `with` potentially reachable.
+	// Return the after-block so downstream code is not flagged as unreachable (F001).
+	if body_end != INVALID_BLOCK {
+		add_edge(b.cfg, body_end, after, .Fallthrough)
 	}
 
 	return after

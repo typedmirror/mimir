@@ -100,14 +100,13 @@ extract_type_comments :: proc(source: string, allocator: mem.Allocator) -> map[i
 			}
 			// Skip to end of line
 			for i < len(source) && source[i] != '\n' && source[i] != '\r' { i += 1 }
-		} else if source[i] == '\n' {
-			line += 1
-			i += 1
-			if i < len(source) && source[i] == '\r' { i += 1 }
 		} else if source[i] == '\r' {
 			line += 1
 			i += 1
-			if i < len(source) && source[i] == '\n' { i += 1 }
+			if i < len(source) && source[i] == '\n' { i += 1 } // \r\n
+		} else if source[i] == '\n' {
+			line += 1
+			i += 1
 		} else {
 			i += 1
 		}
@@ -148,14 +147,13 @@ extract_type_ignore_lines :: proc(source: string, allocator: mem.Allocator) -> m
 				}
 			}
 			for i < len(source) && source[i] != '\n' && source[i] != '\r' { i += 1 }
-		} else if source[i] == '\n' {
-			line += 1
-			i += 1
-			if i < len(source) && source[i] == '\r' { i += 1 }
 		} else if source[i] == '\r' {
 			line += 1
 			i += 1
-			if i < len(source) && source[i] == '\n' { i += 1 }
+			if i < len(source) && source[i] == '\n' { i += 1 } // \r\n
+		} else if source[i] == '\n' {
+			line += 1
+			i += 1
 		} else {
 			i += 1
 		}

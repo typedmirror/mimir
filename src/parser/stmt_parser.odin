@@ -1218,7 +1218,8 @@ _parse_expr_or_assign :: proc(ctx: ^Parser_Context) -> Stmt {
 	loc := _peek(ctx).loc
 	left := parse_expr_list(ctx)
 	if left == nil {
-		// Skip unparseable token
+		// Skip unparseable token — parser continues for robustness.
+		// Future: emit P001 diagnostic here for unknown syntax.
 		_advance(ctx)
 		return nil
 	}

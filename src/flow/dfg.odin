@@ -23,6 +23,7 @@ DFG :: struct {
 	kill:     []Reaching_Set,
 	reaching: []Reaching_Set,
 	out:      []Reaching_Set,
+	scope_id: binder.Scope_ID,
 }
 
 Reaching_Set :: distinct map[Def_ID]struct{}
@@ -31,6 +32,7 @@ Reaching_Set :: distinct map[Def_ID]struct{}
 
 collect_definitions :: proc(cfg: ^CFG, bind_result: ^binder.Bind_Result, allocator: mem.Allocator) -> DFG {
 	dfg: DFG
+	dfg.scope_id = cfg.scope_id
 	dfg.defs = make([dynamic]Def_Point, 0, 64, allocator)
 
 	num_blocks := len(cfg.blocks)
@@ -163,9 +165,17 @@ extract_def_target :: proc(dfg: ^DFG, expr: parser.Expr, bind_result: ^binder.Bi
 	}
 }
 
-// Find a symbol by name using the CFG's scope
+// Find a symbol by name, preferring the DFG's scope.
+// Falls back to any matching symbol if scope-specific lookup fails.
 find_symbol_in_scope :: proc(bind_result: ^binder.Bind_Result, name: string, block_id: Block_ID, dfg: ^DFG) -> binder.Symbol_ID {
-	// Linear scan through symbols — sufficient for correctness
+	// First pass: find symbol in the DFG's target scope
+	target_scope := dfg.scope_id
+	for &sym in bind_result.symbols {
+		if sym.name == name && sym.scope_id == target_scope {
+			return sym.id
+		}
+	}
+	// Second pass: check enclosing scopes (LEGB)
 	for &sym in bind_result.symbols {
 		if sym.name == name {
 			return sym.id

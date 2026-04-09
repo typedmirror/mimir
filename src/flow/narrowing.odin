@@ -60,6 +60,23 @@ extract_guards :: proc(cfgs: []CFG, bind_result: ^binder.Bind_Result, allocator:
 					analyze_condition(s.test, bind_result, cfg.scope_id, block.id, true_block, false_block, s.loc, &guards, allocator)
 				}
 			}
+
+			// Also check for assert statements — narrow in the fallthrough block
+			for stmt in block.stmts {
+				#partial switch a in stmt {
+				case ^parser.Assert_Stmt:
+					if a.test != nil {
+						// Assert condition holds after this point — narrow in fallthrough
+						fallthrough_block := find_succ_by_edge_kind(&block, .Fallthrough)
+						if fallthrough_block == INVALID_BLOCK && len(block.succs) > 0 {
+							fallthrough_block = block.succs[0]
+						}
+						if fallthrough_block != INVALID_BLOCK {
+							analyze_condition(a.test, bind_result, cfg.scope_id, block.id, fallthrough_block, INVALID_BLOCK, a.loc, &guards, allocator)
+						}
+					}
+				}
+			}
 		}
 	}
 
