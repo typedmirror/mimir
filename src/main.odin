@@ -1890,6 +1890,9 @@ cmd_check_single :: proc(
 	// Concurrency analysis (reuse already-read source)
 	conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, string(source_data), file, arena.allocator)
 	for d in conc_diagnostics {
+		// Respect # type: ignore for all analysis passes
+		if has_whole_file_ignore { continue }
+		if i32(d.location.line) in binder_ignore_lines { continue }
 		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
 	}
 

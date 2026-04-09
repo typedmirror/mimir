@@ -56,10 +56,15 @@ check_sink :: proc(ctx: ^Taint_Context, call: ^parser.Call_Expr) -> (is_sink: bo
 				}
 			}
 			// cursor.execute(x) — SEC012
-			// Heuristic: any .execute() call is treated as potential SQL sink
-			// Even with parameterized queries, the query string itself should not be tainted
+			// Only flag when the object name suggests a database cursor/connection
+			// (avoids FP on executor.execute(), pipeline.execute(), etc.)
 			if f.attr == "execute" {
-				return true, {arg_index = 0, desc = "SQL execute()", code = "SEC012"}
+				obj_name := name.id
+				if obj_name == "cursor" || obj_name == "cur" || obj_name == "conn" ||
+				   obj_name == "connection" || obj_name == "db" || obj_name == "session" ||
+				   obj_name == "engine" || obj_name == "c" {
+					return true, {arg_index = 0, desc = "SQL execute()", code = "SEC012"}
+				}
 			}
 		}
 	}

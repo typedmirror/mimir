@@ -244,6 +244,12 @@ assign_taint :: proc(ctx: ^Taint_Context, env: ^Taint_Env, target: parser.Expr, 
 		}
 	case ^parser.Named_Expr:
 		assign_taint(ctx, env, t.target, info)
+	case ^parser.Attribute_Expr:
+		// obj.attr = tainted → propagate taint to the base object
+		assign_taint(ctx, env, t.value, info)
+	case ^parser.Subscript_Expr:
+		// container[key] = tainted → propagate taint to the container
+		assign_taint(ctx, env, t.value, info)
 	}
 }
 

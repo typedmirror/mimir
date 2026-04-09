@@ -151,6 +151,15 @@ query_pypi :: proc(
 	version_constraint: string,
 	allocator: mem.Allocator,
 ) -> (pkg: PyPI_Package, err: Platform_Error) {
+	// Validate package name before URL construction (prevent path traversal)
+	for i := 0; i < len(name); i += 1 {
+		c := name[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+		     c == '-' || c == '_' || c == '.') {
+			return {}, Platform_Error_Data{msg = fmt.tprintf("invalid package name '%s': contains illegal character '%c'", name, rune(c))}
+		}
+	}
+
 	// Fetch package JSON from PyPI
 	url := fmt.aprintf("https://pypi.org/pypi/%s/json", name, allocator = allocator)
 
