@@ -1714,11 +1714,8 @@ cmd_check_single :: proc(
 	show_confidence: bool = false,
 	min_confidence: core.Confidence = .Unknown,
 ) -> int {
-	error_count := 0
-
 	module, parse_err := parser.bridge_parse(bridge, file, arena.allocator)
 	if parse_err != nil {
-		error_count += 1
 		switch e in parse_err {
 		case parser.Syntax_Error:
 			fmt.eprintfln("%s:%d:%d: error: %s", e.file, e.line, e.col, e.msg)
@@ -1729,179 +1726,24 @@ cmd_check_single :: proc(
 		return 1
 	}
 
-	// Read source for §28.3 inline suppression
 	source_data, _ := os.read_entire_file(file, arena.allocator)
-	source_lines := strings.split(string(source_data), "\n")
 
-	_emit_diag :: proc(d: core.Diagnostic, error_count: ^int, sarif_diags: ^[dynamic]core.Diagnostic, level: Analysis_Level, source_lines: []string, show_confidence: bool, min_confidence: core.Confidence) {
-		if !should_emit_at_level(d.code, level) { return }
-		if is_line_suppressed(d.code, d.location.line, source_lines) { return }
-		// Filter by minimum confidence
-		if min_confidence != .Unknown {
-			conf := d.confidence
-			if conf == .Unknown { conf = core.resolve_confidence(d.code) }
-			// Confidence ordering: Proven > High > Medium > Advisory
-			if u8(conf) > u8(min_confidence) { return }
-			if conf == .Unknown { return } // unclassified filtered when min is set
-		}
-		if sarif_diags != nil {
-			append(sarif_diags, d)
-		} else {
-			if show_confidence {
-				core.diagnostic_print_with_confidence(d)
-			} else {
-				core.diagnostic_print(d)
-			}
-		}
-		if d.severity == .Error { error_count^ += 1 }
-	}
+	// Build unified analysis graph
+	g := init_analysis_graph(module, string(source_data), file, arena.allocator)
+	graph_bind(&g)
+	graph_flow(&g)
+	graph_check(&g, bridge)
+	graph_concurrency(&g)
 
-	bind_result := binder.bind(module, file, arena.allocator)
-	// Filter binder diagnostics by # type: ignore (whole-file and per-line)
-	has_whole_file_ignore := false
-	binder_ignore_lines := make(map[i32]bool, len(module.type_ignores), arena.allocator)
-	for ti in module.type_ignores {
-		binder_ignore_lines[ti.lineno] = true
-	}
-	if 0 in binder_ignore_lines { has_whole_file_ignore = true }
-	if !has_whole_file_ignore {
-		for d in bind_result.diagnostics {
-			if i32(d.location.line) in binder_ignore_lines { continue }
-			_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
-		}
-	}
-
-	flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
-
-	// Resolve third-party imports from package cache
-	import_types := make(map[binder.Symbol_ID]checker.Type_ID, 8, arena.allocator)
-	registry := checker.init_registry(arena.allocator)
-	builtins := checker.init_builtins(&registry)
-
-	pkg_cache, cache_ok := platform.init_cache(arena.allocator)
-	if cache_ok == nil {
-		// Resolve virtual modules
-		vreg := checker.init_virtual_registry(&registry)
-		virtual := checker.resolve_virtual_imports(&vreg, &bind_result, &registry)
-		for sym_id, type_id in virtual {
-			import_types[sym_id] = type_id
-		}
-
-		// Resolve stdlib + third-party imports
-		mod_scope := binder.result_get_scope(&bind_result, bind_result.module_scope)
-		if mod_scope != nil {
-			parsed_pkgs := make(map[string]modules.Module_Exports, 8, arena.allocator)
-
-			// Resolve typeshed stdlib stubs
-			stubs_dir, stubs_dir_err := platform.stubs_base_dir(arena.allocator)
-			has_stubs := stubs_dir_err == nil && platform.stubs_available(arena.allocator)
-
-			// Discover site-packages once (outside loop)
-			sp_dirs := modules.discover_site_packages(arena.allocator)
-
-			for imp in bind_result.imports {
-				if imp.level > 0 { continue } // skip relative
-				if checker.is_virtual_module(&vreg, imp.module_name) { continue }
-
-				// Check if already parsed
-				top := imp.module_name
-				for k := 0; k < len(top); k += 1 {
-					if top[k] == '.' { top = top[:k]; break }
-				}
-
-				if _, already := parsed_pkgs[imp.module_name]; already { continue }
-
-				// Try stdlib stubs first
-				pkg_file := ""
-				found := false
-				if has_stubs && platform.is_stdlib_module(imp.module_name) &&
-				   imp.module_name != "typing" && imp.module_name != "typing_extensions" {
-					pkg_file, found = platform.resolve_stdlib_stub(imp.module_name, stubs_dir, arena.allocator)
-				}
-
-				// Fall back to package cache
-				if !found {
-					pkg_file, found = modules.resolve_package_file(imp.module_name, &pkg_cache, arena.allocator)
-				}
-
-				// Fall back to system site-packages
-				if !found {
-					for sp_dir in sp_dirs {
-						pkg_file, found = modules.find_module_in_site_packages(imp.module_name, sp_dir, arena.allocator)
-						if found { break }
-					}
-				}
-
-				if !found { continue }
-
-				pkg_exports, extract_ok := modules.extract_package_exports(
-					pkg_file, imp.module_name, bridge, &registry, arena.allocator,
-				)
-				if !extract_ok { continue }
-				parsed_pkgs[imp.module_name] = pkg_exports
-
-				// Wire into import_types
-				if len(imp.names) == 0 && !imp.is_star {
-					// "import X" → Module_Type
-					local_name := top
-					if sym_id, ok := mod_scope.symbols[local_name]; ok {
-						mod_type_id := checker.register_type(&registry, checker.Module_Type{
-							name    = imp.module_name,
-							exports = pkg_exports.types,
-						})
-						import_types[sym_id] = mod_type_id
-					}
-				} else if !imp.is_star {
-					// "from X import Y" → look up each name
-					for imp_name in imp.names {
-						local := imp_name.alias if len(imp_name.alias) > 0 else imp_name.name
-						if sym_id, ok := mod_scope.symbols[local]; ok {
-							if type_id, found2 := pkg_exports.types[imp_name.name]; found2 {
-								import_types[sym_id] = type_id
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	check_result := checker.check_with_imports(
-		module, &bind_result, &flow_result, file,
-		&registry, &builtins, import_types, arena.allocator,
-	)
-
-	// Emit flow diagnostics AFTER checker (checker may suppress F002 for Never-returning calls)
-	if !has_whole_file_ignore {
-		for d in flow_result.diagnostics {
-			_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
-		}
-	}
-	// Deduplicate checker diagnostics — convergence loop can emit duplicates
-	check_seen := make(map[u64]bool, len(check_result.diagnostics), arena.allocator)
-	for d in check_result.diagnostics {
-		key := u64(d.location.line) * 100003 + u64(d.location.column) * 31
-		for i := 0; i < len(d.code); i += 1 { key = key * 131 + u64(d.code[i]) }
-		if key in check_seen { continue }
-		check_seen[key] = true
-		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
-	}
-
-	// Concurrency analysis (reuse already-read source)
-	conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, string(source_data), file, arena.allocator)
-	for d in conc_diagnostics {
-		// Respect # type: ignore for all analysis passes
-		if has_whole_file_ignore { continue }
-		if i32(d.location.line) in binder_ignore_lines { continue }
-		_emit_diag(d, &error_count, sarif_diags, level, source_lines, show_confidence, min_confidence)
-	}
+	// Emit diagnostics with level/confidence filtering
+	error_count := graph_print_diagnostics(&g, level, show_confidence, min_confidence, sarif_diags)
 
 	if sarif_diags == nil {
 		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards, %d types)",
 			file, len(module.body),
-			len(bind_result.symbols), len(bind_result.scopes),
-			flow.total_blocks(&flow_result), len(flow_result.guards),
-			len(check_result.registry.types))
+			len(g.bind_result.symbols), len(g.bind_result.scopes),
+			flow.total_blocks(&g.flow_result), len(g.flow_result.guards),
+			len(g.check_result.registry.types))
 
 		if error_count > 0 {
 			fmt.eprintfln("mimir: 1 file(s) had errors")
