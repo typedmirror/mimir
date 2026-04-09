@@ -56,12 +56,13 @@ emit_wgsl :: proc(
 		wgsl_emit_node(&b, graph, &node, bindings, etype, use_matmul)
 	}
 
-	// Store outputs
-	for out in graph.outputs {
+	// Store outputs — each output gets its own buffer binding
+	for out, out_idx in graph.outputs {
+		buf_name := "result" if len(graph.outputs) == 1 else fmt.tprintf("output%d", out_idx)
 		if use_matmul {
-			fmt.sbprintf(&b, "    result[row * dims.N + col] = v%d;\n", int(out))
+			fmt.sbprintf(&b, "    %s[row * dims.N + col] = v%d;\n", buf_name, int(out))
 		} else {
-			fmt.sbprintf(&b, "    result[tid] = v%d;\n", int(out))
+			fmt.sbprintf(&b, "    %s[tid] = v%d;\n", buf_name, int(out))
 		}
 	}
 
