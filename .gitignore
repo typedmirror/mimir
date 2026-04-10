@@ -20,4 +20,7 @@ ols.json
 .claude/
 CLAUDE.md
 
+# Development state docs (local only, never committed)
+docs/*.md
+
 
