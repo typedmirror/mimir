@@ -1,10 +1,10 @@
 # mimir
 
-A complete Python development platform in a single native binary. Replaces mypy, pip, pytest, black, ruff, bandit, and more.
+A Python development platform in a single native binary. Type checker, security analyzer, GPU compiler, package manager, test runner, linter, REPL, and more.
 
-Written in [Odin](https://odin-lang.org/). ~52K lines. Zero dependencies at runtime.
+Written in [Odin](https://odin-lang.org/). 67K lines. Zero runtime dependencies.
 
-**Status: Alpha.** Core architecture is sound. Type system handles most Python patterns. Real-world usability improving rapidly.
+**Status: Alpha.** 571 conformance tests. 170+ diagnostic codes. PyTorch/ML code type-checks out of the box.
 
 ## What it does
 
@@ -100,11 +100,12 @@ mimir deps .
 ## Key features
 
 - **Type inference**: Forward inference with constraint-based backfill for unannotated code
-- **160+ diagnostic codes**: T001-T012, F001-F002, D001, L001-L011, SEC001-SEC014, CONC001-CONC008, PERF001-PERF010, SAF001-SAF012, and more
+- **170+ diagnostic codes**: Types, flow, lint, security, taint, concurrency, performance, safety, data science, GPU
+- **PyTorch support**: Built-in torch virtual modules — nn.Module subclassing, training loops, device tracking, shape constraints
 - **Zero config**: Works out of the box. Optional `mimir.toml` for customization
-- **Auto-dependency resolution**: Scans installed packages automatically — no stub management needed
+- **Auto-dependency resolution**: Scans installed packages and typeshed stubs automatically
 - **GPU compilation**: `mimir compile-gpu` emits WGSL/MSL/PTX/SPIR-V kernels from Python tensor code
-- **WASM compilation**: `mimir compile-wasm` for browser deployment
+- **Shape validation**: Tensor shape mismatches, broadcast errors, and cross-device operations caught at check time
 - **42+ CLI commands**: check, lint, format, test, run, audit, safety, perf, repl, lsp, codemod, and more
 
 ## Diagnostic levels

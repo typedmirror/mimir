@@ -4,5 +4,20 @@ build/
 *.exe
 *.pdb
 .DS_Store
-.claude/state/subagent_telemetry.jsonl
 __pycache__/
+
+# Binaries
+mimir
+mimir_bin
+mimir_test
+
+# Editor/IDE
+ols.json
+.vscode/
+.idea/
+
+# Claude Code (development workflow, not project code)
+.claude/
+CLAUDE.md
+
+
