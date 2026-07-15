@@ -205,7 +205,12 @@ resolve_annotation :: proc(
 					case TypedDict_Type:    return env_type
 					case Protocol_Type:     return env_type
 					case Callable_Type:
-						// Type alias: MyInt = int → Callable returns int → use return type
+						// Genuine callable alias (Handler = Callable[[E], None]):
+						// the annotation means the callable itself.
+						if reg.callable_aliases[qualify(reg, sym_id)] {
+							return env_type
+						}
+						// Constructor alias: MyInt = int → Callable returns int → use return type
 						if info.return_type != TYPE_UNKNOWN && info.return_type != TYPE_ANY {
 							return info.return_type
 						}
@@ -426,6 +431,11 @@ resolve_annotation :: proc(
 			case "bytes": return TYPE_BYTES
 			case "None":  return TYPE_NONE
 			}
+			// Record every identifier mentioned in the string as annotation-used —
+			// quoted names ("Q", "list[Q]") never create binder Load refs, so
+			// D001 would falsely flag symbols used only in string annotations.
+			_mark_string_annotation_uses(str_val, reg, bind_result)
+
 			// Handle "X | Y" union syntax in string annotations
 			if strings.contains(str_val, " | ") {
 				parts := strings.split(str_val, " | ", allocator = reg.allocator)
@@ -442,6 +452,21 @@ resolve_annotation :: proc(
 						return make_union_type(reg, members[:])
 					} else if len(members) == 1 {
 						return members[0]
+					}
+				}
+			}
+			// TypeVar / TypedDict / Protocol via environment — mirrors the
+			// Name_Expr path so "Q" behaves like Q for module-level TypeVars
+			if env != nil {
+				if mod_scope := binder.result_get_scope(bind_result, bind_result.module_scope); mod_scope != nil {
+					if sym_id, sym_ok := mod_scope.symbols[str_val]; sym_ok {
+						if env_type, env_found := env.types[sym_id]; env_found {
+							et := get_type(reg, env_type)
+							#partial switch _ in et.info {
+							case TypeVar_Type, TypeVarTuple_Type, TypedDict_Type, Protocol_Type:
+								return env_type
+							}
+						}
 					}
 				}
 			}
@@ -471,6 +496,35 @@ resolve_annotation :: proc(
 	}
 
 	return TYPE_UNKNOWN
+}
+
+// Record identifiers inside a string annotation as "used in annotations".
+// Quoted forward references ("Q", "list[Q]", "A | None") never produce binder
+// Load refs; without this, D001 falsely flags symbols used only in them.
+// Scans identifier runs (alnum + _), resolves each against the module scope.
+_mark_string_annotation_uses :: proc(s: string, reg: ^Type_Registry, bind_result: ^binder.Bind_Result) {
+	mod_scope := binder.result_get_scope(bind_result, bind_result.module_scope)
+	if mod_scope == nil { return }
+
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		is_ident_start := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+		if !is_ident_start { i += 1; continue }
+		start := i
+		for i < len(s) {
+			c2 := s[i]
+			if (c2 >= 'a' && c2 <= 'z') || (c2 >= 'A' && c2 <= 'Z') || (c2 >= '0' && c2 <= '9') || c2 == '_' {
+				i += 1
+			} else {
+				break
+			}
+		}
+		ident := s[start:i]
+		if sym_id, ok := mod_scope.symbols[ident]; ok {
+			reg.annotation_used_syms[qualify(reg, sym_id)] = true
+		}
+	}
 }
 
 // Helper: get the name from a Name_Expr or Attribute_Expr

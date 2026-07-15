@@ -20,6 +20,7 @@ parse_module_native :: proc(ctx: ^Parser_Context) -> ^Module {
 
 	mod := new(Module, ctx.allocator)
 	mod.body = body[:]
+	mod.parse_diagnostics = ctx.diagnostics[:]
 	return mod
 }
 
@@ -179,7 +180,13 @@ _consume_newline :: proc(ctx: ^Parser_Context) {
 }
 
 _parse_unexpected_indent :: proc(ctx: ^Parser_Context) -> Stmt {
-	_advance(ctx) // skip unexpected INDENT
+	tok := _advance(ctx) // skip unexpected INDENT
+	// P001: CPython raises IndentationError here — the recovery must be visible.
+	_emit_parse_diag(ctx, tok.loc,
+		"unexpected indentation",
+		"no enclosing block expects an indent here (CPython raises IndentationError); following statements may attach to the wrong block",
+		"fix the indentation of this line",
+	)
 	return nil
 }
 
@@ -1219,7 +1226,16 @@ _parse_expr_or_assign :: proc(ctx: ^Parser_Context) -> Stmt {
 	left := parse_expr_list(ctx)
 	if left == nil {
 		// Skip unparseable token — parser continues for robustness.
-		// Future: emit P001 diagnostic here for unknown syntax.
+		// P001: the drop must be visible, never silent (one diagnostic per line;
+		// _emit_parse_diag dedups the token-by-token recovery on a bad line).
+		bad := _peek(ctx)
+		desc := bad.text
+		if len(desc) == 0 { desc = fmt.aprintf("%v", bad.kind, allocator = ctx.allocator) }
+		_emit_parse_diag(ctx, bad.loc,
+			fmt.aprintf("statement dropped — unparseable syntax near '%s'", desc, allocator = ctx.allocator),
+			"the parser could not interpret this as a Python statement; it was skipped and NOT analyzed",
+			"fix the syntax error near this location (malformed or unsupported syntax)",
+		)
 		_advance(ctx)
 		return nil
 	}

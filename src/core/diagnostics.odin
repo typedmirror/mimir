@@ -112,6 +112,8 @@ resolve_confidence :: proc(code: string) -> Confidence {
 		return .Proven
 	case "F001":  // unreachable code — proven by CFG
 		return .Proven
+	case "P001":  // parser recovery — the drop definitely happened
+		return .Proven
 	}
 
 	// Strong analysis — very likely correct
@@ -119,6 +121,8 @@ resolve_confidence :: proc(code: string) -> Confidence {
 	case "T007", "T010":
 		return .High
 	case "F002", "D001":
+		return .High
+	case "B003":  // unresolved import — resolution failure is fact; impact is environment-dependent
 		return .High
 	case "MATCH001", "MATCH002":
 		return .High

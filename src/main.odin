@@ -1745,6 +1745,13 @@ cmd_check_single :: proc(
 			flow.total_blocks(&g.flow_result), len(g.flow_result.guards),
 			len(g.check_result.registry.types))
 
+		// T1: honest-summary line — prints on BOTH success and error exits.
+		// A green result with unresolved imports is not a full green.
+		if g.unresolved_import_count > 0 {
+			fmt.printfln("mimir: %d import(s) unresolved — type coverage incomplete (their symbols are typed Unknown)",
+				g.unresolved_import_count)
+		}
+
 		if error_count > 0 {
 			fmt.eprintfln("mimir: 1 file(s) had errors")
 		} else {
@@ -1783,8 +1790,7 @@ _check_module_emit :: proc(
 	level: Analysis_Level,
 	show_confidence: bool,
 	min_confidence: core.Confidence,
-) -> int {
-	errors := 0
+) -> (errors: int, unresolved_count: int) {
 	mod_source, _ := os.read_entire_file(info.file_path, allocator)
 	mod_lines := strings.split(string(mod_source), "\n")
 
@@ -1796,6 +1802,26 @@ _check_module_emit :: proc(
 		}
 	}
 
+	// Parse-level diagnostics (P001) — statements the parser dropped during
+	// recovery must be visible, never silent.
+	for pd in info.parse_result.parse_diagnostics {
+		d := core.Diagnostic{
+			severity = .Warning,
+			location = core.Location{
+				file   = info.file_path,
+				line   = int(pd.loc.line),
+				column = int(pd.loc.col),
+			},
+			what = pd.what,
+			why  = pd.why,
+			fix  = pd.fix,
+			code = "P001",
+		}
+		if !should_emit_at_level(d.code, level) { continue }
+		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
+		_pd(d, show_confidence)
+	}
+
 	// Binder diagnostics
 	for d in info.bind_result.diagnostics {
 		if !should_emit_at_level(d.code, level) { continue }
@@ -1804,8 +1830,16 @@ _check_module_emit :: proc(
 		if d.severity == .Error { errors += 1 }
 	}
 
-	// Resolve + flow + check
-	import_types := modules.resolve_imports(info, res_ctx, vreg)
+	// Resolve + flow + check. Unresolved imports surface as B003 warnings.
+	unresolved := make([dynamic]binder.Import_Record, 0, 4, allocator)
+	import_types := modules.resolve_imports(info, res_ctx, vreg, &unresolved)
+	for imp in unresolved {
+		d := make_unresolved_import_diag(imp, info.file_path, allocator)
+		if !should_emit_at_level(d.code, level) { continue }
+		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
+		_pd(d, show_confidence)
+		unresolved_count += 1
+	}
 	flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, allocator)
 	for d in flow_result.diagnostics {
 		if !should_emit_at_level(d.code, level) { continue }
@@ -1848,7 +1882,7 @@ _check_module_emit :: proc(
 		len(info.bind_result.symbols), len(info.bind_result.scopes),
 		len(registry.types))
 
-	return errors
+	return errors, unresolved_count
 }
 
 // Multi-module check — shared registry, import resolution
@@ -1946,10 +1980,19 @@ cmd_check_multi :: proc(
 
 	// 7. For each module in topo order: resolve → flow → check → export
 	error_count := parse_errors
+	unresolved_total := 0
 	for name in graph.topo_order {
 		info, ok := graph.modules[name]
 		if !ok || info.parse_result == nil { continue }
-		error_count += _check_module_emit(info, &res_ctx, &vreg, &registry, &builtins, arena.allocator, level, show_confidence, min_confidence)
+		mod_errors, mod_unresolved := _check_module_emit(info, &res_ctx, &vreg, &registry, &builtins, arena.allocator, level, show_confidence, min_confidence)
+		error_count += mod_errors
+		unresolved_total += mod_unresolved
+	}
+
+	// T1: honest-summary line — prints on BOTH success and error exits.
+	if unresolved_total > 0 {
+		fmt.printfln("mimir: %d import(s) unresolved — type coverage incomplete (their symbols are typed Unknown)",
+			unresolved_total)
 	}
 
 	if error_count > 0 {

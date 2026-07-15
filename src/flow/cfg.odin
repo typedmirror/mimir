@@ -805,6 +805,17 @@ check_missing_return :: proc(cfg: ^CFG, scope_name: string, has_return_annotatio
 						}
 						if all_preds_return { continue }
 					}
+					// Chain of empty blocks whose normal-flow ancestors all return:
+					// try/with structures produce empty after-blocks linked by
+					// fallthrough even when every real path returned (the with
+					// after-block is kept reachable via Exception edges for
+					// __exit__-suppression semantics). Exception-edge predecessors
+					// route to handlers — they are not normal fallthrough paths
+					// and must not force an F002 here (mypy parity: context
+					// managers are assumed not to swallow exceptions).
+					if len(pred.stmts) == 0 && _empty_chain_returns(cfg, pred_id, 0) {
+						continue
+					}
 					// This path reaches exit without return
 					append(diagnostics, core.Diagnostic{
 						severity = .Error,
@@ -825,7 +836,47 @@ check_missing_return :: proc(cfg: ^CFG, scope_name: string, has_return_annotatio
 	}
 }
 
-block_ends_with_return :: proc(blk: ^Block) -> bool {
+// True when every NORMAL-flow path into this empty block came from a block that
+// returns (directly or through further empty blocks). Exception-kind predecessor
+// edges are excluded: those paths route to except-handlers (or represent
+// __exit__ suppression, which mypy-parity treats as not happening).
+// A block with predecessors but no normal-flow predecessors is vacuously true;
+// a block with no predecessors at all (entry) is false.
+_empty_chain_returns :: proc(cfg: ^CFG, blk_id: Block_ID, depth: int) -> bool {
+	if depth > 8 { return false }
+	blk := get_block(cfg, blk_id)
+	if blk == nil { return false }
+	if len(blk.preds) == 0 { return false }
+
+	for pp_id in blk.preds {
+		pp := get_block(cfg, pp_id)
+		if pp == nil || !pp.is_reachable { continue }
+
+		// Edge kinds pp → blk are stored on the predecessor side. A pred may have
+		// BOTH exception and fallthrough edges to blk — it only counts as an
+		// exception-only pred if NO edge is normal flow.
+		has_normal_edge := false
+		for succ_id, i in pp.succs {
+			if succ_id == blk_id && pp.edge_kinds[i] != .Exception {
+				has_normal_edge = true
+				break
+			}
+		}
+		if !has_normal_edge { continue }
+
+		if block_ends_with_return(pp, allow_match = false) { continue }
+		if len(pp.stmts) == 0 && _empty_chain_returns(cfg, pp_id, depth + 1) { continue }
+		return false
+	}
+	return true
+}
+
+// allow_match: the Match_Stmt arm answers "do all WRITTEN case arms return",
+// NOT "does the match terminate" — a non-exhaustive match falls through even
+// when every written arm returns. Callers walking empty-block chains (where
+// the match's own fallthrough path is exactly what is being tested) must pass
+// false; the direct exit-predecessor use keeps the historical behavior.
+block_ends_with_return :: proc(blk: ^Block, allow_match := true) -> bool {
 	if len(blk.stmts) == 0 { return false }
 	last := blk.stmts[len(blk.stmts) - 1]
 	#partial switch s in last {
@@ -863,6 +914,7 @@ block_ends_with_return :: proc(blk: ^Block) -> bool {
 			}
 		}
 	case ^parser.Match_Stmt:
+		if !allow_match { return false }
 		// Exhaustive match: if every case arm ends with return, the match covers all paths
 		if len(s.cases) > 0 {
 			all_return := true
