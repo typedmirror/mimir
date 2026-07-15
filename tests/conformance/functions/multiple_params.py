@@ -8,4 +8,4 @@ r = create_user("Alice", 30, True)
 assert_type(r, str)
 
 # Wrong type for middle param
-create_user("Alice", "thirty", True)  # E
+create_user("Alice", "thirty", True)  # E[T002]

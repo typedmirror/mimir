@@ -17,4 +17,4 @@ r4 = "hello".endswith("lo")
 assert_type(r4, bool)
 
 # Wrong type from string method
-bad: int = "hello".upper()  # E
+bad: int = "hello".upper()  # E[T001]

@@ -27,4 +27,4 @@ def probes(xs: List[float]) -> None:
 
 def misuse(xs: List[float]) -> List[str]:
     # list(list[float]) is list[float], not list[str] — real bug, must fire
-    return list(xs)  # E
+    return list(xs)  # E[T003]

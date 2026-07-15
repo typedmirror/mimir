@@ -20,4 +20,4 @@ total_rev = sales["revenue"].sum()
 product_data = sales[["product", "price", "quantity"]]
 
 # Column error: typo
-bad = sales["quantiy"]  # E: column not found
+bad = sales["quantiy"]  # E[DATA001]: column not found

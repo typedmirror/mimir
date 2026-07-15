@@ -16,6 +16,6 @@ def no_send() -> Generator[int, None, None]:
     return
 
 def wrong_send_type() -> Generator[int, str, None]:
-    received: int = yield 42  # E: Incompatible types in assignment
+    received: int = yield 42  # E[T001]: Incompatible types in assignment
     _ = received
     return

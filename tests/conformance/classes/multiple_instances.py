@@ -14,4 +14,4 @@ assert_type(b.x, int)
 assert_type(b.y, str)
 
 # Wrong argument type in construction
-Pair("not_int", "hello")  # E
+Pair("not_int", "hello")  # E[T002]

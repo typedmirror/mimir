@@ -12,4 +12,4 @@ r3 = "x" not in ["a", "b"]
 assert_type(r3, bool)
 
 # Wrong type from in
-bad: str = 1 in [1, 2]  # E
+bad: str = 1 in [1, 2]  # E[T001]

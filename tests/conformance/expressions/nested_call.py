@@ -8,4 +8,4 @@ r2 = str(len([1, 2, 3]))
 assert_type(r2, str)
 
 # Wrong type from nested call
-bad: str = len("hello")  # E
+bad: str = len("hello")  # E[T001]

@@ -18,4 +18,4 @@ assert_type(c.name, str)
 assert_type(c.active, bool)
 
 # Nonexistent attribute
-bad = c.nonexistent  # E
+bad = c.nonexistent  # E[T007]

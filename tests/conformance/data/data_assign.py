@@ -18,4 +18,4 @@ y = df["price"]
 z = df["qty"]
 
 # Accessing nonexistent column still errors
-w = df["nonexist"]  # E: DATA001
+w = df["nonexist"]  # E[DATA001]: DATA001

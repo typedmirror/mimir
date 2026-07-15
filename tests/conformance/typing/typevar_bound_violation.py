@@ -14,4 +14,4 @@ r2 = double(True)
 assert_type(r2, bool)
 
 # Bad: str does not satisfy bound=int
-r3 = double("hello")  # E
+r3 = double("hello")  # E[T008]

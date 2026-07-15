@@ -10,10 +10,10 @@ p = Point(x=1, y=2.0)
 assert_type(p, Point)
 
 # Wrong type for field
-Point(x="bad", y=2.0)  # E
+Point(x="bad", y=2.0)  # E[T002]
 
 # Too few args
-Point(x=1)  # E
+Point(x=1)  # E[T004]
 
 @dataclass
 class Config:

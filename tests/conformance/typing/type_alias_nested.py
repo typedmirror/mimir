@@ -16,4 +16,4 @@ Ints = list[int]
 Matrix = list[Ints]
 
 # Wrong type through nested alias
-bad: MyNum = "text"  # E
+bad: MyNum = "text"  # E[T001]

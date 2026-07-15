@@ -21,6 +21,6 @@ good1: int = p.get_first()
 good2: str = p.get_second()
 
 # Errors
-bad1: str = p.get_first()  # E
-bad2: int = p.get_second()  # E
-bad3: Pair[str, int] = Pair(1, "hello")  # E
+bad1: str = p.get_first()  # E[T001]
+bad2: int = p.get_second()  # E[T001]
+bad3: Pair[str, int] = Pair(1, "hello")  # E[T001]

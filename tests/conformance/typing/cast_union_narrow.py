@@ -10,4 +10,4 @@ r2 = cast(str, y)
 assert_type(r2, str)
 
 # Cast wrong type
-bad: int = cast(str, x)  # E
+bad: int = cast(str, x)  # E[T001]

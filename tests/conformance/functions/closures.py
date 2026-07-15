@@ -6,7 +6,7 @@ def outer() -> None:
         return x
 
     a: int = inner()
-    b: str = inner()     # E
+    b: str = inner()     # E[T001]
 
 def make_adder(n: int):
     def add(x: int) -> int:

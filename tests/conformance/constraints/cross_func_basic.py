@@ -5,4 +5,4 @@ def helper(x: int):
 
 def caller():
     result = helper(42)
-    y: str = result  # E: Incompatible types
+    y: str = result  # E[T001]: Incompatible types

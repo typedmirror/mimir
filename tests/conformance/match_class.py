@@ -11,7 +11,7 @@ class Circle:
 def area(shape) -> str:
     match shape:
         case Point(x=px, y=py):
-            bad: str = px  # E: int not assignable to str
+            bad: str = px  # E[T001]: int not assignable to str
             return f"({px},{py})"
         case Circle(radius=r):
             return f"r={r}"

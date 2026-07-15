@@ -17,5 +17,5 @@ s1: Shape = Circle()
 s2: Shape = Square()
 
 # Sibling classes not assignable to each other
-bad1: Circle = Square()  # E
-bad2: Square = Circle()  # E
+bad1: Circle = Square()  # E[T001]
+bad2: Square = Circle()  # E[T001]

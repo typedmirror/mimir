@@ -16,5 +16,5 @@ r: int = t.x
 s: str = t.name
 
 # Wrong type assignment to typed attribute
-bad1: str = t.x  # E
-bad2: int = t.name  # E
+bad1: str = t.x  # E[T001]
+bad2: int = t.name  # E[T001]

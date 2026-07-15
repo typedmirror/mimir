@@ -15,4 +15,4 @@ sliced = a[0:5]
 
 # Type error: tensor not assignable to str
 t = zeros((2, 2))
-s: str = t  # E: Incompatible types
+s: str = t  # E[T001]: Incompatible types

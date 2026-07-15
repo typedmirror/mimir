@@ -17,4 +17,4 @@ g = a + f  # OK: right-align and broadcast
 
 # Incompatible shapes: (3, 4) + (3, 5) → error
 h = zeros((3, 5))
-i = a + h  # E: incompatible shapes
+i = a + h  # E[S002]: incompatible shapes

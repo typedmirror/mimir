@@ -11,6 +11,6 @@ class Box(Generic[T]):
 
 box: Box[int] = Box(42)
 x: int = box.get()
-y: str = box.get()    # E
-bad: Box[str] = Box(42)  # E
-z: int = Box("hi").get()  # E
+y: str = box.get()    # E[T001]
+bad: Box[str] = Box(42)  # E[T001]
+z: int = Box("hi").get()  # E[T001]

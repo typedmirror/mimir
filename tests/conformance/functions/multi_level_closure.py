@@ -21,6 +21,6 @@ def make_adder(n: int):
 def bad_outer() -> int:
     def bad_middle() -> str:
         def bad_inner() -> int:
-            return "wrong"  # E
+            return "wrong"  # E[T003]
         return "ok"
     return 0

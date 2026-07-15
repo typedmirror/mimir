@@ -12,7 +12,7 @@ e = a + d             # OK: (3,4) + (1,4) -> (3,4)
 
 # Invalid broadcast — incompatible dimensions
 f = zeros((5,))
-g = a + f             # E: cannot broadcast (3,4) and (5,)
+g = a + f             # E[S002]: cannot broadcast (3,4) and (5,)
 
 h = zeros((3, 5))
-i = a + h             # E: cannot broadcast (3,4) and (3,5)
+i = a + h             # E[S002]: cannot broadcast (3,4) and (3,5)

@@ -18,4 +18,4 @@ p: Printable = User("Alice")
 class Empty:
     pass
 
-bad: Printable = Empty()  # E
+bad: Printable = Empty()  # E[T001]

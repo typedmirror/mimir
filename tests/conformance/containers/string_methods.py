@@ -13,13 +13,13 @@ assert_type(s.replace("h", "j"), str)
 good1: list[str] = s.split()
 
 # Wrong assert_type — T006
-assert_type(s.upper(), int)  # E
-assert_type(s.find("x"), str)  # E
-assert_type(s.startswith("h"), int)  # E
-assert_type(s.encode(), str)  # E
+assert_type(s.upper(), int)  # E[T006]
+assert_type(s.find("x"), str)  # E[T006]
+assert_type(s.startswith("h"), int)  # E[T006]
+assert_type(s.encode(), str)  # E[T006]
 
 # Wrong assignments
-bad1: int = s.upper()  # E
-bad2: str = s.find("x")  # E
-bad3: int = s.encode()  # E
-bad4: bool = s.replace("h", "j")  # E
+bad1: int = s.upper()  # E[T001]
+bad2: str = s.find("x")  # E[T001]
+bad3: int = s.encode()  # E[T001]
+bad4: bool = s.replace("h", "j")  # E[T001]

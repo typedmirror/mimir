@@ -16,4 +16,4 @@ fs: frozenset[str] = frozenset(["a", "b"])
 assert_type(fs, frozenset[str])
 
 # Wrong element type in set annotation
-bad: set[int] = {"a", "b"}  # E
+bad: set[int] = {"a", "b"}  # E[T001]

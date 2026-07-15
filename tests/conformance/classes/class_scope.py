@@ -12,6 +12,6 @@ class Rect:
 r = Rect(3, 4)
 
 # Errors
-bad1: str = r.area()  # E
-bad2: int = r.label()  # E
-bad3 = Rect("a", "b")  # E
+bad1: str = r.area()  # E[T001]
+bad2: int = r.label()  # E[T001]
+bad3 = Rect("a", "b")  # E[T002]

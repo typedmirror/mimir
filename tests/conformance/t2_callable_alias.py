@@ -29,4 +29,4 @@ def wire() -> None:
     bus.on("user.login", on_login)
 
     # Non-callable for a callable param — real bug, must fire
-    bus.on("user.logout", 42)  # E
+    bus.on("user.logout", 42)  # E[T002]

@@ -17,8 +17,8 @@ _ = p.y
 _ = p.distance()
 
 # Invalid accesses — T007
-_ = p.z           # E
-_ = p.nonexistent # E
+_ = p.z           # E[T007]
+_ = p.nonexistent # E[T007]
 
 class Animal:
     name: str
@@ -32,4 +32,4 @@ d = Dog()
 _ = d.name
 
 # Nonexistent attr on subclass
-_ = d.color  # E
+_ = d.color  # E[T007]

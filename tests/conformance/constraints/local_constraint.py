@@ -9,4 +9,4 @@ def process():
     lines = data.split("\n")  # data constrained to str via Has_Method("split")
     return lines
 
-result: int = process()  # E: Incompatible types
+result: int = process()  # E[T001]: Incompatible types

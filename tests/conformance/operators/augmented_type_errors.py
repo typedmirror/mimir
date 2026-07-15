@@ -15,4 +15,4 @@ assert_type(n, int)
 
 # Invalid: int += str
 x: int = 5
-x += "bad"  # E
+x += "bad"  # E[T005]

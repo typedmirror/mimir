@@ -6,4 +6,4 @@ val = d["x"]
 assert_type(val, int)
 
 # Wrong type from dict access
-bad: str = d["x"]  # E
+bad: str = d["x"]  # E[T001]

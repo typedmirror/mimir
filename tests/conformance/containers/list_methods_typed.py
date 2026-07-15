@@ -12,4 +12,4 @@ r2 = items.count("a")
 assert_type(r2, int)
 
 # Wrong type from subscript
-bad: int = items[0]  # E
+bad: int = items[0]  # E[T001]

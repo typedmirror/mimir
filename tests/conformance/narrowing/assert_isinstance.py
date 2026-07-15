@@ -2,4 +2,4 @@
 
 def process(x: int | str) -> None:
     assert isinstance(x, int)
-    y: str = x  # E: Incompatible types
+    y: str = x  # E[T001]: Incompatible types

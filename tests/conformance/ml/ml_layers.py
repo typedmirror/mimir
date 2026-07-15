@@ -30,7 +30,7 @@ _emb = Embedding(1000, 128)
 _m = Module()
 
 # Invalid attribute on layer
-_layer.nonexistent_method  # E
+_layer.nonexistent_method  # E[T007]
 
 # Invalid attribute on Module
-_m.nonexistent  # E
+_m.nonexistent  # E[T007]

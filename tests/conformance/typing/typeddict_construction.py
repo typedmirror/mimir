@@ -8,4 +8,4 @@ class Config(TypedDict):
 c1: Config = Config(host="localhost", port=8080)
 
 # Wrong field type
-c2: Config = Config(host="localhost", port="bad")  # E
+c2: Config = Config(host="localhost", port="bad")  # E[T002]

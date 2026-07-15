@@ -15,7 +15,7 @@ def get_input():
 def handler_always():
     data = get_input()
     query = f"SELECT * FROM t WHERE x = '{data}'"
-    cursor.execute(query)  # SEC012 expected via mimir audit  # E
+    cursor.execute(query)  # SEC012 expected via mimir audit  # E[SEC012]
 
 # Tier 2: propagates — param taint reaches return
 def build_query(data):
@@ -24,7 +24,7 @@ def build_query(data):
 def handler_propagates():
     data = os.environ.get("X", "")
     query = build_query(data)
-    cursor.execute(query)  # SEC012 expected via mimir audit  # E
+    cursor.execute(query)  # SEC012 expected via mimir audit  # E[SEC012]
 
 # Tier 3: multi-hop chain
 def step1():
@@ -40,4 +40,4 @@ def handler_multihop():
     a = step1()
     b = step2(a)
     c = step3(b)
-    cursor.execute(c)  # SEC012 expected via mimir audit  # E
+    cursor.execute(c)  # SEC012 expected via mimir audit  # E[SEC012]

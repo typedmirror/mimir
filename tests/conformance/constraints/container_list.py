@@ -4,4 +4,4 @@ def collect(x):
     x.append(42)
     return x
 
-result: str = collect([1, 2])  # E: Incompatible types
+result: str = collect([1, 2])  # E[T001]: Incompatible types

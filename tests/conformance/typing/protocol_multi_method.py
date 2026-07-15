@@ -27,7 +27,7 @@ def save(obj: Serializable) -> str:
 save(JsonObj())
 
 # Partial match — missing deserialize
-save(Partial())  # E
+save(Partial())  # E[T002]
 
 # No match at all
-save(NoMatch())  # E
+save(NoMatch())  # E[T002]

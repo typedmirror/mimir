@@ -17,4 +17,4 @@ assert_type(c.extra(), int)
 
 # Base instance doesn't have child's extra method
 b = Base()
-b.extra()  # E
+b.extra()  # E[T007]

@@ -6,11 +6,11 @@ def process(x: int | str | float) -> None:
         assert_type(x, int)
     else:
         # Should be str | float
-        bad: int = x  # E
+        bad: int = x  # E[T001]
 
 def process2(x: int | str | None) -> None:
     if isinstance(x, int):
         r: int = x
     else:
         # Should be str | None
-        bad: int = x  # E
+        bad: int = x  # E[T001]

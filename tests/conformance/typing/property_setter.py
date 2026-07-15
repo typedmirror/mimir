@@ -13,4 +13,4 @@ class Circle:
         self._radius = value
 
 c = Circle(5.0)
-x: str = c.radius  # E: Incompatible types
+x: str = c.radius  # E[T001]: Incompatible types

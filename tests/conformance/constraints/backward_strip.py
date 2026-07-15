@@ -3,4 +3,4 @@
 def clean(data):
     stripped = data.strip()
     upper = data.upper()
-    x: int = data  # E: Incompatible types
+    x: int = data  # E[T001]: Incompatible types

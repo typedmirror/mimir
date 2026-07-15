@@ -14,4 +14,4 @@ def bad_process(x: Union[int, str]) -> int:
     if isinstance(x, int):
         return x
     else:
-        return x  # E
+        return x  # E[T003]

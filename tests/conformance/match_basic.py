@@ -21,7 +21,7 @@ def describe(val: int) -> str:
 
 # Non-exhaustive match (no wildcard) — MATCH001 is a warning, not caught by conformance
 # F002 fires because not all paths return
-def risky(x: int) -> int:  # E
+def risky(x: int) -> int:  # E[F002]
     match x:
         case 1:
             return 1

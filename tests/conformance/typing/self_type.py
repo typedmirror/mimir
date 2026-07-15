@@ -16,4 +16,4 @@ obj2 = obj.copy()
 result: int = obj2.value()
 
 # Self return is MyClass, not int
-wrong: int = obj.copy()  # E: Incompatible types
+wrong: int = obj.copy()  # E[T001]: Incompatible types

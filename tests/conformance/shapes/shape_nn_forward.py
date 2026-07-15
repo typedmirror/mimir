@@ -22,4 +22,4 @@ out = out + b2            # OK: (32, 10) + (10,) → broadcast
 
 # Shape error: wrong weight matrix dimensions
 w_bad = zeros((64, 10))
-bad = h @ w_bad           # E: inner dimensions 128 != 64
+bad = h @ w_bad           # E[S001]: inner dimensions 128 != 64

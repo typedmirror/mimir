@@ -15,7 +15,7 @@ r2 = make_pair(1, second=2)
 assert_type(r2, list)
 
 # Keyword arg type mismatch with TypeVar (positional binds T=int, keyword gives str)
-make_pair(1, second="hello")  # E
+make_pair(1, second="hello")  # E[T002]
 
 # Generic class constructor with keyword args
 class Box(Generic[T]):

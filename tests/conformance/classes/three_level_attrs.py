@@ -21,4 +21,4 @@ assert_type(leaf.y, str)
 assert_type(leaf.z, float)
 
 # Wrong number of args
-Leaf(1, "hello")  # E
+Leaf(1, "hello")  # E[T004]

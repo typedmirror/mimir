@@ -21,7 +21,7 @@ r2 = Config.from_string("10")
 assert_type(r2, int)
 
 # Too many args to static method (takes 0)
-Config.default(1)  # E
+Config.default(1)  # E[T004]
 
 # Wrong type to classmethod (expects str)
-Config.from_string(42)  # E
+Config.from_string(42)  # E[T002]

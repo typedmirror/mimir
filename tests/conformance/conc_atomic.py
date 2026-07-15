@@ -6,7 +6,7 @@ counter = 0
 
 def increment():
     global counter
-    counter += 1     # E
+    counter += 1     # E[CONC004]
 
 def no_global():
     local = 0

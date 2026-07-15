@@ -35,7 +35,7 @@ diff = logits + y          # (64, 10) + (64, 10) → ✓
 
 # === Shape error: mismatched layer dimensions ===
 W_bad = zeros((512, 128))  # Wrong! h1 is (64, 256), not (64, 512)
-bad = h1 @ W_bad           # E: inner dimensions 256 != 512
+bad = h1 @ W_bad           # E[S001]: inner dimensions 256 != 512
 
 # === Transpose ===
 Wt = W1.T                 # (784, 256).T → (256, 784)

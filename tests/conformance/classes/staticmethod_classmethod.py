@@ -26,4 +26,4 @@ result3 = f.normal(10)
 assert_type(result3, int)
 
 # Wrong arg type to static
-bad = Foo.create("wrong")  # E
+bad = Foo.create("wrong")  # E[T002]

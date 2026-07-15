@@ -13,4 +13,4 @@ r2 = swap("x", 3.14)
 assert_type(r2, float)
 
 # Return type matches second param type
-bad: int = swap(42, "hello")  # E
+bad: int = swap(42, "hello")  # E[T001]

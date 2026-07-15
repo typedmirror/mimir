@@ -6,4 +6,4 @@ def factorial(n):
     return n * factorial(n - 1)
 
 # factorial returns int (not int | Unknown)
-result: str = factorial(5)  # E: Incompatible types
+result: str = factorial(5)  # E[T001]: Incompatible types

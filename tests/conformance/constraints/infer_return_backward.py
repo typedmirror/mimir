@@ -9,4 +9,4 @@ def process(data):
 # Backward inference resolves data → str
 # Return type inferred as int from len()
 # This tests that both work together
-x: str = process("a")  # E: Incompatible types
+x: str = process("a")  # E[T001]: Incompatible types

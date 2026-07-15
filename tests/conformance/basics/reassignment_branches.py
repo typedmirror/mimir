@@ -9,9 +9,9 @@ assert_type(x, int)
 y: str = "a"
 y = "b"
 y = "c"
-y = 42  # E
+y = 42  # E[T001]
 
 # Annotated but assigned wrong later
 z: float = 1.0
 z = 2
-z = "bad"  # E
+z = "bad"  # E[T001]

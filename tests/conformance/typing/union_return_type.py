@@ -12,4 +12,4 @@ assert_type(r, Union[str, int])
 
 # Wrong return type for Union
 def bad_classify(x: int) -> Union[str, int]:
-    return [1, 2]  # E
+    return [1, 2]  # E[T003]

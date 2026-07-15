@@ -10,4 +10,4 @@ def also_void() -> None:
 
 # Returning a value from -> None function is an error
 def bad_void() -> None:
-    return 42  # E
+    return 42  # E[T003]

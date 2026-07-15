@@ -11,4 +11,4 @@ z: Set[str] = set()
 assert_type(z, Set[str])
 
 # Wrong element type in context
-bad: List[str] = [1, 2, 3]  # E
+bad: List[str] = [1, 2, 3]  # E[T001]

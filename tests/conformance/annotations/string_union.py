@@ -6,4 +6,4 @@ class Node:
     value: int = 0
 
 n = Node()
-x: str = n.left  # E: Incompatible types
+x: str = n.left  # E[T001]: Incompatible types

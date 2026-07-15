@@ -5,5 +5,5 @@ settings["timeout"] = 30
 settings["retries"] = 3
 settings["verbose"] = True
 
-x: str = settings["timeout"]  # E: Incompatible types
-settings["timout"]  # E: Invalid TypedDict key
+x: str = settings["timeout"]  # E[T001]: Incompatible types
+settings["timout"]  # E[T001]: Invalid TypedDict key

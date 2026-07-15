@@ -4,4 +4,4 @@ if (x := 10) > 5:
 
 # Type propagation
 z: int = (w := 42)
-bad: str = (v := 42)  # E
+bad: str = (v := 42)  # E[T001]

@@ -17,4 +17,4 @@ rev = df["revenue"]  # OK: just assigned
 subset = df[["price", "qty"]]  # OK: both exist
 
 # Invalid computed column reference
-bad = df["total_cost"]  # E: column not found
+bad = df["total_cost"]  # E[DATA001]: column not found

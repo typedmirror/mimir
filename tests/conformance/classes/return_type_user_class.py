@@ -9,7 +9,7 @@ def make_user(name: str) -> User:
 
 # Return wrong type for user class
 def bad_return(name: str) -> User:
-    return "not a user"  # E
+    return "not a user"  # E[T003]
 
 u = make_user("Alice")
 assert_type(u, User)

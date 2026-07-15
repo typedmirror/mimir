@@ -12,5 +12,5 @@ class Bar:
 
 # Cross-class assignment errors in function
 def errors():
-    f: Foo = Bar("wrong")  # E
-    b: Bar = Foo(42)       # E
+    f: Foo = Bar("wrong")  # E[T001]
+    b: Bar = Foo(42)       # E[T001]

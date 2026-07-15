@@ -15,5 +15,5 @@ accept_pipe(42)
 accept_pipe("hello")
 
 # Wrong type
-accept_union(3.14)  # E
-accept_pipe(3.14)  # E
+accept_union(3.14)  # E[T002]
+accept_pipe(3.14)  # E[T002]

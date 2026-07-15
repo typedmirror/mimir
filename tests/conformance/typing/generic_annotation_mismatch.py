@@ -14,4 +14,4 @@ b2 = Box("hello")
 assert_type(b2.value, str)
 
 # Annotation mismatch: Box[int] but constructed with str
-bad: Box[int] = Box("wrong")  # E
+bad: Box[int] = Box("wrong")  # E[T001]

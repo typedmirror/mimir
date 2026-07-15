@@ -13,4 +13,4 @@ assert_type(r1, int)
 r2 = inc(True)
 
 # Invalid: str doesn't satisfy int bound
-inc("hello")  # E
+inc("hello")  # E[T008]

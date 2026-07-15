@@ -18,4 +18,4 @@ def create_square(s: float) -> Square:
 
 # Wrong factory return — Square is not Circle
 def bad_factory() -> Circle:
-    return Square(5.0)  # E
+    return Square(5.0)  # E[T003]

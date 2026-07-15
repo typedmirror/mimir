@@ -4,4 +4,4 @@ def add(x, y):
     return x + y
 
 # Keyword args provide type evidence for named params
-result: str = add(x=1, y=2)  # E: Incompatible types
+result: str = add(x=1, y=2)  # E[T001]: Incompatible types

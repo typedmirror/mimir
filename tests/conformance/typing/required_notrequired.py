@@ -8,4 +8,4 @@ class Config(TypedDict, total=False):
     debug: NotRequired[bool]
 
 ok = Config(host="localhost", port=8080)
-bad = Config(host="localhost")  # E: Missing required TypedDict field
+bad = Config(host="localhost")  # E[T004]: Missing required TypedDict field

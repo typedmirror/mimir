@@ -12,4 +12,4 @@ def nested(x: int) -> str:
 def bad_nested(x: int) -> str:
     if x > 0:
         return "positive"
-    return 42  # E
+    return 42  # E[T003]

@@ -28,5 +28,5 @@ r8 = s.find("world")
 assert_type(r8, int)
 
 # Wrong type from method
-bad1: int = s.upper()  # E
-bad2: str = s.find("x")  # E
+bad1: int = s.upper()  # E[T001]
+bad2: str = s.find("x")  # E[T001]

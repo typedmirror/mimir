@@ -10,10 +10,10 @@ def setup_logging(): pass
 class Config: pass
 
 # SAF003: function call at module level
-db = connect_to_database()  # SAF003  # E
+db = connect_to_database()  # SAF003  # E[SAF003]
 
 # SAF003: bare call at module level
-setup_logging()  # SAF003  # E
+setup_logging()  # SAF003  # E[SAF003]
 
 # OK: safe builtins at module level
 x = dict()
@@ -25,14 +25,14 @@ name = str("hello")
 config = Config()
 
 # SAF004: monkey-patching
-json.dumps = lambda x: x  # SAF004  # E
+json.dumps = lambda x: x  # SAF004  # E[SAF004]
 
 # SAF005: global state mutation
 _cache = {}
 _items = []
 
 def get_user(uid):
-    _cache[uid] = "found"  # SAF005  # E
+    _cache[uid] = "found"  # SAF005  # E[SAF005]
 
 def add_item(item):
-    _items.append(item)  # SAF005  # E
+    _items.append(item)  # SAF005  # E[SAF005]

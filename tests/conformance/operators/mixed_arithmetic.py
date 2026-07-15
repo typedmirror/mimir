@@ -21,4 +21,4 @@ r5 = "ha" * 3
 assert_type(r5, str)
 
 # Can't add str + int
-bad = "hello" + 42  # E
+bad = "hello" + 42  # E[T005]

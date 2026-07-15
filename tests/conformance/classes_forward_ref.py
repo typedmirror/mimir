@@ -6,4 +6,4 @@ class Node:
     parent: Optional["Node"]
 
 n = Node()
-x: int = n.next  # E
+x: int = n.next  # E[T001]

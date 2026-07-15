@@ -7,4 +7,4 @@ def double(x: int) -> int:
 f: Callable[[int], int] = double
 
 # Wrong callable signature
-g: Callable[[str], str] = double  # E
+g: Callable[[str], str] = double  # E[T001]

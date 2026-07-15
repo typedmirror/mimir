@@ -13,4 +13,4 @@ for row in matrix:
 
 # Wrong type from iteration
 for s in items:
-    bad: int = s  # E
+    bad: int = s  # E[T001]

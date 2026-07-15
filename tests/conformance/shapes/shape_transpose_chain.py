@@ -19,4 +19,4 @@ xt = x.T                  # (32, 784).T → (784, 32)
 grad_W = xt @ grad_h      # (784, 32) @ (32, 128) → OK
 
 # Error: wrong transpose usage
-bad_grad = grad_h @ W     # E: inner dimensions 128 != 784
+bad_grad = grad_h @ W     # E[S001]: inner dimensions 128 != 784

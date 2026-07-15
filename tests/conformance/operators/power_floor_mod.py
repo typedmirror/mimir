@@ -21,4 +21,4 @@ r5 = "ha" * 3
 assert_type(r5, str)
 
 # Wrong: power result to str
-bad: str = 2 ** 10  # E
+bad: str = 2 ** 10  # E[T001]

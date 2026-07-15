@@ -14,8 +14,8 @@ all_defaults(10)
 all_defaults(10, 20)
 
 # Too many arguments
-with_default(1, 2, 3)    # E: too many arguments
-all_defaults(1, 2, 3)    # E: too many arguments
+with_default(1, 2, 3)    # E[T004]: too many arguments
+all_defaults(1, 2, 3)    # E[T004]: too many arguments
 
 # Too few arguments
-with_default()           # E: too few arguments
+with_default()           # E[T004]: too few arguments

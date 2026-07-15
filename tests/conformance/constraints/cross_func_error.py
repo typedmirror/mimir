@@ -6,4 +6,4 @@ def compute(x: int):
 def wrapper():
     return compute(10)
 
-result: str = wrapper()  # E: Incompatible types
+result: str = wrapper()  # E[T001]: Incompatible types

@@ -5,4 +5,4 @@ def process(data):
     return len(lines)
 
 # Caller provides str, body usage (.split) confirms
-count: str = process("hello\nworld")  # E: Incompatible types
+count: str = process("hello\nworld")  # E[T001]: Incompatible types

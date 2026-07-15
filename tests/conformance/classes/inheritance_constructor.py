@@ -31,4 +31,4 @@ assert_type(c, Cat)
 assert_type(c.name, str)
 
 # Wrong arg count
-Dog("Rex")  # E
+Dog("Rex")  # E[T004]

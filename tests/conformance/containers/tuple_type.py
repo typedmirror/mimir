@@ -4,4 +4,4 @@
 pair: tuple[int, str] = (1, "hello")
 
 # Mismatches
-bad1: tuple[int, str] = ("hello", 1)  # E
+bad1: tuple[int, str] = ("hello", 1)  # E[T001]

@@ -5,4 +5,4 @@ s: Set[int] = {1, 2, 3}
 assert_type(s, Set[int])
 
 # Wrong element type
-bad: Set[str] = {1, 2, 3}  # E
+bad: Set[str] = {1, 2, 3}  # E[T001]

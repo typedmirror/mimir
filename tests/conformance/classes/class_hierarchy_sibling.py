@@ -29,4 +29,4 @@ assert_type(c.speak(), str)
 parent: Animal = d
 
 # Sibling classes not interchangeable
-bad: Cat = d  # E
+bad: Cat = d  # E[T001]

@@ -7,4 +7,4 @@ def is_str(x: object) -> TypeGuard[str]:
 
 val: object = "hello"
 if is_str(val):
-    result: int = val  # E: Incompatible types
+    result: int = val  # E[T001]: Incompatible types

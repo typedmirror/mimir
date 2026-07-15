@@ -15,10 +15,10 @@ one_arg(1)
 two_args(1, 2)
 
 # Too many arguments
-zero_args(1)       # E: too many arguments
-one_arg(1, 2)      # E: too many arguments
-two_args(1, 2, 3)  # E: too many arguments
+zero_args(1)       # E[T004]: too many arguments
+one_arg(1, 2)      # E[T004]: too many arguments
+two_args(1, 2, 3)  # E[T004]: too many arguments
 
 # Too few arguments
-one_arg()          # E: too few arguments
-two_args(1)        # E: too few arguments
+one_arg()          # E[T004]: too few arguments
+two_args(1)        # E[T004]: too few arguments

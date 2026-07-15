@@ -6,4 +6,4 @@ def accept_int(n: int) -> int:
 def process(x):
     result = accept_int(x)
     # x must be int (from accept_int's param type)
-    y: str = x  # E: Incompatible types
+    y: str = x  # E[T001]: Incompatible types

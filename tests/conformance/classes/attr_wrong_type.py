@@ -10,4 +10,4 @@ assert_type(p.x, int)
 assert_type(p.y, int)
 
 # Attribute access returns typed value — wrong assignment
-bad: str = p.x  # E
+bad: str = p.x  # E[T001]

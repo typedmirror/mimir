@@ -13,5 +13,5 @@ x: str = first(["hello"])
 y: int = first([1, 2, 3])
 
 # Incorrectly typed — specialized return doesn't match declaration
-z: int = first(["hello"])  # E: Incompatible types
-w: str = first([1, 2, 3])  # E: Incompatible types
+z: int = first(["hello"])  # E[T001]: Incompatible types
+w: str = first([1, 2, 3])  # E[T001]: Incompatible types

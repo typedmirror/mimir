@@ -12,4 +12,4 @@ r2 = greet("Bob", "Hi")
 assert_type(r2, str)
 
 # Wrong type for non-default param
-greet(42)  # E
+greet(42)  # E[T002]

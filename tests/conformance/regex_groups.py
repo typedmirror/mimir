@@ -5,25 +5,25 @@ def test_numeric_group():
     m.group(0)   # OK — whole match
     m.group(1)   # OK — first group
     m.group(3)   # OK — third group
-    m.group(4)   # REG001  # E
+    m.group(4)   # REG001  # E[REG001]
 
 def test_named_group():
     m = re.search(r"(?P<host>[\w.]+):(?P<port>\d+)", "localhost:8080")
     m.group("host")  # OK
     m.group("port")  # OK
-    m.group("prot")  # REG002  # E
+    m.group("prot")  # REG002  # E[REG002]
 
 def test_compiled_pattern():
     pattern = re.compile(r"(\w+)\s(\w+)")
     m = pattern.match("hello world")
     m.group(2)   # OK
-    m.group(3)   # REG001  # E
+    m.group(3)   # REG001  # E[REG001|T004]
 
 def test_no_groups():
     m = re.match(r"\d+", "123")
     m.group(0)   # OK — whole match
-    m.group(1)   # REG001  # E
+    m.group(1)   # REG001  # E[REG001]
 
 def test_named_no_match():
     m = re.match(r"(?P<year>\d{4})-(?P<month>\d{2})", "2026-03")
-    m.group("day")  # REG002  # E
+    m.group("day")  # REG002  # E[REG002]

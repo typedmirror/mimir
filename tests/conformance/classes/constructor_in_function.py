@@ -20,4 +20,4 @@ assert_type(r, Point)
 
 # Constructor arg count errors in function
 def bad_constructor():
-    p = Point(1.0)  # E
+    p = Point(1.0)  # E[T004]

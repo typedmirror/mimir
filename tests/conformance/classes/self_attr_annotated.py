@@ -18,4 +18,4 @@ assert_type(c.name, str)
 assert_type(c.count, int)
 
 # Nonexistent attr
-c.missing  # E
+c.missing  # E[T007]

@@ -18,4 +18,4 @@ assert_type(u2.age, int)
 assert_type(u2.active, bool)
 
 # Wrong type for required field
-User(name=42)  # E
+User(name=42)  # E[T002]

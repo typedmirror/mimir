@@ -18,5 +18,5 @@ r5 = abs(-5)
 assert_type(r5, int)
 
 # Type constructors as wrong assignment targets
-bad1: int = str(42)  # E
-bad2: str = int("3")  # E
+bad1: int = str(42)  # E[T001]
+bad2: str = int("3")  # E[T001]

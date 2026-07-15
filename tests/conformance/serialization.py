@@ -3,7 +3,7 @@ import json
 import yaml
 
 def test_tainted_pickle(request):
-    data = pickle.loads(request.body)  # SER001  # E
+    data = pickle.loads(request.body)  # SER001  # E[SER001|T007]
 
 def test_dict_dumps(user):
     json.dumps(user.__dict__)  # SER003 (Warning, not caught by marker)

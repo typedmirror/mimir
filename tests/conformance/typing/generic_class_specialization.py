@@ -25,4 +25,4 @@ assert_type(p2.get_first(), float)
 assert_type(p2.get_second(), bool)
 
 # Wrong type through specialization
-r: str = p.get_first()  # E
+r: str = p.get_first()  # E[T001]

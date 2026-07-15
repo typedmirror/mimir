@@ -3,4 +3,4 @@
 def make_list(x: int):
     return [x]
 
-result: int = make_list(5)  # E: Incompatible types
+result: int = make_list(5)  # E[T001]: Incompatible types

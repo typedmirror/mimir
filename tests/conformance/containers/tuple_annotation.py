@@ -5,4 +5,4 @@ t: Tuple[int, str, float] = (1, "hello", 3.14)
 assert_type(t, Tuple[int, str, float])
 
 # Wrong tuple type
-bad: Tuple[int, int] = (1, "hello")  # E
+bad: Tuple[int, int] = (1, "hello")  # E[T001]

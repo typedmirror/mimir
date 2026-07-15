@@ -11,4 +11,4 @@ def noop() -> None:
 
 # Wrong — returning value from -> None
 def bad_cleanup() -> None:
-    return "done"  # E
+    return "done"  # E[T003]

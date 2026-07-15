@@ -12,5 +12,5 @@ assert_type(r, Optional[str])
 # Wrong return in Optional function
 def bad_find(x: int) -> Optional[str]:
     if x > 0:
-        return 42  # E
+        return 42  # E[T003]
     return None

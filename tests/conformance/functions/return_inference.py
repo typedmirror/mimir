@@ -12,4 +12,4 @@ r = to_str(square(5))
 assert_type(r, str)
 
 # Wrong type from chained call
-bad: int = to_str(42)  # E
+bad: int = to_str(42)  # E[T001]

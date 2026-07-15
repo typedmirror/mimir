@@ -16,5 +16,5 @@ s = "ha" * 3
 assert_type(s, str)
 
 # Invalid unary on string
-bad1 = -"hello"  # E
-bad2 = ~"world"  # E
+bad1 = -"hello"  # E[T005]
+bad2 = ~"world"  # E[T005]

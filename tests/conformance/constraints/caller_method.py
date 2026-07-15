@@ -5,4 +5,4 @@ class Calc:
         return x + y
 
 c = Calc()
-result: str = c.add(1, 2)  # E: Incompatible types
+result: str = c.add(1, 2)  # E[T001]: Incompatible types

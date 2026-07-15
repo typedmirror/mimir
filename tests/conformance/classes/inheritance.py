@@ -15,4 +15,4 @@ class Dog(Animal):
 a: Animal = Dog("Rex", "Lab")
 
 # Superclass NOT assignable to subclass
-bad1: Dog = Animal("Rex")   # E
+bad1: Dog = Animal("Rex")   # E[T001]

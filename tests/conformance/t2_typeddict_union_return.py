@@ -32,4 +32,4 @@ def handler(flag: bool) -> Union[Ok, Err]:
 
 def wrong_keys() -> Union[Ok, Err]:
     # non-string keys can never satisfy a TypedDict — real bug, must fire
-    return {1: "x"}  # E
+    return {1: "x"}  # E[T003]

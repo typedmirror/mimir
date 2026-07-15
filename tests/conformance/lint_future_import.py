@@ -2,7 +2,7 @@
 # `annotations` — a compiler directive (PEP 236), never "unused" (L001 FP).
 # The genuinely unused import below must still fire.
 from __future__ import annotations
-import json  # E
+import json  # E[L001]
 
 
 def f(x: int) -> str:

@@ -11,6 +11,6 @@ assert_type(b, int)
 assert_type(c, str)
 
 # Wrong
-assert_type(a, int)  # E
-assert_type(b, float)  # E
-assert_type(c, int)  # E
+assert_type(a, int)  # E[T006]
+assert_type(b, float)  # E[T006]
+assert_type(c, int)  # E[T006]

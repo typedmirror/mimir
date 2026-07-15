@@ -12,5 +12,5 @@ x: int = pair(3, "y")
 y: str = pair("a", 99)
 
 # Incorrectly typed
-z: str = pair(3, "y")  # E: Incompatible types
-w: int = pair("a", 99)  # E: Incompatible types
+z: str = pair(3, "y")  # E[T001]: Incompatible types
+w: int = pair("a", 99)  # E[T001]: Incompatible types

@@ -12,4 +12,4 @@ d = a + a  # OK: same shapes
 
 # Invalid matmul — inner dimensions mismatch (caught by shape pass)
 e = zeros((5, 6))
-f = a @ e  # E: inner dimensions 4 != 5
+f = a @ e  # E[S001]: inner dimensions 4 != 5

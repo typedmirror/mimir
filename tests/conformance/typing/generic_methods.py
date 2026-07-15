@@ -13,7 +13,7 @@ class Pair(Generic[T]):
 
 p: Pair[int] = Pair(1, 2)
 a: int = p.get_first()
-b: str = p.get_first()    # E
+b: str = p.get_first()    # E[T001]
 
-bad1: Pair[int] = Pair("a", "b")  # E
-bad2: Pair[str] = Pair(1, 2)      # E
+bad1: Pair[int] = Pair("a", "b")  # E[T001]
+bad2: Pair[str] = Pair(1, 2)      # E[T001]

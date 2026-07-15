@@ -16,10 +16,10 @@ a = Animal("Rex")
 d = Dog("Rex", "Lab")
 
 # Wrong arg count for parent
-Animal()  # E
+Animal()  # E[T004]
 
 # Wrong arg count for child
-Dog("Rex")  # E
+Dog("Rex")  # E[T004]
 
 # Wrong arg type
-Animal(42)  # E
+Animal(42)  # E[T002]

@@ -8,4 +8,4 @@ r2 = 42 is not None
 assert_type(r2, bool)
 
 # Wrong type from identity check
-bad: str = None is None  # E
+bad: str = None is None  # E[T001]

@@ -11,6 +11,6 @@ d = +True
 assert_type(d, int)
 
 # Invalid unary operations
-x = -"hello"  # E
-y = ~"text"  # E
-z = -[1, 2]  # E
+x = -"hello"  # E[T005]
+y = ~"text"  # E[T005]
+z = -[1, 2]  # E[T005]

@@ -17,5 +17,5 @@ def nested2(x: int | None) -> int:
         assert_type(x, int)
         return x
     else:
-        bad: int = x  # E
+        bad: int = x  # E[T001]
         return 0

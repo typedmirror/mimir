@@ -12,5 +12,5 @@ assert_type(r, int)
 # Recursive with wrong base case return type
 def bad_rec(n: int) -> str:
     if n <= 0:
-        return 42  # E
+        return 42  # E[T003]
     return "ok"

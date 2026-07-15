@@ -5,10 +5,10 @@ import re
 
 def test_regex():
     # SAF006: nested quantifiers — classic ReDoS
-    re.compile(r"(a+)+b")  # SAF006  # E
+    re.compile(r"(a+)+b")  # SAF006  # E[SAF006]
 
     # SAF006: another pattern
-    re.search(r"(x+x+)+y", "test")  # SAF006  # E
+    re.search(r"(x+x+)+y", "test")  # SAF006  # E[SAF006]
 
     # OK: normal patterns
     re.compile(r"\d+")

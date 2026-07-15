@@ -10,4 +10,4 @@ def create(cls: type[Animal]) -> Animal:
     return cls()
 
 create(Dog)    # OK — Dog is subclass of Animal
-create(int)    # E: Incompatible argument type
+create(int)    # E[T002]: Incompatible argument type

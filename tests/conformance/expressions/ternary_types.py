@@ -12,4 +12,4 @@ z: str = "yes" if True else "no"
 assert_type(z, str)
 
 # Ternary type mismatch with annotation
-bad: int = "yes" if True else "no"  # E
+bad: int = "yes" if True else "no"  # E[T001]

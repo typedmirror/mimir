@@ -14,4 +14,4 @@ r4 = 1 != 2
 assert_type(r4, bool)
 
 # Wrong type from comparison
-bad: str = 1 < 2  # E
+bad: str = 1 < 2  # E[T001]

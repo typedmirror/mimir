@@ -10,6 +10,6 @@ z: int | str = 42
 z2: int | str = "hello"
 z3: int | None = None
 # Errors
-bad1: Optional[int] = "hello"  # E
-bad2: Union[int, str] = 3.14   # E
-bad3: int | str = 3.14         # E
+bad1: Optional[int] = "hello"  # E[T001]
+bad2: Union[int, str] = 3.14   # E[T001]
+bad3: int | str = 3.14         # E[T001]

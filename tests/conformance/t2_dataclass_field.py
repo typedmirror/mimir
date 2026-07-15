@@ -20,6 +20,6 @@ class Clean:
 @dataclass
 class Buggy:
     # default value type mismatches the annotation — real bug, must fire
-    label: str = field(default=5)  # E
+    label: str = field(default=5)  # E[T001]
     # factory returns list[str], annotation says int — real bug, must fire
-    count: int = field(default_factory=make_strs)  # E
+    count: int = field(default_factory=make_strs)  # E[T001]

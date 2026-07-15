@@ -13,5 +13,5 @@ class Err:
 # Returning wrong class type from function
 def divide(a: int, b: int) -> Ok:
     if b == 0:
-        return Err("division by zero")  # E
+        return Err("division by zero")  # E[T003]
     return Ok(a)

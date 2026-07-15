@@ -20,7 +20,7 @@ def nested_ok(path: str) -> Optional[str]:
         return None
 
 
-def leaky(path: str) -> Optional[str]:  # E
+def leaky(path: str) -> Optional[str]:  # E[F002]
     try:
         with open(path) as fh:
             x = fh.read()

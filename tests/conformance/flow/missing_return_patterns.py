@@ -1,12 +1,12 @@
 from typing import assert_type
 
 # No return statement at all
-def no_return() -> int:  # E
+def no_return() -> int:  # E[F002]
     x = 42
 
 # Return None when int expected
 def none_return() -> int:
-    return None  # E
+    return None  # E[T003]
 
 # Correct: returns in all paths
 def ok_return(x: bool) -> int:

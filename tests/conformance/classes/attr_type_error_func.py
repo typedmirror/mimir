@@ -8,4 +8,4 @@ class Config:
 # Wrong type assigned from class attr in function
 def bad_usage():
     c = Config(8080)
-    s: str = c.port  # E
+    s: str = c.port  # E[T001]

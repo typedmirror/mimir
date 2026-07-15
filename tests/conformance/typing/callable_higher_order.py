@@ -14,10 +14,10 @@ assert_type(result, str)
 def bad_cb(x: str) -> str:
     return x
 
-apply(bad_cb, 42)  # E
+apply(bad_cb, 42)  # E[T002]
 
 # Wrong callback return type
 def bad_ret(x: int) -> int:
     return x
 
-apply(bad_ret, 42)  # E
+apply(bad_ret, 42)  # E[T002]

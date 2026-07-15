@@ -10,7 +10,7 @@ assert_type(y, str)
 assert_type(z, float)
 
 # Wrong — T006
-assert_type(x, str)  # E
-assert_type(y, int)  # E
-assert_type(z, int)  # E
-assert_type(x, bool)  # E
+assert_type(x, str)  # E[T006]
+assert_type(y, int)  # E[T006]
+assert_type(z, int)  # E[T006]
+assert_type(x, bool)  # E[T006]
