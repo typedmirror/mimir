@@ -21,7 +21,42 @@ Check_Result :: struct {
 
 // ==================== Entry Point ====================
 
+// Injected import-resolution strategy for check(). nil ⇒ single-file,
+// virtual-only (private registry). Non-nil ⇒ caller owns resolution:
+// registry and builtins MUST both be non-nil, and import_types carries the
+// externally-resolved symbol→type map (project/stdlib/cache/site-packages;
+// may be empty). The checker owns virtual resolution in both modes; the
+// caller owns everything else (package DAG forbids checker → modules).
+Import_Resolution :: struct {
+	registry:     ^Type_Registry,
+	builtins:     ^Builtin_Names,
+	import_types: map[binder.Symbol_ID]Type_ID,
+}
+
+// Unified checker entrypoint (T4, R1). The two former entrypoints survive
+// verbatim as the two dispatch arms — they are NOT merged:
+//   resolution == nil → _check_virtual_only  (former `check` body)
+//   resolution != nil → _check_with_resolution (former `check_with_imports` body)
 check :: proc(
+	module: ^parser.Module,
+	bind_result: ^binder.Bind_Result,
+	flow_result: ^flow.Flow_Result,
+	file_path: string,
+	allocator: mem.Allocator,
+	resolution: ^Import_Resolution = nil,
+) -> Check_Result {
+	if resolution == nil {
+		return _check_virtual_only(module, bind_result, flow_result, file_path, allocator)
+	}
+	return _check_with_resolution(
+		module, bind_result, flow_result, file_path,
+		resolution.registry, resolution.builtins, resolution.import_types, allocator,
+	)
+}
+
+// Former single-file `check` — body unchanged (T4 R1 dispatch arm).
+@(private = "file")
+_check_virtual_only :: proc(
 	module: ^parser.Module,
 	bind_result: ^binder.Bind_Result,
 	flow_result: ^flow.Flow_Result,
@@ -344,8 +379,12 @@ suppress_f002_for_never :: proc(flow_result: ^flow.Flow_Result, result: ^Check_R
 }
 
 // ==================== Multi-Module Entry Point ====================
+// (check_with_imports shim deleted at T4 step G2 — all call sites now use
+// the unified check(..., &Import_Resolution).)
 
-check_with_imports :: proc(
+// Former `check_with_imports` — body unchanged (T4 R1 dispatch arm).
+@(private = "file")
+_check_with_resolution :: proc(
 	module: ^parser.Module,
 	bind_result: ^binder.Bind_Result,
 	flow_result: ^flow.Flow_Result,

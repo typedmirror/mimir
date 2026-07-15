@@ -163,9 +163,13 @@ extract_package_exports :: proc(
 	flow_result := flow.analyze(module, &bind_result, file_path, allocator)
 
 	// Type check main file with resolved intra-package imports (shared registry)
-	check_result := checker.check_with_imports(
-		module, &bind_result, &flow_result, file_path,
-		registry, &builtins, import_types, allocator,
+	res := checker.Import_Resolution{
+		registry     = registry,
+		builtins     = &builtins,
+		import_types = import_types,
+	}
+	check_result := checker.check(
+		module, &bind_result, &flow_result, file_path, allocator, &res,
 	)
 
 	// Extract exports from module scope
@@ -328,9 +332,13 @@ _resolve_pkg_imports :: proc(
 
 		// Check sub-module with its resolved imports
 		sub_flow := flow.analyze(sub_module, &sub_bind, sub_file, allocator)
-		sub_check := checker.check_with_imports(
-			sub_module, &sub_bind, &sub_flow, sub_file,
-			registry, builtins, sub_import_types, allocator,
+		sub_res := checker.Import_Resolution{
+			registry     = registry,
+			builtins     = builtins,
+			import_types = sub_import_types,
+		}
+		sub_check := checker.check(
+			sub_module, &sub_bind, &sub_flow, sub_file, allocator, &sub_res,
 		)
 
 		// Build name→type map from sub scope and CACHE it

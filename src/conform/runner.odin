@@ -7,10 +7,7 @@ import "core:strings"
 
 import "mimir:core"
 import "mimir:parser"
-import "mimir:binder"
-import "mimir:flow"
-import "mimir:checker"
-import "mimir:concurrency"
+import "mimir:orchestrator"
 import "mimir:lint"
 import "mimir:security"
 import "mimir:perf"
@@ -100,79 +97,69 @@ run_conform_file :: proc(
 		// code-specific marker on line 1 will NOT match a parse failure)
 		error_lines[1] = true
 	} else {
-		// Bind
-		bind_result := binder.bind(module, file, arena.allocator)
-		for d in bind_result.diagnostics {
-			if d.severity == .Error {
-				_record_error(&error_lines, &error_codes, d.location.line, d.code)
-			}
-		}
-
-		// Flow
-		flow_result := flow.analyze(module, &bind_result, file, arena.allocator)
-
-		// Check (may suppress F002 in flow_result for Never-returning calls)
-		check_result := checker.check(module, &bind_result, &flow_result, file, arena.allocator)
-
-		// Collect flow diagnostics AFTER checker (F002 suppression applies)
-		for d in flow_result.diagnostics {
-			if d.severity == .Error {
-				_record_error(&error_lines, &error_codes, d.location.line, d.code)
-			}
-		}
-		for d in check_result.diagnostics {
-			if d.severity == .Error {
-				_record_error(&error_lines, &error_codes, d.location.line, d.code)
-			}
-		}
-
-		// Concurrency (all severities — CONC004/006 are Warning)
 		source_str := string(source)
-		conc_diagnostics := concurrency.analyze_concurrency(module, &bind_result, source_str, file, arena.allocator)
-		for d in conc_diagnostics {
-			_record_error(&error_lines, &error_codes, d.location.line, d.code)
-		}
 
-		// Analysis passes — only run on matching test files to avoid noise
+		// Filename-gated pass selection — the exact pre-T4 policy (R5 matrix):
+		// Check+Concurrency always; Lint/Security/Perf/Safety by prefix.
+		// The selection is centralized into a Pass_Set; the policy is unchanged.
 		basename := file
 		for i := len(file) - 1; i >= 0; i -= 1 {
 			if file[i] == '/' { basename = file[i+1:]; break }
 		}
+		passes: orchestrator.Pass_Set = {.Check, .Concurrency}
+		if strings.has_prefix(basename, "lint_") { passes += {.Lint} }
+		if strings.has_prefix(basename, "sec_") || strings.has_prefix(basename, "taint_") { passes += {.Security} }
+		if strings.has_prefix(basename, "perf_") { passes += {.Perf} }
+		if strings.has_prefix(basename, "safety_") || strings.contains(file, "/safety/") { passes += {.Safety} }
 
-		// Lint: lint_*.py
-		if strings.has_prefix(basename, "lint_") {
-			lint_config := lint.default_config()
-			lint_diagnostics := lint.lint_file(module, &bind_result, source_str, file, &lint_config, arena.allocator)
-			for d in lint_diagnostics {
+		// Run the pipeline through the orchestrator. Virtual_Only preserves
+		// conform's checker behavior exactly: private registry, virtual
+		// imports only, no B003 (T4 R5 — resolution-policy harmonization is
+		// explicitly out of scope).
+		g := orchestrator.init(module, source_str, file, arena.allocator)
+		orchestrator.run(&g, orchestrator.Run_Config{
+			passes          = passes,
+			resolution      = .Virtual_Only,
+			lint_config     = lint.default_config(),
+			security_config = security.default_config(),
+			perf_config     = perf.default_config(),
+			safety_config   = safety.default_config(),
+		})
+
+		// Collect from the PER-PASS lists with the pre-T4 severity semantics,
+		// byte-for-byte: bind/flow/check count Errors only; concurrency and
+		// the filename-gated passes count all severities (CONC004/006 are
+		// Warning). Flow is read after run() — F002 suppression has applied.
+		// Ungated pass lists are nil ⇒ zero iterations.
+		for d in g.bind_result.diagnostics {
+			if d.severity == .Error {
 				_record_error(&error_lines, &error_codes, d.location.line, d.code)
 			}
 		}
-
-		// Security + taint: sec_*.py, taint_*.py
-		if strings.has_prefix(basename, "sec_") || strings.has_prefix(basename, "taint_") {
-			sec_config := security.default_config()
-			sec_diagnostics := security.scan_file(module, &bind_result, source_str, file, &sec_config, arena.allocator, &flow_result)
-			for d in sec_diagnostics {
+		for d in g.flow_result.diagnostics {
+			if d.severity == .Error {
 				_record_error(&error_lines, &error_codes, d.location.line, d.code)
 			}
 		}
-
-		// Performance: perf_*.py
-		if strings.has_prefix(basename, "perf_") {
-			perf_config := perf.default_config()
-			perf_diagnostics := perf.analyze_performance(module, &bind_result, source_str, file, &perf_config, arena.allocator)
-			for d in perf_diagnostics {
+		for d in g.check_result.diagnostics {
+			if d.severity == .Error {
 				_record_error(&error_lines, &error_codes, d.location.line, d.code)
 			}
 		}
-
-		// Safety: safety_*.py or in safety/ directory
-		if strings.has_prefix(basename, "safety_") || strings.contains(file, "/safety/") {
-			safety_config := safety.default_config()
-			safety_diagnostics := safety.analyze_safety(module, &bind_result, file, &safety_config, arena.allocator)
-			for d in safety_diagnostics {
-				_record_error(&error_lines, &error_codes, d.location.line, d.code)
-			}
+		for d in g.conc_diags {
+			_record_error(&error_lines, &error_codes, d.location.line, d.code)
+		}
+		for d in g.lint_diags {
+			_record_error(&error_lines, &error_codes, d.location.line, d.code)
+		}
+		for d in g.sec_diags {
+			_record_error(&error_lines, &error_codes, d.location.line, d.code)
+		}
+		for d in g.perf_diags {
+			_record_error(&error_lines, &error_codes, d.location.line, d.code)
+		}
+		for d in g.safety_diags {
+			_record_error(&error_lines, &error_codes, d.location.line, d.code)
 		}
 	}
 

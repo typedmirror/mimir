@@ -1,0 +1,403 @@
+{
+ "count": 18,
+ "tuples": [
+  [
+   18,
+   0,
+   "D001",
+   2
+  ],
+  [
+   18,
+   0,
+   "T001",
+   1
+  ],
+  [
+   19,
+   0,
+   "D001",
+   2
+  ],
+  [
+   19,
+   0,
+   "L002",
+   2
+  ],
+  [
+   19,
+   4,
+   "SAF003",
+   2
+  ],
+  [
+   19,
+   4,
+   "T002",
+   1
+  ],
+  [
+   23,
+   4,
+   "D001",
+   2
+  ],
+  [
+   23,
+   4,
+   "L002",
+   2
+  ],
+  [
+   27,
+   0,
+   "D001",
+   2
+  ],
+  [
+   27,
+   0,
+   "L002",
+   2
+  ],
+  [
+   27,
+   4,
+   "SAF003",
+   2
+  ],
+  [
+   27,
+   4,
+   "SEC001",
+   1
+  ],
+  [
+   30,
+   0,
+   "SAF003",
+   2
+  ],
+  [
+   30,
+   0,
+   "SEC008",
+   1
+  ],
+  [
+   33,
+   4,
+   "D001",
+   2
+  ],
+  [
+   33,
+   4,
+   "L002",
+   2
+  ],
+  [
+   34,
+   0,
+   "L005",
+   2
+  ],
+  [
+   34,
+   0,
+   "SAF001",
+   2
+  ]
+ ],
+ "raw_for_humans": [
+  {
+   "range": {
+    "start": {
+     "line": 18,
+     "character": 0
+    },
+    "end": {
+     "line": 18,
+     "character": 1
+    }
+   },
+   "severity": 1,
+   "code": "T001",
+   "source": "mimir",
+   "message": "Incompatible types in assignment. Expression has type 'str', expected 'int'. Fix: Change the value or the annotation"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 19,
+     "character": 4
+    },
+    "end": {
+     "line": 19,
+     "character": 5
+    }
+   },
+   "severity": 1,
+   "code": "T002",
+   "source": "mimir",
+   "message": "Incompatible argument type. Expression has type 'str', expected 'int'. Fix: Use the correct type"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 23,
+     "character": 4
+    },
+    "end": {
+     "line": 23,
+     "character": 5
+    }
+   },
+   "severity": 2,
+   "code": "D001",
+   "source": "mimir",
+   "message": "variable 'unused_var' is assigned but never used. unused variables indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 18,
+     "character": 0
+    },
+    "end": {
+     "line": 18,
+     "character": 1
+    }
+   },
+   "severity": 2,
+   "code": "D001",
+   "source": "mimir",
+   "message": "variable 'x' is assigned but never used. unused variables indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 19,
+     "character": 0
+    },
+    "end": {
+     "line": 19,
+     "character": 1
+    }
+   },
+   "severity": 2,
+   "code": "D001",
+   "source": "mimir",
+   "message": "variable 'y' is assigned but never used. unused variables indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 27,
+     "character": 0
+    },
+    "end": {
+     "line": 27,
+     "character": 1
+    }
+   },
+   "severity": 2,
+   "code": "D001",
+   "source": "mimir",
+   "message": "variable 'h' is assigned but never used. unused variables indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 33,
+     "character": 4
+    },
+    "end": {
+     "line": 33,
+     "character": 5
+    }
+   },
+   "severity": 2,
+   "code": "D001",
+   "source": "mimir",
+   "message": "variable 'n' is assigned but never used. unused variables indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 19,
+     "character": 0
+    },
+    "end": {
+     "line": 19,
+     "character": 1
+    }
+   },
+   "severity": 2,
+   "code": "L002",
+   "source": "mimir",
+   "message": "local variable 'y' is assigned but never used. unused variables may indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 23,
+     "character": 4
+    },
+    "end": {
+     "line": 23,
+     "character": 5
+    }
+   },
+   "severity": 2,
+   "code": "L002",
+   "source": "mimir",
+   "message": "local variable 'unused_var' is assigned but never used. unused variables may indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 27,
+     "character": 0
+    },
+    "end": {
+     "line": 27,
+     "character": 1
+    }
+   },
+   "severity": 2,
+   "code": "L002",
+   "source": "mimir",
+   "message": "local variable 'h' is assigned but never used. unused variables may indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 33,
+     "character": 4
+    },
+    "end": {
+     "line": 33,
+     "character": 5
+    }
+   },
+   "severity": 2,
+   "code": "L002",
+   "source": "mimir",
+   "message": "local variable 'n' is assigned but never used. unused variables may indicate dead code or a missing reference. Fix: remove the variable or prefix with '_' to indicate intentional disuse"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 34,
+     "character": 0
+    },
+    "end": {
+     "line": 34,
+     "character": 1
+    }
+   },
+   "severity": 2,
+   "code": "L005",
+   "source": "mimir",
+   "message": "bare except clause. bare 'except:' catches SystemExit, KeyboardInterrupt, and GeneratorExit. Fix: use 'except Exception:' to avoid catching system-exiting exceptions"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 27,
+     "character": 4
+    },
+    "end": {
+     "line": 27,
+     "character": 5
+    }
+   },
+   "severity": 1,
+   "code": "SEC001",
+   "source": "mimir",
+   "message": "weak hash algorithm 'md5' is not suitable for security use. MD5 and SHA-1 are cryptographically broken and vulnerable to collision attacks. Fix: use hashlib.sha256() or bcrypt/argon2 for passwords"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 30,
+     "character": 0
+    },
+    "end": {
+     "line": 30,
+     "character": 1
+    }
+   },
+   "severity": 1,
+   "code": "SEC008",
+   "source": "mimir",
+   "message": "os.system() executes commands through the shell. shell execution with user-controllable input enables command injection. Fix: use subprocess.run() with a list of arguments instead"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 34,
+     "character": 0
+    },
+    "end": {
+     "line": 34,
+     "character": 1
+    }
+   },
+   "severity": 2,
+   "code": "SAF001",
+   "source": "mimir",
+   "message": "exception silently swallowed. caught exception is ignored with 'pass', hiding potential errors. Fix: log the error, re-raise, or handle it explicitly"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 19,
+     "character": 4
+    },
+    "end": {
+     "line": 19,
+     "character": 5
+    }
+   },
+   "severity": 2,
+   "code": "SAF003",
+   "source": "mimir",
+   "message": "function call 'process' at module level has side effects. module-level calls execute on import, causing unexpected side effects. Fix: move this call inside a function or 'if __name__ == \"__main__\"' guard"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 27,
+     "character": 4
+    },
+    "end": {
+     "line": 27,
+     "character": 5
+    }
+   },
+   "severity": 2,
+   "code": "SAF003",
+   "source": "mimir",
+   "message": "function call 'hashlib.md5' at module level has side effects. module-level calls execute on import, causing unexpected side effects. Fix: move this call inside a function or 'if __name__ == \"__main__\"' guard"
+  },
+  {
+   "range": {
+    "start": {
+     "line": 30,
+     "character": 0
+    },
+    "end": {
+     "line": 30,
+     "character": 1
+    }
+   },
+   "severity": 2,
+   "code": "SAF003",
+   "source": "mimir",
+   "message": "function call 'os.system' at module level has side effects. module-level calls execute on import, causing unexpected side effects. Fix: move this call inside a function or 'if __name__ == \"__main__\"' guard"
+  }
+ ]
+}

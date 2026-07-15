@@ -1,4 +1,4 @@
-package mimir
+package orchestrator
 
 // Unified Analysis Graph — aggregates all per-file analysis results into one
 // queryable structure. Centralizes diagnostic emission with dedup, # type: ignore
@@ -10,20 +10,23 @@ package mimir
 //
 // This is Layer 1 (aggregation) + Layer 2 (orchestration) + Layer 3 (diagnostics).
 // Future layers add cross-domain queries and incremental re-analysis.
+//
+// T4 (R2): relocated from root `package mimir` so lsp/conform can import the
+// orchestrator. Procs drop the old `graph_` prefix — the package qualifies them.
 
 import "core:mem"
 import "core:strings"
 import "core:fmt"
 import "core:os"
 
-import "core"
-import "parser"
-import "binder"
-import "flow"
-import "checker"
-import "modules"
-import "platform"
-import "concurrency"
+import core     "mimir:core"
+import parser   "mimir:parser"
+import binder   "mimir:binder"
+import flowpkg  "mimir:flow"        // aliased: frees `flow` as the mandated pass-proc name (Odin: a proc may not shadow an import name)
+import checker  "mimir:checker"
+import modules  "mimir:modules"
+import platform "mimir:platform"
+import concpkg  "mimir:concurrency" // aliased: frees `concurrency` as the mandated pass-proc name
 
 // ==================== Analysis Graph ====================
 
@@ -33,15 +36,15 @@ Analysis_Graph :: struct {
 	source:    string,
 	file_path: string,
 
-	// Pass results (filled incrementally by graph_* procs)
+	// Pass results (filled incrementally by the pass procs)
 	bind_result:  binder.Bind_Result,
-	flow_result:  flow.Flow_Result,
+	flow_result:  flowpkg.Flow_Result,
 	check_result: checker.Check_Result,
 	registry:     checker.Type_Registry,
 	builtins:     checker.Builtin_Names,
 	import_types: map[binder.Symbol_ID]checker.Type_ID,
 
-	// Shared derived data (built by graph_bind)
+	// Shared derived data (built by bind)
 	import_map:   map[string]string,   // local_name → module_name
 	has_import:   map[string]bool,     // module_name → true
 	type_ignores: map[i32]bool,        // line → true
@@ -50,6 +53,17 @@ Analysis_Graph :: struct {
 	// Centralized diagnostics
 	diagnostics:  [dynamic]core.Diagnostic,
 	seen_keys:    map[u64]bool,  // dedup by (line, column, code) hash
+
+	// Per-pass raw diagnostic lists (T4 R5, lead ruling): consumers that
+	// need per-pass severity semantics (conform) or raw unfiltered
+	// concatenation (LSP) read these. bind/flow/check results already
+	// carry their own lists; these cover the remaining passes. The central
+	// `diagnostics` list stays the deduped, type-ignore-filtered merged view.
+	conc_diags:   []core.Diagnostic,
+	lint_diags:   []core.Diagnostic,
+	sec_diags:    []core.Diagnostic,
+	perf_diags:   []core.Diagnostic,
+	safety_diags: []core.Diagnostic,
 
 	// T1: unresolved-import accounting — drives the end-of-run summary line
 	// ("N imports unresolved — type coverage incomplete"). Incremented once per
@@ -66,7 +80,7 @@ Analysis_Graph :: struct {
 }
 
 // Initialize an analysis graph for a single file.
-init_analysis_graph :: proc(
+init :: proc(
 	module: ^parser.Module,
 	source: string,
 	file_path: string,
@@ -87,7 +101,7 @@ init_analysis_graph :: proc(
 
 // Emit a diagnostic through the centralized pipeline.
 // Handles: dedup, # type: ignore (whole-file + per-line), severity filtering.
-graph_emit :: proc(g: ^Analysis_Graph, d: core.Diagnostic) {
+emit :: proc(g: ^Analysis_Graph, d: core.Diagnostic) {
 	// Whole-file ignore suppresses everything
 	if g.has_whole_file_ignore { return }
 
@@ -95,8 +109,7 @@ graph_emit :: proc(g: ^Analysis_Graph, d: core.Diagnostic) {
 	if i32(d.location.line) in g.type_ignores { return }
 
 	// Dedup by (line, column, code)
-	key: u64 = u64(d.location.line) * 100003 + u64(d.location.column) * 31
-	for i := 0; i < len(d.code); i += 1 { key = key * 131 + u64(d.code[i]) }
+	key := core.diagnostic_dedup_key(d)
 	if key in g.seen_keys { return }
 	g.seen_keys[key] = true
 
@@ -106,10 +119,21 @@ graph_emit :: proc(g: ^Analysis_Graph, d: core.Diagnostic) {
 // ==================== Pass Orchestration ====================
 
 // Phase 1: Bind — symbol resolution, scope building, import recording.
-graph_bind :: proc(g: ^Analysis_Graph) {
+bind :: proc(g: ^Analysis_Graph) {
+	if g.bound { return }
+	bind_from(g, binder.bind(g.module, g.file_path, g.allocator))
+}
+
+// Adopt a pre-computed bind result (multi-file mode binds every module up
+// front for import-graph construction — re-binding here would waste work and
+// split the instance). Builds the same derived data and emits the same
+// diagnostics as bind(). Safe by-value adoption: Bind_Result collections are
+// never structurally mutated downstream of the binder (grep-verified across
+// checker/flow/modules), so the copied headers share backing storage benignly.
+bind_from :: proc(g: ^Analysis_Graph, bind_result: binder.Bind_Result) {
 	if g.bound { return }
 
-	g.bind_result = binder.bind(g.module, g.file_path, g.allocator)
+	g.bind_result = bind_result
 
 	// Build type_ignores map
 	g.type_ignores = make(map[i32]bool, len(g.module.type_ignores), g.allocator)
@@ -144,13 +168,13 @@ graph_bind :: proc(g: ^Analysis_Graph) {
 
 	// Emit binder diagnostics
 	for d in g.bind_result.diagnostics {
-		graph_emit(g, d)
+		emit(g, d)
 	}
 
 	// Emit parse-level diagnostics (P001) — statements the parser dropped
 	// during recovery must be visible, never silent.
 	for pd in g.module.parse_diagnostics {
-		graph_emit(g, core.Diagnostic{
+		emit(g, core.Diagnostic{
 			severity = .Warning,
 			location = core.Location{
 				file   = g.file_path,
@@ -264,20 +288,20 @@ _resolve_sibling_module :: proc(
 }
 
 // Phase 2: Flow analysis — CFG, DFG, guards, narrowing.
-graph_flow :: proc(g: ^Analysis_Graph) {
+flow :: proc(g: ^Analysis_Graph) {
 	if g.flowed { return }
-	if !g.bound { graph_bind(g) }
+	if !g.bound { bind(g) }
 
-	g.flow_result = flow.analyze(g.module, &g.bind_result, g.file_path, g.allocator)
+	g.flow_result = flowpkg.analyze(g.module, &g.bind_result, g.file_path, g.allocator)
 	g.flowed = true
 }
 
 // Phase 3: Type checking — inference, constraint solving, shape/device validation.
 // Also resolves imports from virtual modules, stdlib stubs, and package cache.
 // bridge is optional — needed for parsing third-party stubs from package cache.
-graph_check :: proc(g: ^Analysis_Graph, bridge: ^parser.Bridge = nil) {
+check :: proc(g: ^Analysis_Graph, bridge: ^parser.Bridge = nil) {
 	if g.checked { return }
-	if !g.flowed { graph_flow(g) }
+	if !g.flowed { flow(g) }
 
 	g.registry = checker.init_registry(g.allocator)
 	g.builtins = checker.init_builtins(&g.registry)
@@ -320,7 +344,7 @@ graph_check :: proc(g: ^Analysis_Graph, bridge: ^parser.Bridge = nil) {
 			// mode in cmd_check). Truly unresolvable here — say so.
 			if imp.level > 0 {
 				g.unresolved_import_count += 1
-				graph_emit(g, make_unresolved_import_diag(imp, g.file_path, g.allocator))
+				emit(g, make_unresolved_import_diag(imp, g.file_path, g.allocator))
 				continue
 			}
 
@@ -380,45 +404,51 @@ graph_check :: proc(g: ^Analysis_Graph, bridge: ^parser.Bridge = nil) {
 				}
 			} else {
 				g.unresolved_import_count += 1
-				graph_emit(g, make_unresolved_import_diag(imp, g.file_path, g.allocator))
+				emit(g, make_unresolved_import_diag(imp, g.file_path, g.allocator))
 			}
 		}
 	}
 
-	g.check_result = checker.check_with_imports(
+	r := checker.Import_Resolution{
+		registry     = &g.registry,
+		builtins     = &g.builtins,
+		import_types = g.import_types,
+	}
+	g.check_result = checker.check(
 		g.module, &g.bind_result, &g.flow_result, g.file_path,
-		&g.registry, &g.builtins, g.import_types, g.allocator,
+		g.allocator, &r,
 	)
 
 	// Emit flow diagnostics (after checker — checker may suppress F002)
 	for d in g.flow_result.diagnostics {
-		graph_emit(g, d)
+		emit(g, d)
 	}
 
 	// Emit checker diagnostics
 	for d in g.check_result.diagnostics {
-		graph_emit(g, d)
+		emit(g, d)
 	}
 
 	g.checked = true
 }
 
 // Phase 4: Concurrency analysis.
-graph_concurrency :: proc(g: ^Analysis_Graph) {
-	if !g.bound { graph_bind(g) }
+concurrency :: proc(g: ^Analysis_Graph) {
+	if !g.bound { bind(g) }
 
-	conc_diagnostics := concurrency.analyze_concurrency(
+	conc_diagnostics := concpkg.analyze_concurrency(
 		g.module, &g.bind_result, g.source, g.file_path, g.allocator,
 	)
+	g.conc_diags = conc_diagnostics
 	for d in conc_diagnostics {
-		graph_emit(g, d)
+		emit(g, d)
 	}
 }
 
 // ==================== Query Interface ====================
 
 // Get the Analysis_Pass_Context for post-inference analysis passes.
-graph_analysis_context :: proc(g: ^Analysis_Graph) -> checker.Analysis_Pass_Context {
+analysis_context :: proc(g: ^Analysis_Graph) -> checker.Analysis_Pass_Context {
 	expr_types: ^map[rawptr]checker.Type_ID = nil
 	reg: ^checker.Type_Registry = nil
 	if g.checked {
@@ -432,7 +462,7 @@ graph_analysis_context :: proc(g: ^Analysis_Graph) -> checker.Analysis_Pass_Cont
 }
 
 // Count errors in the accumulated diagnostics.
-graph_error_count :: proc(g: ^Analysis_Graph) -> int {
+error_count :: proc(g: ^Analysis_Graph) -> int {
 	count := 0
 	for d in g.diagnostics {
 		if d.severity == .Error { count += 1 }
@@ -441,7 +471,7 @@ graph_error_count :: proc(g: ^Analysis_Graph) -> int {
 }
 
 // Print all accumulated diagnostics, applying level and confidence filtering.
-graph_print_diagnostics :: proc(
+print_diagnostics :: proc(
 	g: ^Analysis_Graph,
 	level: Analysis_Level = .Strict,
 	show_confidence: bool = false,

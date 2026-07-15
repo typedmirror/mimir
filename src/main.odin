@@ -24,6 +24,7 @@ import "migration"
 import "codegen"
 import "gpu"
 import "wasm"
+import "orchestrator"
 
 main :: proc() {
 	args := os.args
@@ -1440,66 +1441,9 @@ cmd_format :: proc(args: []string) {
 	}
 }
 
-// §28.4: Gradual adoption levels — filter diagnostics by analysis depth
-Analysis_Level :: enum {
-	Basic,      // Type errors mypy would catch. Minimal noise.
-	Inference,  // Deep inference, unannotated code analysis.
-	Security,   // Taint analysis, crypto, secrets, supply chain.
-	Strict,     // Everything including performance, style, safety.
-}
-
-// Check if a diagnostic should be emitted at the given level
-should_emit_at_level :: proc(code: string, level: Analysis_Level) -> bool {
-	if level == .Strict { return true }
-
-	// Basic: core type errors (T0xx) + flow errors (F0xx)
-	if strings.has_prefix(code, "T") || strings.has_prefix(code, "F") {
-		return true
-	}
-
-	if level == .Basic { return false }
-
-	// Inference: basic + dead code (D0xx) + constraint diagnostics
-	if strings.has_prefix(code, "D") {
-		return true
-	}
-
-	if level == .Inference { return false }
-
-	// Security: inference + security (SEC) + concurrency (CONC) + taint
-	if strings.has_prefix(code, "SEC") || strings.has_prefix(code, "CONC") {
-		return true
-	}
-
-	return false
-}
-
-// §28.3: Check if a diagnostic code is suppressed by an inline comment on the given line.
-// Supports: # mimir: ignore, # type: ignore (suppress all)
-// and # mimir: ignore[T001] or # mimir: ignore[T001, T002]
-is_line_suppressed :: proc(code: string, line_num: int, source_lines: []string) -> bool {
-	idx := line_num - 1
-	if idx < 0 || idx >= len(source_lines) { return false }
-	line := source_lines[idx]
-
-	// Check for # type: ignore (mypy-compatible blanket suppression)
-	if strings.index(line, "# type: ignore") >= 0 { return true }
-
-	marker_pos := strings.index(line, "# mimir: ignore")
-	if marker_pos < 0 { return false }
-	rest := line[marker_pos + len("# mimir: ignore"):]
-	if len(rest) == 0 { return true } // blanket suppress
-	if rest[0] == '[' {
-		end := strings.index(rest, "]")
-		if end > 0 {
-			codes_str := rest[1:end]
-			for part in strings.split(codes_str, ",") {
-				if strings.trim_space(part) == code { return true }
-			}
-		}
-	}
-	return false
-}
+// orchestrator.Analysis_Level + should_emit_at_level + is_line_suppressed moved to
+// src/orchestrator/levels.odin (T4, R2) — output-shaping concerns the
+// orchestrator owns via print_diagnostics.
 
 cmd_check :: proc(args: []string) {
 	if len(args) == 0 {
@@ -1513,7 +1457,7 @@ cmd_check :: proc(args: []string) {
 	watch_mode := false
 	show_confidence := false
 	min_confidence := core.Confidence.Unknown  // no filter by default
-	level := Analysis_Level.Strict  // default: everything
+	level := orchestrator.Analysis_Level.Strict  // default: everything
 	target := args[0]
 	for i := 0; i < len(args); i += 1 {
 		if args[i] == "--format" && i + 1 < len(args) {
@@ -1636,7 +1580,7 @@ cmd_check :: proc(args: []string) {
 // Single-file check — original behavior, unchanged
 // Watch mode: re-run check whenever files change.
 // Polls file modification times every 1.5 seconds.
-cmd_check_watch :: proc(target: string, level: Analysis_Level) {
+cmd_check_watch :: proc(target: string, level: orchestrator.Analysis_Level) {
 	fmt.printfln("mimir check --watch: watching '%s' (Ctrl+C to stop)\n", target)
 
 	// Collect initial file mtimes
@@ -1686,7 +1630,7 @@ cmd_check_watch :: proc(target: string, level: Analysis_Level) {
 	}
 }
 
-_run_check_once :: proc(target: string, level: Analysis_Level) {
+_run_check_once :: proc(target: string, level: orchestrator.Analysis_Level) {
 	p: Pipeline; ok := pipeline_start("check", target, &p)
 	if !ok { return }
 	defer pipeline_stop(&p)
@@ -1710,7 +1654,7 @@ cmd_check_single :: proc(
 	bridge: ^parser.Bridge,
 	arena: ^core.Analysis_Arena,
 	sarif_diags: ^[dynamic]core.Diagnostic = nil,
-	level: Analysis_Level = .Strict,
+	level: orchestrator.Analysis_Level = .Strict,
 	show_confidence: bool = false,
 	min_confidence: core.Confidence = .Unknown,
 ) -> int {
@@ -1728,15 +1672,17 @@ cmd_check_single :: proc(
 
 	source_data, _ := os.read_entire_file(file, arena.allocator)
 
-	// Build unified analysis graph
-	g := init_analysis_graph(module, string(source_data), file, arena.allocator)
-	graph_bind(&g)
-	graph_flow(&g)
-	graph_check(&g, bridge)
-	graph_concurrency(&g)
+	// Build unified analysis graph and run the check pipeline through the
+	// orchestrator (T4 R5): Check+Concurrency passes, Full_Single resolution.
+	g := orchestrator.init(module, string(source_data), file, arena.allocator)
+	orchestrator.run(&g, orchestrator.Run_Config{
+		passes     = {.Check, .Concurrency},
+		resolution = .Full_Single,
+		bridge     = bridge,
+	})
 
 	// Emit diagnostics with level/confidence filtering
-	error_count := graph_print_diagnostics(&g, level, show_confidence, min_confidence, sarif_diags)
+	error_count := orchestrator.print_diagnostics(&g, level, show_confidence, min_confidence, sarif_diags)
 
 	if sarif_diags == nil {
 		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d blocks, %d guards, %d types)",
@@ -1762,128 +1708,9 @@ cmd_check_single :: proc(
 	return error_count
 }
 
-// Check a module silently (no diagnostic emission) — collect exports only.
-_check_module_silent :: proc(
-	info: ^modules.Module_Info,
-	res_ctx: ^modules.Resolution_Context,
-	vreg: ^checker.Virtual_Registry,
-	registry: ^checker.Type_Registry,
-	builtins: ^checker.Builtin_Names,
-	allocator: mem.Allocator,
-) {
-	import_types := modules.resolve_imports(info, res_ctx, vreg)
-	flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, allocator)
-	check_result := checker.check_with_imports(
-		info.parse_result, &info.bind_result, &flow_result,
-		info.file_path, registry, builtins, import_types, allocator)
-	modules.collect_exports(info, &check_result, res_ctx)
-}
-
-// Check a module and emit diagnostics. Returns error count.
-_check_module_emit :: proc(
-	info: ^modules.Module_Info,
-	res_ctx: ^modules.Resolution_Context,
-	vreg: ^checker.Virtual_Registry,
-	registry: ^checker.Type_Registry,
-	builtins: ^checker.Builtin_Names,
-	allocator: mem.Allocator,
-	level: Analysis_Level,
-	show_confidence: bool,
-	min_confidence: core.Confidence,
-) -> (errors: int, unresolved_count: int) {
-	mod_source, _ := os.read_entire_file(info.file_path, allocator)
-	mod_lines := strings.split(string(mod_source), "\n")
-
-	_pd :: proc(d: core.Diagnostic, show_confidence: bool) {
-		if show_confidence {
-			core.diagnostic_print_with_confidence(d)
-		} else {
-			core.diagnostic_print(d)
-		}
-	}
-
-	// Parse-level diagnostics (P001) — statements the parser dropped during
-	// recovery must be visible, never silent.
-	for pd in info.parse_result.parse_diagnostics {
-		d := core.Diagnostic{
-			severity = .Warning,
-			location = core.Location{
-				file   = info.file_path,
-				line   = int(pd.loc.line),
-				column = int(pd.loc.col),
-			},
-			what = pd.what,
-			why  = pd.why,
-			fix  = pd.fix,
-			code = "P001",
-		}
-		if !should_emit_at_level(d.code, level) { continue }
-		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-		_pd(d, show_confidence)
-	}
-
-	// Binder diagnostics
-	for d in info.bind_result.diagnostics {
-		if !should_emit_at_level(d.code, level) { continue }
-		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-		_pd(d, show_confidence)
-		if d.severity == .Error { errors += 1 }
-	}
-
-	// Resolve + flow + check. Unresolved imports surface as B003 warnings.
-	unresolved := make([dynamic]binder.Import_Record, 0, 4, allocator)
-	import_types := modules.resolve_imports(info, res_ctx, vreg, &unresolved)
-	for imp in unresolved {
-		d := make_unresolved_import_diag(imp, info.file_path, allocator)
-		if !should_emit_at_level(d.code, level) { continue }
-		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-		_pd(d, show_confidence)
-		unresolved_count += 1
-	}
-	flow_result := flow.analyze(info.parse_result, &info.bind_result, info.file_path, allocator)
-	for d in flow_result.diagnostics {
-		if !should_emit_at_level(d.code, level) { continue }
-		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-		_pd(d, show_confidence)
-		if d.severity == .Error { errors += 1 }
-	}
-
-	check_result := checker.check_with_imports(
-		info.parse_result, &info.bind_result, &flow_result,
-		info.file_path, registry, builtins, import_types, allocator)
-	// Deduplicate checker diagnostics — convergence loop can emit duplicates
-	check_seen := make(map[u64]bool, len(check_result.diagnostics), allocator)
-	for d in check_result.diagnostics {
-		if !should_emit_at_level(d.code, level) { continue }
-		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-		// Hash by (line, col, code) to detect duplicates
-		key := u64(d.location.line) * 100003 + u64(d.location.column) * 31
-		for i := 0; i < len(d.code); i += 1 { key = key * 131 + u64(d.code[i]) }
-		if key in check_seen { continue }
-		check_seen[key] = true
-		_pd(d, show_confidence)
-		if d.severity == .Error { errors += 1 }
-	}
-
-	// Concurrency
-	conc_diagnostics := concurrency.analyze_concurrency(
-		info.parse_result, &info.bind_result, string(mod_source), info.file_path, allocator)
-	for d in conc_diagnostics {
-		if !should_emit_at_level(d.code, level) { continue }
-		if is_line_suppressed(d.code, d.location.line, mod_lines) { continue }
-		_pd(d, show_confidence)
-		if d.severity == .Error { errors += 1 }
-	}
-
-	modules.collect_exports(info, &check_result, res_ctx)
-
-	fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d types)",
-		info.file_path, len(info.parse_result.body),
-		len(info.bind_result.symbols), len(info.bind_result.scopes),
-		len(registry.types))
-
-	return errors, unresolved_count
-}
+// _check_module_silent and _check_module_emit deleted (T4 step G2):
+// the per-module multi-file pipeline now runs through orchestrator.run
+// (Full_Multi) inside cmd_check_multi below.
 
 // Multi-module check — shared registry, import resolution
 cmd_check_multi :: proc(
@@ -1891,7 +1718,7 @@ cmd_check_multi :: proc(
 	files: []string,
 	bridge: ^parser.Bridge,
 	arena: ^core.Analysis_Arena,
-	level: Analysis_Level = .Strict,
+	level: orchestrator.Analysis_Level = .Strict,
 	show_confidence: bool = false,
 	min_confidence: core.Confidence = .Unknown,
 ) -> int {
@@ -1978,15 +1805,41 @@ cmd_check_multi :: proc(
 		}
 	}
 
-	// 7. For each module in topo order: resolve → flow → check → export
+	// 7. For each module in topo order: run the orchestrator (T4 R5 step G:
+	// Check+Concurrency passes, Full_Multi resolution — shared registry,
+	// resolution context, and virtual registry are caller-owned).
 	error_count := parse_errors
 	unresolved_total := 0
 	for name in graph.topo_order {
 		info, ok := graph.modules[name]
 		if !ok || info.parse_result == nil { continue }
-		mod_errors, mod_unresolved := _check_module_emit(info, &res_ctx, &vreg, &registry, &builtins, arena.allocator, level, show_confidence, min_confidence)
+
+		mod_source, _ := os.read_entire_file(info.file_path, arena.allocator)
+		g := orchestrator.init(info.parse_result, string(mod_source), info.file_path, arena.allocator)
+		// Adopt the step-4 bind result — modules were bound up front for
+		// import-edge construction; the graph must share that instance.
+		orchestrator.bind_from(&g, info.bind_result)
+		orchestrator.run(&g, orchestrator.Run_Config{
+			passes           = {.Check, .Concurrency},
+			resolution       = .Full_Multi,
+			shared_registry  = &registry,
+			shared_builtins  = &builtins,
+			resolution_ctx   = &res_ctx,
+			virtual_registry = &vreg,
+			module_info      = info,
+		})
+
+		// min_confidence: the pre-T4 inline multi-file path accepted the
+		// flag but never applied it — preserved verbatim (.Unknown = no
+		// filter). Wiring it up is a behavior change (post-T4 item).
+		mod_errors := orchestrator.print_diagnostics(&g, level, show_confidence, .Unknown, nil)
 		error_count += mod_errors
-		unresolved_total += mod_unresolved
+		unresolved_total += g.unresolved_import_count
+
+		fmt.printfln("  checked %s (%d stmts, %d symbols, %d scopes, %d types)",
+			info.file_path, len(info.parse_result.body),
+			len(g.bind_result.symbols), len(g.bind_result.scopes),
+			len(registry.types))
 	}
 
 	// T1: honest-summary line — prints on BOTH success and error exits.

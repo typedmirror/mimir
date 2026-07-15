@@ -13,9 +13,9 @@ import checker    "mimir:checker"
 import core       "mimir:core"
 import lint       "mimir:lint"
 import security   "mimir:security"
-import concurrency "mimir:concurrency"
 import perf       "mimir:perf"
 import safety     "mimir:safety"
+import orchestrator "mimir:orchestrator"
 
 // ==================== Analysis Results ====================
 
@@ -76,64 +76,57 @@ analyze_document :: proc(
 	result.module = module
 	result.ok = true
 
-	// 2. Bind
-	result.bind_result = binder.bind(module, temp_path, server.allocator)
+	// 2-9. All eight analysis passes through the orchestrator (T4 R5 step F).
+	// Virtual_Only preserves today's checker behavior exactly (private
+	// registry, virtual imports only — Full resolution is a later opt-in,
+	// out of T4 scope per the policy matrix).
+	g := orchestrator.init(module, content, temp_path, server.allocator)
+	orchestrator.run(&g, orchestrator.Run_Config{
+		passes          = {.Check, .Concurrency, .Lint, .Security, .Perf, .Safety},
+		resolution      = .Virtual_Only,
+		lint_config     = lint.default_config(),
+		security_config = security.default_config(),
+		perf_config     = perf.default_config(),
+		safety_config   = safety.default_config(),
+	})
+	result.bind_result = g.bind_result
+	result.flow_result = g.flow_result
+	result.check_result = g.check_result
 
-	// 3. Flow analyze
-	result.flow_result = flow.analyze(module, &result.bind_result, temp_path, server.allocator)
-
-	// 4. Type check
-	result.check_result = checker.check(module, &result.bind_result, &result.flow_result, temp_path, server.allocator)
-
-	// 5. Lint
-	lint_config := lint.default_config()
-	lint_diags := lint.lint_file(module, &result.bind_result, content, temp_path, &lint_config, server.allocator)
-
-	// 6. Security scan
-	sec_config := security.default_config()
-	sec_diags := security.scan_file(module, &result.bind_result, content, temp_path, &sec_config, server.allocator, &result.flow_result)
-
-	// 7. Concurrency check
-	conc_diags := concurrency.analyze_concurrency(module, &result.bind_result, content, temp_path, server.allocator)
-
-	// 8. Performance check
-	perf_config := perf.default_config()
-	perf_diags := perf.analyze_performance(module, &result.bind_result, content, temp_path, &perf_config, server.allocator)
-
-	// 9. Safety check
-	safety_config := safety.default_config()
-	safety_diags := safety.analyze_safety(module, &result.bind_result, temp_path, &safety_config, server.allocator)
-
-	// Collect all diagnostics
-	total := len(result.bind_result.diagnostics) +
-	         len(result.flow_result.diagnostics) +
-	         len(result.check_result.diagnostics) +
-	         len(lint_diags) + len(sec_diags) + len(conc_diags) + len(perf_diags) + len(safety_diags)
+	// Collect all diagnostics — RAW per-pass concatenation in the pre-T4
+	// order (bind, flow, check, lint, security, concurrency, perf, safety):
+	// non-deduped, non-type-ignore-filtered, no level gating. Adopting the
+	// orchestrator's central filtered list here would be a behavior change —
+	// parked as a post-T4 item (lead ruling, Checkpoint 1 Risk 5).
+	total := len(g.bind_result.diagnostics) +
+	         len(g.flow_result.diagnostics) +
+	         len(g.check_result.diagnostics) +
+	         len(g.lint_diags) + len(g.sec_diags) + len(g.conc_diags) + len(g.perf_diags) + len(g.safety_diags)
 
 	result.all_diags = make([dynamic]core.Diagnostic, 0, total, server.allocator)
 
-	for d in result.bind_result.diagnostics {
+	for d in g.bind_result.diagnostics {
 		append(&result.all_diags, d)
 	}
-	for d in result.flow_result.diagnostics {
+	for d in g.flow_result.diagnostics {
 		append(&result.all_diags, d)
 	}
-	for d in result.check_result.diagnostics {
+	for d in g.check_result.diagnostics {
 		append(&result.all_diags, d)
 	}
-	for d in lint_diags {
+	for d in g.lint_diags {
 		append(&result.all_diags, d)
 	}
-	for d in sec_diags {
+	for d in g.sec_diags {
 		append(&result.all_diags, d)
 	}
-	for d in conc_diags {
+	for d in g.conc_diags {
 		append(&result.all_diags, d)
 	}
-	for d in perf_diags {
+	for d in g.perf_diags {
 		append(&result.all_diags, d)
 	}
-	for d in safety_diags {
+	for d in g.safety_diags {
 		append(&result.all_diags, d)
 	}
 

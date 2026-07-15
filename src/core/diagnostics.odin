@@ -100,6 +100,15 @@ _sarif_escape :: proc(s: string) -> string {
 	return string(buf[:])
 }
 
+// Single source of truth for the (line, column, code) diagnostic dedup key.
+// core owns Diagnostic, so the key lives here — every dedup consumer calls
+// this instead of inlining the hash constants (R4, track T4).
+diagnostic_dedup_key :: proc(d: Diagnostic) -> u64 {
+	key := u64(d.location.line) * 100003 + u64(d.location.column) * 31
+	for i := 0; i < len(d.code); i += 1 { key = key * 131 + u64(d.code[i]) }
+	return key
+}
+
 // Resolve confidence from diagnostic code prefix when not explicitly set.
 resolve_confidence :: proc(code: string) -> Confidence {
 	if len(code) == 0 { return .Unknown }
