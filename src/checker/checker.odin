@@ -280,7 +280,7 @@ check :: proc(
 	check_unnecessary_copy(module.body, file_path, &result.diagnostics)
 
 	// D001: unused variable detection (DFG-backed)
-	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
+	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator, &result.registry)
 
 	// §31.2: Mock spec + fixture type checking
 	analyze_test_patterns(module, bind_result, &result.registry, &result.expr_types, file_path, &result.diagnostics, allocator)
@@ -583,7 +583,7 @@ check_with_imports :: proc(
 	check_unnecessary_copy(module.body, file_path, &result.diagnostics)
 
 	// D001: unused variable detection (DFG-backed)
-	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator)
+	detect_unused_variables(flow_result, bind_result, file_path, &result.diagnostics, allocator, registry)
 
 	// Suppress F002 for functions that contain Never-returning calls
 	suppress_f002_for_never(flow_result, &result, bind_result)
@@ -1064,6 +1064,60 @@ check_caller_conflict :: proc(
 
 // ==================== Statement Checking ====================
 
+// dataclasses field(...) as a class-body annotated-assignment value.
+// The field's runtime value type comes from default= / default_factory= — the
+// field() call itself returns a descriptor the dataclass machinery replaces
+// (and its stub return type degrades to None through the overload path, which
+// caused T001 false positives on every `x: T = field(default_factory=...)`).
+// Returns handled=false when the value is not a field(...) call.
+_dataclass_field_value_type :: proc(
+	value: parser.Expr,
+	ctx: ^Infer_Context,
+	declared: Type_ID,
+) -> (Type_ID, bool) {
+	call, is_call := value.(^parser.Call_Expr)
+	if !is_call { return TYPE_UNKNOWN, false }
+	fn_name := ""
+	#partial switch f in call.func {
+	case ^parser.Name_Expr:      fn_name = f.id
+	case ^parser.Attribute_Expr: fn_name = f.attr
+	}
+	if fn_name != "field" { return TYPE_UNKNOWN, false }
+	// field() takes keyword-only arguments — positional args mean a different call
+	if len(call.args) > 0 { return TYPE_UNKNOWN, false }
+
+	for kw in call.keywords {
+		if kw.arg == "default" {
+			// Real evidence: the default value's type is checked against the annotation
+			return infer_expr(kw.value, ctx, declared), true
+		}
+		if kw.arg == "default_factory" {
+			// Type of calling the factory with no args — synthesize the call so
+			// the full constructor/callable inference machinery is reused.
+			// Diagnostics from the synthetic inference are discarded (its loc
+			// is synthetic; arity errors here are mypy's default_factory check,
+			// which mimir does not yet model).
+			n_diags := len(ctx.diagnostics^)
+			syn := new(parser.Call_Expr, ctx.reg.allocator)
+			syn.loc = call.loc
+			syn.func = kw.value
+			factory_result := infer_call(syn, ctx)
+			if len(ctx.diagnostics^) > n_diags {
+				resize(ctx.diagnostics, n_diags)
+			}
+			if factory_result != TYPE_UNKNOWN && factory_result != TYPE_ANY &&
+			   factory_result != TYPE_NONE && !_is_any_type(factory_result, ctx.reg) {
+				// Real evidence: factory return type is checked against the annotation
+				return factory_result, true
+			}
+			// No evidence about the factory — trust the annotation (no false T001)
+			return declared, true
+		}
+	}
+	// field(init=False) etc. with no default: nothing to check against the annotation
+	return declared, true
+}
+
 check_stmt :: proc(
 	stmt: parser.Stmt,
 	ctx: ^Infer_Context,
@@ -1097,6 +1151,19 @@ check_stmt :: proc(
 			alias_type := resolve_annotation(s.value, ctx.reg, ctx.bind_result, ctx.builtins, ctx.env)
 			if alias_type != TYPE_UNKNOWN {
 				rhs_type = alias_type
+				// Record annotation-derived Callable aliases (Handler = Callable[[E], None])
+				// so resolve_annotation returns the callable itself for `x: Handler`,
+				// not its return type (which is the constructor-alias behavior).
+				at := get_type(ctx.reg, alias_type)
+				if _, is_callable := at.info.(Callable_Type); is_callable {
+					for target in s.targets {
+						if name, nok := target.(^parser.Name_Expr); nok {
+							if sym_id, ref_ok := binder.get_ref(ctx.bind_result, rawptr(name)); ref_ok {
+								ctx.reg.callable_aliases[qualify(ctx.reg, sym_id)] = true
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -1426,6 +1493,15 @@ check_stmt :: proc(
 
 		if s.value != nil {
 			rhs_type := infer_expr(s.value, ctx, declared)
+			// dataclasses field(...) in a class body: the field's runtime value
+			// type comes from default=/default_factory=, not from the field()
+			// descriptor call itself (whose stub return type degrades to None).
+			// Mirrors mypy's dataclass plugin.
+			if enclosing := binder.result_get_scope(ctx.bind_result, ctx.scope_id); enclosing != nil && enclosing.kind == .Class {
+				if fv_type, handled := _dataclass_field_value_type(s.value, ctx, declared); handled {
+					rhs_type = fv_type
+				}
+			}
 			if declared != TYPE_UNKNOWN && rhs_type != TYPE_UNKNOWN &&
 			   rhs_type != TYPE_ANY && declared != TYPE_ANY {
 				if !is_assignable(ctx.reg, rhs_type, declared) {
@@ -3595,10 +3671,26 @@ pre_register_classes :: proc(stmts: []parser.Stmt, bind_result: ^binder.Bind_Res
 				if _, a := reg.class_types[qualify(reg, sym_id)]; a { continue }
 			}
 			scope_id := find_scope_for_def(s.name, s.loc, bind_result, .Class)
+			// Detect TypedDict bases NOW — annotations resolved before the class
+			// body is scanned (return types, params) capture this placeholder, and
+			// assignability must know it is a TypedDict, not a regular class.
+			is_td := false
+			for base in s.bases {
+				base_name := ""
+				#partial switch b in base {
+				case ^parser.Name_Expr:      base_name = b.id
+				case ^parser.Attribute_Expr: base_name = b.attr
+				}
+				if orig, is_typing := bind_result.typing_names[base_name]; is_typing {
+					base_name = orig
+				}
+				if base_name == "TypedDict" { is_td = true; break }
+			}
 			class_type_id := register_type(reg, Class_Type{
-				name      = s.name,
-				symbol_id = sym_id,
-				scope_id  = scope_id,
+				name         = s.name,
+				symbol_id    = sym_id,
+				scope_id     = scope_id,
+				is_typeddict = is_td,
 			})
 			if sym_id != binder.INVALID_SYMBOL {
 				reg.class_types[qualify(reg, sym_id)] = class_type_id

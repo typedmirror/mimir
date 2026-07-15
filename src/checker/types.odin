@@ -106,6 +106,10 @@ Class_Type :: struct {
 	resolved_type_args: []Type_ID,  // Set by specialize_class — the concrete args this class was specialized with
 	is_final:           bool,
 	is_enum:            bool,
+	is_typeddict:       bool,     // Class has a TypedDict base. Set at pre-registration —
+	                              // TypedDicts live as Class_Type placeholders until the class
+	                              // body is scanned, and annotations resolved in that window
+	                              // (e.g. return types) capture Instance(Class) snapshots.
 	enum_value_type:    Type_ID,  // For IntEnum→TYPE_INT, StrEnum→TYPE_STR, etc.
 	abstract_methods:   map[string]bool,
 	final_methods:      map[string]bool,    // Methods decorated with @final
@@ -220,6 +224,20 @@ Type_Registry :: struct {
 	dict_cache:  map[[2]Type_ID]Type_ID,
 	set_cache:   map[Type_ID]Type_ID,
 	class_types:    map[Qualified_Symbol]Type_ID,
+	// Symbols whose value is an ANNOTATION-DERIVED callable alias
+	// (Handler = Callable[[Event], None]). Distinguishes them from
+	// constructor-callable aliases (MyInt = int) when the name is used as an
+	// annotation: genuine callable aliases resolve to the callable itself,
+	// constructor aliases resolve to the constructor's return type.
+	callable_aliases: map[Qualified_Symbol]bool,
+	// Symbols referenced inside STRING annotations ("Q", "list[Q]") — quoted
+	// names never create binder Load refs, so D001 consults this set to avoid
+	// flagging symbols used only in string annotations.
+	annotation_used_syms: map[Qualified_Symbol]bool,
+	// In-progress is_assignable comparisons (S111 cycle guard) — key is
+	// (source << 32) | target. Entries live only for the duration of one
+	// top-level is_assignable call chain (defer-deleted).
+	active_assign: map[u64]bool,
 	next_file_id:   u32,
 	current_file_id: u32,
 	instance_cache: map[Type_ID]Type_ID,
@@ -263,6 +281,9 @@ init_registry :: proc(allocator: mem.Allocator) -> Type_Registry {
 	reg.dict_cache = make(map[[2]Type_ID]Type_ID, 16, allocator)
 	reg.set_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.class_types = make(map[Qualified_Symbol]Type_ID, 16, allocator)
+	reg.callable_aliases = make(map[Qualified_Symbol]bool, 8, allocator)
+	reg.annotation_used_syms = make(map[Qualified_Symbol]bool, 8, allocator)
+	reg.active_assign = make(map[u64]bool, 32, allocator)
 	reg.instance_cache = make(map[Type_ID]Type_ID, 16, allocator)
 	reg.spec_cache = make(map[u64]Spec_Cache_Entry, 8, allocator)
 	reg.tensor_cache = make(map[u64]Type_ID, 8, allocator)
@@ -480,6 +501,17 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 	if _, src_any := src_type.info.(Any_Type); src_any { return true }
 	if _, tgt_any := tgt_type.info.(Any_Type); tgt_any { return true }
 
+	// Cycle guard (S111 SIGSEGV): equirecursive types — `-> Self` methods on a
+	// class registered under two Type_IDs — send the attrs-fallback and the
+	// Callable covariant-return path into unbounded mutual recursion. Seeing an
+	// in-progress comparison again means the types are equirecursive at this
+	// pair: assume assignable (coinductive reading — correct for recursive
+	// types; avoids false T001 on valid libraries like urllib3/requests).
+	cycle_key := (u64(source) << 32) | u64(target)
+	if cycle_key in reg.active_assign { return true }
+	reg.active_assign[cycle_key] = true
+	defer delete_key(&reg.active_assign, cycle_key)
+
 	// bool <: int
 	if source == TYPE_BOOL && target == TYPE_INT { return true }
 	// int <: float
@@ -553,10 +585,12 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			}
 		case Instance_Type:
 			// Dict[str, V] → Instance: only if the underlying class is a TypedDict
-			// (TypedDicts start as Class_Type before conversion to TypedDict_Type)
+			// (TypedDicts start as Class_Type placeholders before conversion to
+			// TypedDict_Type; the is_typeddict flag is set at pre-registration —
+			// truth, not the old name-suffix heuristic).
 			inst_cls := get_type(reg, tgt.class_type)
 			if cls_info, cls_ok := inst_cls.info.(Class_Type); cls_ok {
-				if strings.has_suffix(cls_info.name, "Dict") || strings.has_suffix(cls_info.name, "dict") {
+				if cls_info.is_typeddict {
 					if src.key == TYPE_STR || src.key == TYPE_ANY || src.key == TYPE_UNKNOWN {
 						return true
 					}

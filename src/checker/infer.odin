@@ -1115,6 +1115,42 @@ infer_call :: proc(e: ^parser.Call_Expr, ctx: ^Infer_Context, expected: Type_ID 
 	}
 
 	if func_type == TYPE_UNKNOWN || func_type == TYPE_ANY {
+		// Builtin container constructors: the bare names list/dict/set/tuple/
+		// frozenset have no expression-level type (they resolve Unknown), so
+		// handle list(iterable[T]) → list[T] etc. by name here. Shadow-safe:
+		// a user-defined `list` with a known type never reaches this branch.
+		if name_expr, is_name := e.func.(^parser.Name_Expr); is_name && len(e.args) >= 1 && func_type == TYPE_UNKNOWN {
+			switch name_expr.id {
+			case "list", "set", "frozenset", "tuple", "dict":
+				arg_type := infer_expr(e.args[0], ctx)
+				for arg, i in e.args { if i > 0 { infer_expr(arg, ctx) } }
+				arg_t := get_type(ctx.reg, arg_type)
+				elem_type := TYPE_UNKNOWN
+				#partial switch ai in arg_t.info {
+				case List_Type: elem_type = ai.element
+				case Set_Type:  elem_type = ai.element
+				case Dict_Type:
+					// dict(d) → dict[K, V]; iterating a dict yields keys
+					if name_expr.id == "dict" {
+						return make_dict_type(ctx.reg, ai.key, ai.value)
+					}
+					elem_type = ai.key
+				case Tuple_Type:
+					if len(ai.elements) > 0 { elem_type = ai.elements[0] }
+				case:
+					elem_type = get_iterator_element_type(arg_type, ctx.reg)
+				}
+				if elem_type != TYPE_UNKNOWN && name_expr.id != "dict" {
+					switch name_expr.id {
+					case "list":      return make_list_type(ctx.reg, elem_type)
+					case "set":       return make_set_type(ctx.reg, elem_type)
+					case "frozenset": return make_set_type(ctx.reg, elem_type)
+					case "tuple":     return make_tuple_type(ctx.reg, {elem_type}, true)
+					}
+				}
+				return TYPE_UNKNOWN
+			}
+		}
 		// Still type-check args
 		for arg in e.args {
 			infer_expr(arg, ctx)

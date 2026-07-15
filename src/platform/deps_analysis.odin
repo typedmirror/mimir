@@ -136,6 +136,7 @@ normalize_pkg_name :: proc(name: string) -> string {
 @(private = "file")
 STDLIB_MODULES := [?]string{
 	// Core
+	"__future__", // compiler-directive pseudo-module (PEP 236) — never a third-party dep
 	"abc", "ast", "asyncio", "atexit", "builtins",
 	// Collections & data
 	"array", "bisect", "calendar", "collections", "copy", "csv",

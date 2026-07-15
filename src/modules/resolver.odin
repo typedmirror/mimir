@@ -31,6 +31,26 @@ Resolution_Context :: struct {
 	// System site-packages resolution (optional — nil if not discovered)
 	site_packages_dirs:   [dynamic]string,              // discovered site-packages paths
 	parsed_site_packages: map[string]Module_Exports,    // lazy cache: module_name → exports
+	// In-progress extractions (S111 cycle guard #2): the lazy caches above only
+	// memoize COMPLETED extractions, so absolute self-package import cycles
+	// (A imports B imports A) re-enter extract_package_exports forever —
+	// 911-frame stack overflow on `import requests` (via charset_normalizer).
+	// An in-progress module resolves as "not found": the inner importer's
+	// symbols degrade (loudly, via B003 where applicable); the outer extraction
+	// completes and fills the cache for everyone else.
+	resolving_now:        map[string]bool,
+}
+
+// Cycle guard helper: returns true (and marks) when module_name is safe to
+// start resolving; false when it is already being resolved higher in the stack.
+@(private = "file")
+_begin_resolve :: proc(ctx: ^Resolution_Context, module_name: string) -> bool {
+	if ctx.resolving_now == nil {
+		ctx.resolving_now = make(map[string]bool, 8, ctx.allocator)
+	}
+	if module_name in ctx.resolving_now { return false }
+	ctx.resolving_now[module_name] = true
+	return true
 }
 
 init_resolution_context :: proc(
@@ -87,11 +107,15 @@ collect_exports :: proc(
 
 // ==================== Import Resolution ====================
 
-// Resolve imports for a module, returning a map of local symbol_id → type
+// Resolve imports for a module, returning a map of local symbol_id → type.
+// When `unresolved` is non-nil, every import record that resolves to nothing is
+// appended to it (excluding typing/typing_extensions/__future__, which are
+// handled by other mechanisms) — callers surface these as B003 warnings.
 resolve_imports :: proc(
 	info: ^Module_Info,
 	ctx: ^Resolution_Context,
 	vreg: ^checker.Virtual_Registry = nil,
+	unresolved: ^[dynamic]binder.Import_Record = nil,
 ) -> map[binder.Symbol_ID]checker.Type_ID {
 	result := make(map[binder.Symbol_ID]checker.Type_ID, 16, ctx.allocator)
 
@@ -152,7 +176,15 @@ resolve_imports :: proc(
 			}
 		}
 
-		if !has_exports { continue }
+		if !has_exports {
+			// T1: never silent — record the failure for B003 emission by the caller.
+			if unresolved != nil &&
+			   imp.module_name != "typing" && imp.module_name != "typing_extensions" &&
+			   imp.module_name != "__future__" {
+				append(unresolved, imp)
+			}
+			continue
+		}
 
 		if edge.is_whole {
 			// "import X" or "import X.Y as Z"
@@ -207,6 +239,10 @@ resolve_from_stdlib_stubs :: proc(
 	if cached, has := ctx.parsed_stdlib[module_name]; has {
 		return cached, true
 	}
+
+	// Cycle guard: already being resolved higher in this call chain
+	if !_begin_resolve(ctx, module_name) { return {}, false }
+	defer delete_key(&ctx.resolving_now, module_name)
 
 	// Check disk cache
 	cache_dir := _stub_cache_dir(ctx)
@@ -330,6 +366,10 @@ resolve_from_package_cache :: proc(
 	if cached, has := ctx.parsed_packages[module_name]; has {
 		return cached, true
 	}
+
+	// Cycle guard: already being resolved higher in this call chain
+	if !_begin_resolve(ctx, module_name) { return {}, false }
+	defer delete_key(&ctx.resolving_now, module_name)
 
 	// Check disk cache (use content hash as key if available)
 	cache_dir := _stub_cache_dir(ctx)
@@ -476,6 +516,10 @@ resolve_from_site_packages :: proc(
 	if cached, has := ctx.parsed_site_packages[module_name]; has {
 		return cached, true
 	}
+
+	// Cycle guard: already being resolved higher in this call chain
+	if !_begin_resolve(ctx, module_name) { return {}, false }
+	defer delete_key(&ctx.resolving_now, module_name)
 
 	// Check disk cache
 	cache_dir := _stub_cache_dir(ctx)

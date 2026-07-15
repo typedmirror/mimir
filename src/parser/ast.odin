@@ -17,10 +17,21 @@ Node_Base :: struct {
 
 // ==================== Top-level ====================
 
+// Parse-level diagnostic (P001): records syntax the parser recovered from by
+// dropping tokens/structure. Parser-local type — the parser package cannot
+// import mimir:core (layering), so consumers convert these to core.Diagnostic.
+Parse_Diagnostic :: struct {
+	loc:  Src_Loc,
+	what: string,
+	why:  string,
+	fix:  string,
+}
+
 Module :: struct {
-	using base:   Node_Base,
-	body:         []Stmt,
-	type_ignores: []Type_Ignore,
+	using base:        Node_Base,
+	body:              []Stmt,
+	type_ignores:      []Type_Ignore,
+	parse_diagnostics: []Parse_Diagnostic, // P001: silent-recovery sites, surfaced by check paths
 }
 
 // ==================== Statements ====================

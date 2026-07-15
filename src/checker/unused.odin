@@ -21,6 +21,7 @@ detect_unused_variables :: proc(
 	file_path: string,
 	diagnostics: ^[dynamic]core.Diagnostic,
 	allocator: mem.Allocator,
+	reg: ^Type_Registry = nil,
 ) {
 	// Build set of all symbols that have at least one Load reference
 	used_syms := collect_used_symbols(bind_result, allocator)
@@ -44,6 +45,12 @@ detect_unused_variables :: proc(
 
 			// Check if this symbol has any Load reference anywhere
 			if def.symbol_id in used_syms { continue }
+
+			// Used inside a STRING annotation ("Q", "list[Q]") — quoted names
+			// never create Load refs; the resolver records them on the registry.
+			if reg != nil {
+				if qualify(reg, def.symbol_id) in reg.annotation_used_syms { continue }
+			}
 
 			append(diagnostics, core.Diagnostic{
 				severity = .Warning,

@@ -10,12 +10,26 @@ import core "mimir:core"
 check_unused_import :: proc(ctx: ^Lint_Context) {
 	br := ctx.bind_result
 
+	// Names imported FROM __future__ (e.g. `from __future__ import annotations`
+	// binds the name `annotations`, not `__future__`). These are compiler
+	// directives (PEP 236) — they are never "used" in code and must never be
+	// flagged as unused.
+	future_names := make(map[string]bool, 2, context.temp_allocator)
+	for &imp in br.imports {
+		if imp.module_name != "__future__" { continue }
+		for name in imp.names {
+			local := name.alias if len(name.alias) > 0 else name.name
+			future_names[local] = true
+		}
+	}
+
 	// Collect all imported symbols
 	for &sym in br.symbols {
 		if .Is_Imported not_in sym.flags { continue }
 
 		// Exceptions: __all__, __future__ imports, typing imports
 		if sym.name == "__all__" || sym.name == "__future__" { continue }
+		if sym.name in future_names { continue }
 		if sym.name in br.typing_names { continue }
 
 		// Check if any Load reference exists for this symbol

@@ -73,6 +73,15 @@ print_rule_list :: proc() {
 
 ALL_EXPLANATIONS := [?]Explanation{
 
+	// ── Parser ──
+
+	{
+		code = "P001", name = "Statement dropped during parse recovery", category = "Parser", severity = "Warning",
+		description = "The parser hit syntax it could not interpret and recovered by skipping tokens\nor structure. The affected code was NOT analyzed — no diagnostics of any kind\nare produced for it. This warning makes the blind spot visible instead of\nsilently pretending the file was fully checked.",
+		example = "    x = 1\n    $$$ garbage $$$   # P001: statement dropped — unparseable syntax\n    def f(): ...       # still analyzed normally",
+		note = "Also fires on unexpected indentation (CPython raises IndentationError there).\nIf the flagged syntax is valid Python that mimir cannot parse yet, report it.",
+	},
+
 	// ── Binder ──
 
 	{
@@ -85,6 +94,12 @@ ALL_EXPLANATIONS := [?]Explanation{
 		code = "B002", name = "Duplicate definition", category = "Binder", severity = "Error",
 		description = "The same name is defined more than once in the same scope in a way that likely\nindicates a mistake (e.g., two function definitions with the same name).",
 		example = "    def process():\n        pass\n    def process():  # B002: duplicate definition\n        pass",
+	},
+	{
+		code = "B003", name = "Unresolved import", category = "Binder", severity = "Warning",
+		description = "An import could not be resolved to any module — not a same-directory sibling,\nnot a stdlib stub, not a cached package, not site-packages. Every symbol from\nit is typed Unknown, which weakens all checks that touch those symbols: the\nfile can look green while real bugs hide behind the unresolved types.\nA summary line ('N import(s) unresolved — type coverage incomplete') is\nprinted at the end of the run whenever any import is unresolved.",
+		example = "    import nonexistent_xyz          # B003: unresolved import\n    from .models import Product     # B003 in single-file mode (no package context)",
+		note = "Fixes: run mimir from the project root; add a project marker (pyproject.toml);\ncache third-party packages with 'mimir add <pkg>'. Same-directory .py siblings\nresolve automatically and shadow installed packages (sys.path[0] parity).",
 	},
 	{
 		code = "B004", name = "Import error", category = "Binder", severity = "Error",

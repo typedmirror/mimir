@@ -13,6 +13,20 @@ Parser_Context :: struct {
 	allocator:     mem.Allocator,
 	file:          string,
 	type_comments: ^map[i32]string, // PEP 484: line → type comment string (from # type: X)
+	diagnostics:   [dynamic]Parse_Diagnostic, // P001: recovered-from syntax damage
+}
+
+// Record a parse-level diagnostic (P001). Lazily initializes the array on
+// ctx.allocator. Deduplicates per line — token-by-token recovery on one bad
+// line must produce one diagnostic, not one per dropped token.
+_emit_parse_diag :: proc(ctx: ^Parser_Context, loc: Src_Loc, what, why, fix: string) {
+	if ctx.diagnostics.allocator.procedure == nil {
+		ctx.diagnostics = make([dynamic]Parse_Diagnostic, 0, 4, ctx.allocator)
+	}
+	if n := len(ctx.diagnostics); n > 0 && ctx.diagnostics[n-1].loc.line == loc.line {
+		return
+	}
+	append(&ctx.diagnostics, Parse_Diagnostic{loc = loc, what = what, why = why, fix = fix})
 }
 
 // ==================== Token Helpers ====================
