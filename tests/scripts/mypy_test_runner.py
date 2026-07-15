@@ -362,9 +362,37 @@ def main():
                        help='Write results to JSON file')
     args = parser.parse_args()
 
-    if not os.path.isdir(args.mypy_dir):
-        print(f"Error: mypy directory not found at {args.mypy_dir}")
+    # External dependency: the mypy test corpus is a pinned git checkout.
+    # Pin details + fetch instructions: tests/scripts/MYPY_DEP.md
+    PINNED_COMMIT = '25b210d2cdf3f5d4e17a96eb7ed25f54456bc631'
+    test_data = os.path.join(args.mypy_dir, 'test-data', 'unit')
+    if not os.path.isdir(args.mypy_dir) or not os.path.isdir(test_data):
+        print(f"Error: mypy checkout not found at {args.mypy_dir}")
+        print(f"       (expected {test_data} to exist)")
+        print("This suite needs the mypy repo, pinned at commit "
+              f"{PINNED_COMMIT}.")
+        print("Fetch it with:")
+        print("    git clone --filter=blob:none "
+              f"https://github.com/python/mypy.git {args.mypy_dir}")
+        print(f"    git -C {args.mypy_dir} checkout {PINNED_COMMIT}")
+        print("Details: tests/scripts/MYPY_DEP.md "
+              "(or pass --mypy-dir PATH for a checkout elsewhere)")
         sys.exit(1)
+
+    # Warn (not fail) when the checkout is at a different commit: results
+    # are not comparable to the pinned 2902/6029 baseline.
+    try:
+        head = subprocess.run(
+            ['git', '-C', args.mypy_dir, 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if head and head != PINNED_COMMIT:
+            print(f"WARNING: mypy checkout at {head[:12]}, pinned commit is "
+                  f"{PINNED_COMMIT[:12]} — results NOT comparable to the "
+                  "baseline (see tests/scripts/MYPY_DEP.md)")
+    except (OSError, subprocess.TimeoutExpired):
+        print("WARNING: could not verify mypy checkout commit "
+              "(git unavailable?) — see tests/scripts/MYPY_DEP.md")
 
     if not args.dry_run and not os.path.isfile(args.mimir_bin):
         print(f"Error: mimir binary not found at {args.mimir_bin}")

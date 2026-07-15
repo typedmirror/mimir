@@ -92,6 +92,9 @@ cmd_conform :: proc(args: []string) {
 			summary.failed += 1
 			if !summary_only {
 				fmt.printfln("  FAIL  %s", file)
+				for e in result.marker_errors {
+					fmt.printfln("    %s", e)
+				}
 				if len(result.false_negatives) > 0 {
 					slice.sort(result.false_negatives[:])
 					fmt.printf("    missed errors (FN):")

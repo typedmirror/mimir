@@ -1,0 +1,98 @@
+# silent_code_waivers.txt — waivers for the every-code-fires gate
+# (tests/scripts/every_code_fires.py). Phase T, track T3a, 2026-07-15.
+#
+# Format: CODE  justification   ('#' starts a comment; blank lines ignored)
+# Every emittable diagnostic code that never fires across the gate corpus
+# (mimir check/lint/audit/perf/safety over tests/conformance + tests/smoke,
+# check additionally run per-file) must carry a justified waiver here, or
+# the gate exits 1. A waiver is a documented debt, not an excuse: coverage
+# gaps are T3b fixture candidates, and STALE waivers (code now firing) are
+# flagged by the gate for removal.
+#
+# Categories used below:
+#   [other-command]  structurally unreachable via the five gate commands;
+#                    fires only under the named command.
+#   [coverage-gap]   reachable via a gate command, but no corpus file
+#                    triggers the rule today. Fixture candidate for T3b.
+#   [crash-blocked]  rule proven to fire, but the measuring run crashes
+#                    before emission (pre-existing checker bug, reported at
+#                    T3a checkpoint 3). Re-measure after the crash fix.
+
+# ---- [other-command] mimir gpu / compile-gpu (src/gpu/) ----
+GPU001   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
+GPU002   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
+GPU003   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
+GPU004   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
+GPU005   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
+GPU006   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
+GPU008   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
+GPU010   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/compute_graph.odin); outside gate commands
+GPU011   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/compute_graph.odin); outside gate commands
+GPU012   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/multigpu.odin); outside gate commands
+GPU013   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/multigpu.odin); outside gate commands
+
+# ---- [other-command] mimir compile-wasm (src/wasm/) ----
+WASM001  [other-command] emitted only by `mimir compile-wasm` (src/wasm/restrictions.odin); outside gate commands
+WASM002  [other-command] emitted only by `mimir compile-wasm` (src/wasm/restrictions.odin); outside gate commands
+WASM003  [other-command] emitted only by `mimir compile-wasm` (src/wasm/restrictions.odin); outside gate commands
+WASM004  [other-command] emitted only by `mimir compile-wasm` (src/wasm/restrictions.odin); outside gate commands
+WASM005  [other-command] emitted only by `mimir compile-wasm` (src/wasm/restrictions.odin, add_wasm_diagnostic_severity); outside gate commands
+WASM006  [other-command] emitted only by `mimir compile-wasm` (src/wasm/restrictions.odin); outside gate commands
+WASM007  [other-command] emitted only by `mimir compile-wasm` (src/wasm/restrictions.odin); outside gate commands
+WASM008  [other-command] emitted only by `mimir compile-wasm` (src/wasm/restrictions.odin); outside gate commands
+
+# ---- [other-command] mimir migrate (src/migration/) ----
+MIG001   [other-command] emitted only by `mimir migrate` (src/migration/rules.odin union-syntax); outside gate commands
+MIG002   [other-command] emitted only by `mimir migrate` (src/migration/rules.odin); outside gate commands
+MIG003   [other-command] emitted only by `mimir migrate` (src/migration/rules.odin); outside gate commands
+MIG004   [other-command] emitted only by `mimir migrate` (src/migration/rules.odin); outside gate commands
+MIG005   [other-command] emitted only by `mimir migrate` (src/migration/rules.odin); outside gate commands
+MIG006   [other-command] emitted only by `mimir migrate` (src/migration/rules.odin); outside gate commands
+MIG007   [other-command] emitted only by `mimir migrate` (src/migration/rules.odin); outside gate commands
+MIG008   [other-command] emitted only by `mimir migrate` (src/migration/rules.odin); outside gate commands
+
+# ---- [other-command] mimir lsp (src/lsp/) ----
+E000     [other-command] emitted only by the LSP server (src/lsp/analysis.odin) for in-editor parse errors; outside gate commands
+
+# ---- [crash-blocked] ----
+CONC001  [crash-blocked] blocking-call-in-async rule works (conform matches 3/3 markers on tests/conformance/conc_blocking.py via the concurrency stage) but `mimir check` SIGSEGVs on that file before emitting; pre-existing crash reported at T3a checkpoint 3
+
+# ---- [coverage-gap] reachable via `mimir check` (checker domain passes) ----
+API005   [coverage-gap] src/checker/api_contract_check.odin; no corpus file triggers this API-contract variant; T3b fixture candidate
+COMPAT002 [coverage-gap] src/checker/compat_check.odin; no corpus file triggers this version-compat rule; T3b fixture candidate
+COMPAT003 [coverage-gap] src/checker/compat_check.odin; no corpus file triggers this version-compat rule; T3b fixture candidate
+DEP002   [coverage-gap] src/checker/compat_check.odin; no corpus file triggers this deprecation rule; T3b fixture candidate
+DATA002  [coverage-gap] src/checker/infer.odin (dataframe domain); no corpus file triggers it; T3b fixture candidate
+DB002    [coverage-gap] src/checker/infer.odin (db query result schema); no corpus file triggers it; T3b fixture candidate
+JSON002  [coverage-gap] src/checker/infer.odin (json schema type); no corpus file triggers it; T3b fixture candidate
+JSON003  [coverage-gap] src/checker/json_check.odin; no corpus file triggers it; T3b fixture candidate
+M001     [coverage-gap] circular-import diagnostic (src/modules/graph.odin); corpus has no project-mode import cycle; T3b fixture candidate
+MATCH002 [coverage-gap] src/checker/infer.odin (match statement rule); no corpus file triggers it since the S90 FP fix; T3b fixture candidate
+PROC002  [coverage-gap] src/checker/crossproc_check.odin; no corpus file triggers it; T3b fixture candidate
+RT001    [coverage-gap] src/checker/runtime_check.odin; no corpus file triggers it; T3b fixture candidate
+RT002    [coverage-gap] src/checker/runtime_check.odin; no corpus file triggers it; T3b fixture candidate
+RT003    [coverage-gap] src/checker/runtime_check.odin; no corpus file triggers it; T3b fixture candidate
+RT005    [coverage-gap] src/checker/runtime_check.odin; no corpus file triggers it; T3b fixture candidate
+SER002   [coverage-gap] src/checker/serial_check.odin; no corpus file triggers it; T3b fixture candidate
+SHAPE001 [coverage-gap] src/checker/shapes.odin (tensor shapes); torch corpus exists but no file triggers shape rules; T3b fixture candidate
+SHAPE002 [coverage-gap] src/checker/shapes.odin (tensor shapes); torch corpus exists but no file triggers shape rules; T3b fixture candidate
+SHAPE003 [coverage-gap] src/checker/shapes.odin (tensor shapes); torch corpus exists but no file triggers shape rules; T3b fixture candidate
+T013     [coverage-gap] src/checker/infer.odin; no corpus file triggers this type rule; T3b fixture candidate
+T015     [coverage-gap] src/checker/checker.odin; no corpus file triggers this type rule; T3b fixture candidate
+TEST001  [coverage-gap] src/checker/test_check.odin (pytest mock rule); no corpus file triggers it; T3b fixture candidate
+TIME001  [coverage-gap] src/checker/time_encoding_check.odin; no corpus file triggers it; T3b fixture candidate
+CONC007  [coverage-gap] src/concurrency/rules.odin; no corpus file triggers it under check; T3b fixture candidate
+CONC008  [coverage-gap] src/concurrency/concurrency.odin (asyncio.gather rule); no corpus file triggers it under check; T3b fixture candidate
+
+# ---- [coverage-gap] reachable via `mimir lint` ----
+L008     [coverage-gap] compare-to-none rule (src/lint/rules.odin); no lint_*.py corpus file triggers it; T3b fixture candidate
+L011     [coverage-gap] builtin-shadow rule (src/lint/rules.odin); no lint_*.py corpus file triggers it; T3b fixture candidate
+
+# ---- [coverage-gap] reachable via `mimir perf` ----
+PERF009  [coverage-gap] redundant-sorted rule (src/perf/rules.odin); no perf corpus file triggers it; T3b fixture candidate
+PERF010  [coverage-gap] list-wrapping-comprehension rule (src/perf/rules.odin); no perf corpus file triggers it; T3b fixture candidate
+PROF001  [coverage-gap] quadratic-nested-loop rule (src/perf/rules.odin); no perf corpus file triggers it; T3b fixture candidate
+PROF002  [coverage-gap] blocking-call-in-loop rule (src/perf/rules.odin); no perf corpus file triggers it; T3b fixture candidate
+
+# ---- [coverage-gap] reachable via `mimir safety` ----
+SAF011   [coverage-gap] mutable-class-variable rule (src/safety/rules.odin); no safety corpus file triggers it; T3b fixture candidate
