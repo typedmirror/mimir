@@ -8,4 +8,4 @@ from mimir.array import zeros
 X = zeros((100, 10))
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
-X_train, X_test = train_test_split(X_scaled)  # E: data leakage
+X_train, X_test = train_test_split(X_scaled)  # E[ML001]: data leakage

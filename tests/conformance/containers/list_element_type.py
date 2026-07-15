@@ -11,4 +11,4 @@ name = names[0]
 assert_type(name, str)
 
 # Wrong element type assignment
-bad: str = xs[0]  # E
+bad: str = xs[0]  # E[T001]

@@ -21,4 +21,4 @@ assert_type(d.to_string(), str)
 assert_type(d.save(), bool)
 
 # Nonexistent method
-d.delete()  # E
+d.delete()  # E[T007]

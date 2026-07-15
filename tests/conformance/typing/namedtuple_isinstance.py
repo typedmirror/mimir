@@ -11,4 +11,4 @@ def check_point(obj) -> str:
     return "other"
 
 p = Point(1, 2)
-x: str = p.x  # E
+x: str = p.x  # E[T001]

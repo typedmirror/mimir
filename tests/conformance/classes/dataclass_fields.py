@@ -12,7 +12,7 @@ assert_type(p.x, float)
 assert_type(p.y, float)
 
 # Wrong field type
-bad = Point("hello", 2.0)  # E
+bad = Point("hello", 2.0)  # E[T002]
 
 # Wrong field count
-bad2 = Point(1.0)  # E
+bad2 = Point(1.0)  # E[T004]

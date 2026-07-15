@@ -7,4 +7,4 @@ x: Annotated[int, "positive"] = 42
 y: Annotated[str, "max_length=100"] = "hello"
 
 # Type checking still works through Annotated
-wrong: str = x  # E: Incompatible types
+wrong: str = x  # E[T001]: Incompatible types

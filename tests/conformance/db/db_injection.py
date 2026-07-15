@@ -6,16 +6,16 @@ uid = 42
 name = "alice"
 
 # f-string in query SQL arg — DB001
-query(db, f"SELECT * FROM users WHERE id = {uid}")  # E: unsafe SQL construction
+query(db, f"SELECT * FROM users WHERE id = {uid}")  # E[DB001]: unsafe SQL construction
 
 # String concatenation in query SQL arg — DB001
-query(db, "SELECT * FROM users WHERE id = " + str(uid))  # E: unsafe SQL construction
+query(db, "SELECT * FROM users WHERE id = " + str(uid))  # E[DB001]: unsafe SQL construction
 
 # .format() in query SQL arg — DB001
-query(db, "SELECT * FROM users WHERE id = {}".format(uid))  # E: unsafe SQL construction
+query(db, "SELECT * FROM users WHERE id = {}".format(uid))  # E[DB001]: unsafe SQL construction
 
 # f-string in execute SQL arg — DB001
-execute(db, f"DELETE FROM users WHERE name = '{name}'")  # E: unsafe SQL construction
+execute(db, f"DELETE FROM users WHERE name = '{name}'")  # E[DB001]: unsafe SQL construction
 
 # Connection method with f-string — DB001
 db.query(f"SELECT * FROM users WHERE id = {uid}")  # E: unsafe SQL construction

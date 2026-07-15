@@ -2,7 +2,7 @@ from typing import assert_type
 
 def outer() -> int:
     def inner() -> int:
-        return "wrong"  # E
+        return "wrong"  # E[T003]
     return inner()
 
 def outer2() -> str:

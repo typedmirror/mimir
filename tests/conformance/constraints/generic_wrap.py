@@ -12,5 +12,5 @@ c: list = wrap("test")
 d: list = wrap(99)
 
 # Incorrectly typed — list[str] is not assignable to int
-e: int = wrap("test")  # E: Incompatible types
-f: str = wrap(99)  # E: Incompatible types
+e: int = wrap("test")  # E[T001]: Incompatible types
+f: str = wrap(99)  # E[T001]: Incompatible types

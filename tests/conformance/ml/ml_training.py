@@ -37,4 +37,4 @@ _sgd.zero_grad()
 _adamw = AdamW(_layer.parameters(), lr=0.001, weight_decay=0.01)
 
 # Invalid optimizer attribute
-_opt.nonexistent  # E
+_opt.nonexistent  # E[T007]

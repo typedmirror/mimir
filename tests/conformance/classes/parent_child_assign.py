@@ -18,4 +18,4 @@ class Truck(Vehicle):
 v: Vehicle = Car(100, 4)
 
 # Sibling not assignable
-bad: Truck = Car(100, 4)  # E
+bad: Truck = Car(100, 4)  # E[T001]

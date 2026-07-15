@@ -6,7 +6,7 @@ i: int = b
 assert_type(i, int)
 
 # int is NOT a subtype of bool
-bad: bool = 42  # E
+bad: bool = 42  # E[T001]
 
 # bool + int = int
 r = True + 1

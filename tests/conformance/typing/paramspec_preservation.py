@@ -12,4 +12,4 @@ def decorator(func: Callable[P, R]) -> Callable[P, R]:
 def add(a: int, b: int) -> int:
     return a + b
 
-result: str = add(1, 2)  # E: Incompatible types
+result: str = add(1, 2)  # E[T001]: Incompatible types

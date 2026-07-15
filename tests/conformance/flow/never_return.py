@@ -10,5 +10,5 @@ def process() -> int:
     fail("done")
 
 # This SHOULD get F002 — no terminating path
-def bad() -> int:  # E: missing return statement
+def bad() -> int:  # E[F002]: missing return statement
     x = 1

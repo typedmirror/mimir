@@ -15,4 +15,4 @@ assert_type(no_args, Callable[[], int])
 def takes_int_fn(f: Callable[[int], str]) -> None:
     pass
 
-takes_int_fn(42)  # E
+takes_int_fn(42)  # E[T002]

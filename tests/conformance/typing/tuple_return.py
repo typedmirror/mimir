@@ -9,4 +9,4 @@ assert_type(r, Tuple[int, int])
 
 # Wrong element in tuple return
 def bad_divmod(a: int, b: int) -> Tuple[int, int]:
-    return (a, "oops")  # E
+    return (a, "oops")  # E[T003]

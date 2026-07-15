@@ -4,8 +4,8 @@ from mimir.crypt import encrypt, decrypt, hash, token
 key = token.bytes(32)
 
 # CRYPT001: ECB mode is insecure
-ct = encrypt.aes_ecb(key, b"data")  # E: CRYPT001
-pt = decrypt.aes_ecb(key, ct)  # E: CRYPT001
+ct = encrypt.aes_ecb(key, b"data")  # E[CRYPT001]: CRYPT001
+pt = decrypt.aes_ecb(key, ct)  # E[CRYPT001]: CRYPT001
 
 # CRYPT002: Weak hash for passwords (warning severity — verified via mimir check output)
 h1 = hash.md5(b"password")

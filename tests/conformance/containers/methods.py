@@ -16,7 +16,7 @@ y: list[int] = x.copy()
 
 # Dict methods
 d: dict[str, int] = {"a": 1}
-v: int = d.get("a")  # E
+v: int = d.get("a")  # E[T001]
 v2: int = d.pop("b")
 d.update({"c": 3})
 d.clear()
@@ -42,4 +42,4 @@ stripped: str = name.strip()
 replaced: str = name.replace("l", "r")
 
 # Wrong arg type should error
-x.append("bad")  # E
+x.append("bad")  # E[T002]

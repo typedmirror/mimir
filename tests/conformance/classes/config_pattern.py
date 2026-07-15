@@ -22,4 +22,4 @@ c = Config("localhost", 8080)
 assert_type(c.host, str)
 
 # Wrong arg count for child
-ServerConfig("localhost", 8080)  # E
+ServerConfig("localhost", 8080)  # E[T004]

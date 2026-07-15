@@ -14,4 +14,4 @@ def bad_handle(val: Union[int, str]) -> int:
     if isinstance(val, int):
         return val
     else:
-        return val  # E
+        return val  # E[T003]

@@ -5,13 +5,13 @@ import time
 import requests
 
 async def bad_sleep():
-    time.sleep(5)       # E
+    time.sleep(5)       # E[CONC001]
 
 async def bad_open():
-    f = open("data.txt")  # E
+    f = open("data.txt")  # E[CONC001]
 
 async def bad_requests():
-    resp = requests.get("http://example.com")  # E
+    resp = requests.get("http://example.com")  # E[CONC001]
 
 async def good_sleep():
     await asyncio.sleep(5)  # OK — async-safe

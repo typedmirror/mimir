@@ -9,4 +9,4 @@ a = zeros((3, 4))
 b = zeros((4, 5)).cuda()
 
 # Cross-device matmul — should error
-c = a @ b  # E: cross-device
+c = a @ b  # E[S004]: cross-device

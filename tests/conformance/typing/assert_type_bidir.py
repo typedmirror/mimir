@@ -12,5 +12,5 @@ b: bool = True
 assert_type(b, bool)
 
 # Mismatch fails
-assert_type(x, str)  # E
-assert_type(y, int)  # E
+assert_type(x, str)  # E[T006]
+assert_type(y, int)  # E[T006]

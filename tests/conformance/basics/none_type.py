@@ -10,5 +10,5 @@ opt3: str | None = "hello"  # ok
 opt4: str | None = None     # ok
 
 # Mismatch with Optional
-bad1: int | None = "oops"   # E: str not assignable to int | None
-bad2: str | None = 42       # E: int not assignable to str | None
+bad1: int | None = "oops"   # E[T001]: str not assignable to int | None
+bad2: str | None = 42       # E[T001]: int not assignable to str | None

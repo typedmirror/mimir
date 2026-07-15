@@ -17,4 +17,4 @@ region = df["region"]     # OK: known column
 price = df["price"]       # OK: known column
 
 # Invalid column access
-bad = df["shipping_cost"]  # E: column not found
+bad = df["shipping_cost"]  # E[DATA001]: column not found

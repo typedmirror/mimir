@@ -1,11 +1,11 @@
 # Unreachable code detection (F001)
 def after_return() -> int:
     return 1
-    x = 2              # E
+    x = 2              # E[F001]
 
 def after_raise() -> None:
     raise ValueError()
-    x = 2              # E
+    x = 2              # E[F001]
 
 def branch_ok(x: bool) -> int:
     if x:
@@ -17,9 +17,9 @@ def branch_ok(x: bool) -> int:
 def loop_break() -> None:
     for i in [1, 2]:
         break
-        x = 2          # E
+        x = 2          # E[F001]
 
 def loop_continue() -> None:
     for i in [1, 2]:
         continue
-        x = 2          # E
+        x = 2          # E[F001]

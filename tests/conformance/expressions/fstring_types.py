@@ -14,4 +14,4 @@ r3 = f"double: {num * 2}"
 assert_type(r3, str)
 
 # F-string assigned to wrong type
-bad: int = f"hello"  # E
+bad: int = f"hello"  # E[T001]

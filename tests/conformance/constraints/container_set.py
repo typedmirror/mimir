@@ -3,4 +3,4 @@
 def register(x):
     x.add(42)
 
-result: str = register({1, 2})  # E: Incompatible types
+result: str = register({1, 2})  # E[T001]: Incompatible types

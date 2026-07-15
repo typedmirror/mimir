@@ -10,5 +10,5 @@ assert_type(p.name, str)
 assert_type(p.age, int)
 
 # Nonexistent attributes
-p.email  # E
-p.phone  # E
+p.email  # E[T007]
+p.phone  # E[T007]

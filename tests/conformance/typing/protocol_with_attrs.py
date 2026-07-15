@@ -18,4 +18,4 @@ def greet(obj: Named) -> str:
 greet(User("Alice"))
 
 # No name attr
-greet(Anon())  # E
+greet(Anon())  # E[T002]

@@ -25,4 +25,4 @@ b: Base = Child()
 m: Middle = Child()
 
 # Reverse is not OK
-bad: Child = Base()  # E
+bad: Child = Base()  # E[T001]

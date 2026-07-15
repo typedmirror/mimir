@@ -29,4 +29,4 @@ o = Override(x="hello")
 assert_type(o.x, str)
 
 # Missing field in 3-level chain
-Child(x=1, y="hi")  # E
+Child(x=1, y="hi")  # E[T004]

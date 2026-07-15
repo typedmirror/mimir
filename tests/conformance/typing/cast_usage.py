@@ -13,4 +13,4 @@ w: float = cast(float, "3.14")
 assert_type(w, float)
 
 # Wrong assignment of cast result
-bad: str = cast(int, "42")  # E
+bad: str = cast(int, "42")  # E[T001]

@@ -6,4 +6,4 @@ for n in nums:
 
 names: list[str] = ["a", "b"]
 for name in names:
-    x: int = name  # E
+    x: int = name  # E[T001]

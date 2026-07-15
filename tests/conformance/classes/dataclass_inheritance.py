@@ -14,4 +14,4 @@ c = Child(name="Alice", age=30)
 assert_type(c, Child)
 
 # Wrong type for inherited field
-bad = Child(name=42, age=30)  # E
+bad = Child(name=42, age=30)  # E[T002]

@@ -17,6 +17,6 @@ assert_type(c.value(), int)
 assert_type(c.name(), str)
 
 # Errors
-bad1: str = c.value()  # E
-bad2: int = c.name()  # E
-bad3 = c.value(42)  # E
+bad1: str = c.value()  # E[T001]
+bad2: int = c.name()  # E[T001]
+bad3 = c.value(42)  # E[T004]

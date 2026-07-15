@@ -3,4 +3,4 @@
 from mimir.array import zeros
 
 a = zeros((3, 4))
-x: int = a  # E: Incompatible types
+x: int = a  # E[T001]: Incompatible types

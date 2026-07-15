@@ -4,6 +4,6 @@ from typing import assert_type
 def level1():
     def level2():
         def level3() -> int:
-            return "not int"  # E
+            return "not int"  # E[T003]
         return level3()
     return level2()

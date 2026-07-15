@@ -14,4 +14,4 @@ r2 = identity("hi")
 assert_type(r2, str)
 
 # Bad: float is not one of the constraints
-r3 = identity(3.14)  # E
+r3 = identity(3.14)  # E[T008]

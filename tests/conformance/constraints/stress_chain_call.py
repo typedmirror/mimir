@@ -8,4 +8,4 @@ class Builder:
     def build(self) -> str:
         return "done"
 
-result: int = Builder().set_name("Alice").set_age(30).build()  # E: Incompatible types
+result: int = Builder().set_name("Alice").set_age(30).build()  # E[T001]: Incompatible types

@@ -22,4 +22,4 @@ render(Circle())
 render(Square())
 
 # This should fail — no draw method
-render(Empty())  # E
+render(Empty())  # E[T002]

@@ -4,7 +4,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 
 # BAD: model before scaler
-_bad = Pipeline([  # E
+_bad = Pipeline([  # E[ML002]
     ("model", LogisticRegression()),
     ("scaler", StandardScaler()),
 ])

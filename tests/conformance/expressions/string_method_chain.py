@@ -13,4 +13,4 @@ r3 = "a,b,c".split(",")
 assert_type(r3, list)
 
 # Wrong type from string chain
-bad: int = "hello".upper()  # E
+bad: int = "hello".upper()  # E[T001]

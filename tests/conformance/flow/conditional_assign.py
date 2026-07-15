@@ -11,6 +11,6 @@ assert_type(x, int)
 # Wrong type in one branch
 y: str = "hello"
 if True:
-    y = 42  # E
+    y = 42  # E[T001]
 else:
     y = "world"

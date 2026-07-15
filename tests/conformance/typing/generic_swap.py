@@ -15,4 +15,4 @@ r2 = swap("hello", 42)
 assert_type(r2, int)
 
 # Wrong type from swap result
-bad: int = swap(42, "hello")  # E
+bad: int = swap(42, "hello")  # E[T001]

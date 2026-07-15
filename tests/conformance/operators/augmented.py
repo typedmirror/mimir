@@ -14,7 +14,7 @@ s += " world"
 
 # Invalid augmented assignments
 z: int = 10
-z += "bad"    # E
+z += "bad"    # E[T005]
 
 w: str = "hello"
-w -= "world"  # E
+w -= "world"  # E[T005]

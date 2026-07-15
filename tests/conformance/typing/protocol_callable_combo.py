@@ -25,4 +25,4 @@ assert_type(r, str)
 def wrong_type(n: str) -> str:
     return n
 
-apply(wrong_type, 42)  # E
+apply(wrong_type, 42)  # E[T002]

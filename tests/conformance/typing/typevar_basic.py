@@ -8,5 +8,5 @@ def identity(x: T) -> T:
 
 a: int = identity(42)
 b: str = identity("hello")
-bad1: str = identity(42)    # E
-bad2: int = identity("hi")  # E
+bad1: str = identity(42)    # E[T001]
+bad2: int = identity("hi")  # E[T001]

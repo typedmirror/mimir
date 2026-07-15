@@ -11,4 +11,4 @@ nested = ((1, 2), (3, 4))
 assert_type(nested, tuple[tuple[int, int], tuple[int, int]])
 
 # Tuple annotation mismatch
-bad: tuple[int, str] = (1, 2)  # E
+bad: tuple[int, str] = (1, 2)  # E[T001]

@@ -8,7 +8,7 @@ assert_type(MAX_SIZE, int)
 MAX_SIZE = 200
 
 # Wrong reassignment at module level
-MAX_SIZE = "big"  # E
+MAX_SIZE = "big"  # E[T001]
 
 # Function accessing module-level variable
 def get_max() -> int:

@@ -5,5 +5,5 @@ class Base:
 class Child(Base):
     def greet(self) -> str:
         result = super().greet()
-        x: int = result  # E
+        x: int = result  # E[T001]
         return result

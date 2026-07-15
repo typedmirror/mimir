@@ -10,4 +10,4 @@ result = double(5)
 y: int = double(10)
 
 # This should error via convergence (return int, not str)
-z: str = double(10)  # E: Incompatible types
+z: str = double(10)  # E[T001]: Incompatible types

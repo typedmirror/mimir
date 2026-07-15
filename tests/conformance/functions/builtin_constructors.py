@@ -22,4 +22,4 @@ r6 = abs(-42)
 assert_type(r6, int)
 
 # Wrong type from constructor
-bad: str = int("42")  # E
+bad: str = int("42")  # E[T001]

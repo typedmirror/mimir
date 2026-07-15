@@ -12,4 +12,4 @@ c: complex = 1j
 assert_type(c, complex)
 
 # Wrong type
-bad: int = 1j  # E
+bad: int = 1j  # E[T001]

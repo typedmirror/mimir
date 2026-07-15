@@ -5,4 +5,4 @@ counter = 0
 
 def increment():
     global counter
-    counter = counter + 1  # E
+    counter = counter + 1  # E[CONC006]

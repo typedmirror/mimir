@@ -11,4 +11,4 @@ a: int = p.x
 b: int = p.y
 
 # Wrong type for field
-c: str = p.x  # E: Incompatible types
+c: str = p.x  # E[T001]: Incompatible types

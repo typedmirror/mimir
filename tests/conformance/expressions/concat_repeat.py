@@ -13,4 +13,4 @@ r3 = [1, 2] + [3, 4]
 assert_type(r3, list)
 
 # Wrong type from concatenation
-bad: int = "hello" + " world"  # E
+bad: int = "hello" + " world"  # E[T001]

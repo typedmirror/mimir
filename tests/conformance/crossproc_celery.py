@@ -11,5 +11,5 @@ class Order:
 @app.task
 def process_order(order_id):
     order = Order.query.get(order_id)
-    user = order.user  # E: lazy-loaded attribute in Celery task
+    user = order.user  # E[PROC004]: lazy-loaded attribute in Celery task
     return user

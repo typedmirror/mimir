@@ -3,7 +3,7 @@ import hmac
 
 def test_hashlib_str():
     password: str = "secret"
-    hashlib.sha256(password)  # ENC001  # E
+    hashlib.sha256(password)  # ENC001  # E[ENC001]
 
 def test_hashlib_bytes_ok():
     data: bytes = b"hello"
@@ -11,9 +11,9 @@ def test_hashlib_bytes_ok():
 
 def test_hashlib_new_str():
     password: str = "secret"
-    hashlib.new("sha256", password)  # ENC001  # E
+    hashlib.new("sha256", password)  # ENC001  # E[ENC001]
 
 def test_hmac_str():
     key: str = "mykey"
     msg: str = "data"
-    hmac.new(key, msg, "sha256")  # ENC001  # E
+    hmac.new(key, msg, "sha256")  # ENC001  # E[ENC001|T004]

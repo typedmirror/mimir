@@ -14,10 +14,10 @@ d = 3.14
 e = True
 
 # Type mismatches
-bad1: str = 5        # E: int not assignable to str
-bad2: int = "oops"   # E: str not assignable to int
-bad3: bool = "yes"   # E: str not assignable to bool
-bad4: bytes = 42     # E: int not assignable to bytes
+bad1: str = 5        # E[T001]: int not assignable to str
+bad2: int = "oops"   # E[T001]: str not assignable to int
+bad3: bool = "yes"   # E[T001]: str not assignable to bool
+bad4: bytes = 42     # E[T001]: int not assignable to bytes
 
 # None assignment
 none_var: None = None  # ok

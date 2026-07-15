@@ -12,5 +12,5 @@ assert_type(c, float)
 assert_type(d, bool)
 
 # Cross-assignment error
-bad1: str = a  # E
-bad2: int = b  # E
+bad1: str = a  # E[T001]
+bad2: int = b  # E[T001]

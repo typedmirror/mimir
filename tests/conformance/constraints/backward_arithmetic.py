@@ -3,4 +3,4 @@
 def negate(x):
     y = -x
     result = x * 2
-    z: str = x  # E: Incompatible types
+    z: str = x  # E[T001]: Incompatible types

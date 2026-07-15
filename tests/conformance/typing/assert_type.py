@@ -10,8 +10,8 @@ y: str = "hello"
 assert_type(y, str)
 
 # Type mismatches — should error
-assert_type(x, str)       # E
-assert_type(y, int)       # E
+assert_type(x, str)       # E[T006]
+assert_type(y, int)       # E[T006]
 
 # Any passes (no error)
 from typing import Any
@@ -24,4 +24,4 @@ class Foo:
 
 f = Foo()
 assert_type(f, Foo)
-assert_type(f, int)       # E
+assert_type(f, int)       # E[T006]

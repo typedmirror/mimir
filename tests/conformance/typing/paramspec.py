@@ -13,4 +13,4 @@ def add(x: int, y: int) -> int:
     return x + y
 
 # Decorated function retains its original signature
-result: str = add(1, 2)  # E: Incompatible types
+result: str = add(1, 2)  # E[T001]: Incompatible types

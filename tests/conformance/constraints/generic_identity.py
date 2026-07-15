@@ -17,5 +17,5 @@ e: str = identity("world")
 f: int = identity(100)
 
 # Incorrectly typed — specialized return doesn't match
-g: int = identity("world")  # E: Incompatible types
-h: str = identity(100)  # E: Incompatible types
+g: int = identity("world")  # E[T001]: Incompatible types
+h: str = identity(100)  # E[T001]: Incompatible types

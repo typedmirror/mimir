@@ -17,4 +17,4 @@ def check2(x: str | None) -> str:
 # Nested: after None check, union narrows
 def check3(x: int | str | None) -> None:
     if x is not None:
-        bad: None = x  # E
+        bad: None = x  # E[T001]

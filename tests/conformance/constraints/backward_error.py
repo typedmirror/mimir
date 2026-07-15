@@ -3,4 +3,4 @@
 
 def process(data):
     lines = data.split("\n")
-    x: int = data  # E: Incompatible types
+    x: int = data  # E[T001]: Incompatible types

@@ -15,4 +15,4 @@ assert_type(b.get_name(), str)
 assert_type(b.name_length(), int)
 
 # Wrong type from method
-bad: int = b.get_name()  # E
+bad: int = b.get_name()  # E[T001]

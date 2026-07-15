@@ -5,4 +5,4 @@ class Counter:
         return self.count
 
     def bad_return(self) -> str:
-        return self.count  # E
+        return self.count  # E[T003]

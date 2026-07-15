@@ -16,4 +16,4 @@ r3 = greet("Charlie", greeting="Hey")
 assert_type(r3, str)
 
 # Wrong keyword type
-greet(name=42, greeting="Hi")  # E
+greet(name=42, greeting="Hi")  # E[T002]

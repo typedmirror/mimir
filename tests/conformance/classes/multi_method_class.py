@@ -16,4 +16,4 @@ assert_type(c.increment(), int)
 assert_type(c.get_count(), int)
 
 # Method result has wrong type assigned
-bad: str = c.get_count()  # E
+bad: str = c.get_count()  # E[T001]

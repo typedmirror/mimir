@@ -14,4 +14,4 @@ c = Circle(5.0)
 x: float = c.area
 
 # Wrong type for property value
-y: str = c.area  # E: Incompatible types
+y: str = c.area  # E[T001]: Incompatible types

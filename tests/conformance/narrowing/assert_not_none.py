@@ -8,4 +8,4 @@ def require(x: Optional[int]) -> int:
 
 def bad(x: Optional[int]) -> str:
     assert x is not None
-    return x  # E: Incompatible return value type
+    return x  # E[T003]: Incompatible return value type

@@ -14,4 +14,4 @@ def process(resource):
 
 # Protocol synthesized: {read: () → str, close: () → None}
 # FileWrapper satisfies it. Return type inferred as str.
-result: int = process(FileWrapper())  # E: Incompatible types
+result: int = process(FileWrapper())  # E[T001]: Incompatible types

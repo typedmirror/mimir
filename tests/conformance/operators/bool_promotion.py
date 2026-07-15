@@ -13,6 +13,6 @@ assert_type(c, int)
 assert_type(d, int)
 
 # Wrong
-assert_type(a, bool)  # E
-assert_type(b, bool)  # E
-assert_type(c, bool)  # E
+assert_type(a, bool)  # E[T006]
+assert_type(b, bool)  # E[T006]
+assert_type(c, bool)  # E[T006]

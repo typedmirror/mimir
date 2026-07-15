@@ -8,4 +8,4 @@ r = d["nums"]
 assert_type(r, List[int])
 
 # Wrong inner type
-bad: Dict[str, List[str]] = d  # E
+bad: Dict[str, List[str]] = d  # E[T001]

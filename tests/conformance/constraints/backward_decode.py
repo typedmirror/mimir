@@ -2,4 +2,4 @@
 
 def to_str(data):
     result = data.decode()
-    x: int = data  # E: Incompatible types
+    x: int = data  # E[T001]: Incompatible types

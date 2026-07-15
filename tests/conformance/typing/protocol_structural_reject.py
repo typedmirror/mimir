@@ -17,4 +17,4 @@ def get_length(obj: HasLen) -> int:
 get_length(WithLen())
 
 # Missing __len__ method
-get_length(NoLen())  # E
+get_length(NoLen())  # E[T002]

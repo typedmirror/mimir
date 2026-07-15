@@ -14,4 +14,4 @@ r2 = greet("world")
 assert_type(r2, str)
 
 # Wrong argument type
-add("a", "b")  # E
+add("a", "b")  # E[T002]

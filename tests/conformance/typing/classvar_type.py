@@ -11,4 +11,4 @@ class Counter:
 
 # ClassVar resolves to the inner type correctly
 x: int = Counter.count
-wrong: str = Counter.count  # E: Incompatible types
+wrong: str = Counter.count  # E[T001]: Incompatible types

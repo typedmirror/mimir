@@ -9,7 +9,7 @@ y = "hello"
 y = 3.14
 
 # Non-member assignment
-z: Union[int, str] = 3.14  # E
+z: Union[int, str] = 3.14  # E[T001]
 
 # Union in function params
 def check(val: int | str) -> None:
@@ -17,4 +17,4 @@ def check(val: int | str) -> None:
 
 check(42)
 check("hi")
-check(3.14)  # E
+check(3.14)  # E[T002]

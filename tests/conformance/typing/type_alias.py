@@ -10,4 +10,4 @@ x: IntOrStr = 42
 y: IntOrStr = "hello"
 
 # Direct PEP 604 usage without TypeAlias
-z: int | str = 3.14  # E: Incompatible types
+z: int | str = 3.14  # E[T001]: Incompatible types

@@ -23,4 +23,4 @@ r2 = make_sound(Cat())
 assert_type(r2, str)
 
 # Wrong type entirely
-make_sound(42)  # E
+make_sound(42)  # E[T002]

@@ -2,4 +2,4 @@
 _cache = {}
 
 def process(request_id, data):
-    _cache[request_id] = data  # E
+    _cache[request_id] = data  # E[PERF006]

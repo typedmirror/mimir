@@ -6,4 +6,4 @@ z: list[int] = [] if True else [1, 2, 3]
 # Mixed types
 flag: bool = True
 w = 1 if flag else "two"  # w should be int | str
-bad: str = 1 if True else 2  # E
+bad: str = 1 if True else 2  # E[T001]

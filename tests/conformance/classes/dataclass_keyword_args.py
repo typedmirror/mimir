@@ -14,4 +14,4 @@ assert_type(c.port, int)
 assert_type(c.debug, bool)
 
 # Wrong keyword arg type
-Config(host="localhost", port="not_int", debug=True)  # E
+Config(host="localhost", port="not_int", debug=True)  # E[T002]

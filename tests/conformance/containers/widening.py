@@ -10,7 +10,7 @@ y: list[int] = [True, 1, False, 2]
 z: list[float] = [1, 2, 3]
 
 # Widening should NOT happen when types don't match
-a: list[str] = [1, 2, 3]  # E
+a: list[str] = [1, 2, 3]  # E[T001]
 
 # Dict key/value widening
 b: dict[str, float] = {"x": 1, "y": 2}

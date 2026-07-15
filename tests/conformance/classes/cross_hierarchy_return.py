@@ -18,4 +18,4 @@ assert_type(r1, Animal)
 
 # Cross-hierarchy: Cat is not Dog
 def wrong_return() -> Dog:
-    return Cat()  # E
+    return Cat()  # E[T003]

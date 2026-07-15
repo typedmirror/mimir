@@ -9,4 +9,4 @@ r1 = connect("localhost", 8080, 30)
 assert_type(r1, str)
 
 # Wrong type
-connect("localhost", "not_int", 30)  # E
+connect("localhost", "not_int", 30)  # E[T002]

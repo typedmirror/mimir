@@ -13,4 +13,4 @@ name: str = m["name"]
 year: int = m["year"]
 
 # Wrong field type in assignment
-bad: int = m["name"]  # E
+bad: int = m["name"]  # E[T001]

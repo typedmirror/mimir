@@ -9,5 +9,5 @@ assert_type(id(42), int)
 assert_type(sum([1, 2]), int)
 
 # Errors
-bad1: str = len("hello")  # E
-bad2: int = input()  # E
+bad1: str = len("hello")  # E[T001]
+bad2: int = input()  # E[T001]

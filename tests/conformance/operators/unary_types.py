@@ -20,4 +20,4 @@ r5 = ~42
 assert_type(r5, int)
 
 # Unary not result assigned to wrong type
-bad: str = not True  # E
+bad: str = not True  # E[T001]

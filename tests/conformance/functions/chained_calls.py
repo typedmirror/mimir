@@ -18,4 +18,4 @@ r4 = "hello world".split()
 assert_type(r4, list)
 
 # Wrong type from chain
-bad: int = "hello".upper()  # E
+bad: int = "hello".upper()  # E[T001]

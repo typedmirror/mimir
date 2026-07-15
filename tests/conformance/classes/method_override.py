@@ -24,4 +24,4 @@ r3 = b.greet()
 assert_type(r3, str)
 
 # Base doesn't have extra
-b.extra()  # E
+b.extra()  # E[T007]

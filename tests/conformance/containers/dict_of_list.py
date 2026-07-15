@@ -6,4 +6,4 @@ val = d["a"]
 assert_type(val, List[int])
 
 # Wrong inner type mismatch
-bad: Dict[str, List[str]] = {"a": [1, 2]}  # E
+bad: Dict[str, List[str]] = {"a": [1, 2]}  # E[T001]

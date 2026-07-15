@@ -20,4 +20,4 @@ r6 = 1 != 2
 assert_type(r6, bool)
 
 # Comparison result as wrong type
-bad: str = 1 < 2  # E
+bad: str = 1 < 2  # E[T001]

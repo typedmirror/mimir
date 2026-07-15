@@ -9,5 +9,5 @@ def first(x: T, y: U) -> T:
 
 a: int = first(42, "hello")
 b: str = first("hi", 99)
-bad1: str = first(42, "x")   # E
-bad2: int = first("hi", 99)  # E
+bad1: str = first(42, "x")   # E[T001]
+bad2: int = first("hi", 99)  # E[T001]

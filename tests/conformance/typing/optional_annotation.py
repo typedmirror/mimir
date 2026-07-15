@@ -20,4 +20,4 @@ greet(None)
 def bad(x: Optional[int]) -> None:
     pass
 
-bad("hello")  # E
+bad("hello")  # E[T002]

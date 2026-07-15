@@ -8,8 +8,8 @@ y: str = "hello"
 y = "world"  # OK — str to str
 
 # Bad reassignments
-x = "hello"  # E
-y = 42  # E
+x = "hello"  # E[T001]
+y = 42  # E[T001]
 
 # Bool to int is OK (bool <: int)
 z: int = 1
@@ -21,4 +21,4 @@ w = 42  # OK
 
 # Float to int is NOT OK
 v: int = 1
-v = 3.14  # E
+v = 3.14  # E[T001]

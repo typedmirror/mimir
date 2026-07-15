@@ -10,4 +10,4 @@ def process():
     stripped = obj.strip()  # reinforces str constraint
     return upper
 
-result: int = process()  # E: Incompatible types
+result: int = process()  # E[T001]: Incompatible types

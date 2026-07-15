@@ -7,5 +7,5 @@ y: str = "hello"
 y += " world"  # OK: str += str
 
 # Type mismatch in augmented assignment
-x += "bad"  # E
-y += 42  # E
+x += "bad"  # E[T005]
+y += 42  # E[T005]

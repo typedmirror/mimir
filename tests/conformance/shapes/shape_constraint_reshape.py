@@ -11,4 +11,4 @@ b = a.reshape(2, 12)     # OK: 24 elements → 24 elements
 c = a.reshape(24)         # OK: 24 → 24
 
 # Invalid reshape: element count mismatch (4*6=24 ≠ 5*5=25)
-d = a.reshape(5, 5)       # E: reshape element count
+d = a.reshape(5, 5)       # E[S003]: reshape element count

@@ -4,4 +4,4 @@ def double(x):
     return x * 2
 
 # Caller provides int evidence, return type inferred as int
-result: str = double(42)  # E: Incompatible types
+result: str = double(42)  # E[T001]: Incompatible types

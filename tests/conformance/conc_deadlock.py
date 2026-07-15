@@ -7,10 +7,10 @@ async def some_coro():
 
 async def bad_handler():
     loop = asyncio.get_event_loop()
-    result = loop.run_until_complete(some_coro())  # CONC005: deadlock  # E
+    result = loop.run_until_complete(some_coro())  # CONC005: deadlock  # E[CONC005]
 
 async def bad_run():
-    asyncio.run(some_coro())  # CONC005: deadlock  # E
+    asyncio.run(some_coro())  # CONC005: deadlock  # E[CONC005]
 
 def sync_handler():
     asyncio.run(some_coro())  # OK — not inside async function

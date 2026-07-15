@@ -11,4 +11,4 @@ v2 = d2["pi"]
 assert_type(v2, float)
 
 # Wrong value type assignment
-bad: str = d["a"]  # E
+bad: str = d["a"]  # E[T001]

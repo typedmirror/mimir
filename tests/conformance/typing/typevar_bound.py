@@ -8,4 +8,4 @@ def process(x: T) -> T:
 
 a: int = process(42)
 b: int = process(True)
-bad = process("hi")  # E
+bad = process("hi")  # E[T008]

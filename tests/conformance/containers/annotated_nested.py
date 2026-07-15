@@ -9,4 +9,4 @@ ll: List[List[str]] = [["a", "b"], ["c"]]
 assert_type(ll, List[List[str]])
 
 # Wrong inner type — list[int] where list[str] expected
-bad: Dict[str, List[str]] = {"nums": [1, 2, 3]}  # E
+bad: Dict[str, List[str]] = {"nums": [1, 2, 3]}  # E[T001]

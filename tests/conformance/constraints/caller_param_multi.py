@@ -8,4 +8,4 @@ def middle(y):
 
 # Round 1: middle(5) → y gets int from caller. helper(y) → returns int.
 # middle's return type inferred as int.
-result: str = middle(5)  # E: Incompatible types
+result: str = middle(5)  # E[T001]: Incompatible types
