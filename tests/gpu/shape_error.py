@@ -1,6 +1,6 @@
 """GPU integration: shape error caught in @gpu function."""
 
-from mimir.array import Tensor, gpu
+from mimir.array import Tensor, gpu, float32
 
 @gpu
 def bad_matmul(

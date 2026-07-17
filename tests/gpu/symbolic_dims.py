@@ -1,6 +1,6 @@
 """GPU: symbolic dimension variables in tensor annotations."""
 
-from mimir.array import Tensor, gpu
+from mimir.array import Tensor, gpu, float32
 
 @gpu
 def matmul_generic(

@@ -1,6 +1,6 @@
 """GPU integration: shapes from annotations → compute graph → validated kernel."""
 
-from mimir.array import Tensor, gpu
+from mimir.array import Tensor, gpu, float32
 
 @gpu
 def linear_forward(

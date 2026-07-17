@@ -1,4 +1,4 @@
-from typing import Tensor
+from mimir.array import Tensor, gpu, float32, exp, log, sqrt
 
 @gpu
 def exp_log(x: Tensor[float32, 512]) -> Tensor[float32, 512]:

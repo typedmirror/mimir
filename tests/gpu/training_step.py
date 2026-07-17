@@ -1,6 +1,6 @@
 """GPU: complete training step — forward + loss + backward."""
 
-from mimir.array import Tensor, gpu
+from mimir.array import Tensor, gpu, float32
 
 @gpu
 def train_step(

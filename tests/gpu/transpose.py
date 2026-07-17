@@ -1,4 +1,4 @@
-from typing import Tensor
+from mimir.array import Tensor, gpu, float32
 
 @gpu
 def transpose_mat(x: Tensor[float32, 64, 64]) -> Tensor[float32, 64, 64]:

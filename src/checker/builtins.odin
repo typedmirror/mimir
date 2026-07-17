@@ -384,6 +384,28 @@ resolve_annotation :: proc(
 			}
 			// Bare type[int] etc. — return TYPE_OBJECT as fallback
 			return TYPE_OBJECT
+		case "Tensor":
+			// mimir.array's Tensor[dtype, dim1, dim2, ...] (D2 canonical DSL surface) —
+			// flows into the SAME shape-carrying Tensor_Type src/gpu uses (types.odin:167),
+			// built through the same make_tensor_type constructor (types.odin:447) gpu/types.odin
+			// calls at :94. base_name matched textually (get_annotation_name), so this fires
+			// regardless of whether "Tensor" came from mimir.array, an alias, or an attribute
+			// access — only the dtype/shape elements need to actually resolve.
+			#partial switch slice in e.slice {
+			case ^parser.Tuple_Expr:
+				// Tensor[dtype, dim1, dim2, ...]
+				if len(slice.elts) < 1 { return TYPE_UNKNOWN }
+				dtype_id := _resolve_gpu_dtype_elt(slice.elts[0], reg, bind_result, builtins, env)
+				shape := make([dynamic]int, 0, len(slice.elts) - 1, reg.allocator)
+				for i := 1; i < len(slice.elts); i += 1 {
+					append(&shape, _tensor_shape_dim(slice.elts[i]))
+				}
+				return make_tensor_type(reg, dtype_id, shape[:])
+			case:
+				// Tensor[dtype] — single dtype, no dims (shape-erased)
+				dtype_id := _resolve_gpu_dtype_elt(e.slice, reg, bind_result, builtins, env)
+				return make_tensor_type(reg, dtype_id, nil)
+			}
 		}
 		// User-defined generic class: MyClass[int]
 		base_type := resolve_annotation(e.value, reg, bind_result, builtins, env)
@@ -496,6 +518,70 @@ resolve_annotation :: proc(
 	}
 
 	return TYPE_UNKNOWN
+}
+
+// _resolve_gpu_dtype_elt: resolve the dtype element of a Tensor[dtype, dims...]
+// subscript. Tries the five known GPU precision names directly off the registry
+// fields (populated by register_mimir_array in virtual_modules.odin) — this works
+// even when env is nil (e.g. the return-type pre-pass in collect_func_return_types,
+// which calls resolve_annotation without a per-scope env). Falls back to the general
+// annotation resolver for anything else (plain "float"/"int", a type alias, etc.).
+_resolve_gpu_dtype_elt :: proc(
+	expr: parser.Expr,
+	reg: ^Type_Registry,
+	bind_result: ^binder.Bind_Result,
+	builtins: ^Builtin_Names,
+	env: ^Type_Env,
+) -> Type_ID {
+	if name_expr, ok := expr.(^parser.Name_Expr); ok {
+		switch name_expr.id {
+		case "float32":  return reg.gpu_float32_id
+		case "float16":  return reg.gpu_float16_id
+		case "bfloat16": return reg.gpu_bfloat16_id
+		case "int32":    return reg.gpu_int32_id
+		case "int64":    return reg.gpu_int64_id
+		}
+	}
+	return resolve_annotation(expr, reg, bind_result, builtins, env)
+}
+
+// _tensor_shape_dim: extract one shape dimension from a Tensor[...] subscript element.
+// Duplicated from src/gpu/types.odin's extract_int_constant (:120-151) rather than
+// imported: checker -> gpu is a banned import cycle (gpu already imports checker for
+// Type_Registry/make_tensor_type; the reverse direction does not exist anywhere in this
+// codebase and must not start here). Kept in sync manually; both copies encode the same
+// two conventions: single uppercase letter -> deterministic negative id (A=SYMBOLIC_DIM_BASE,
+// B=SYMBOLIC_DIM_BASE-1, ...), longer uppercase-leading identifier -> hashed negative id.
+// SYMBOLIC_DIM_BASE itself is NOT duplicated — it is already public (constraints.odin:169),
+// shared by both copies via the same checker package.
+_tensor_shape_dim :: proc(expr: parser.Expr) -> int {
+	#partial switch e in expr {
+	case ^parser.Constant_Expr:
+		#partial switch v in e.value {
+		case i64:
+			return int(v)
+		}
+	case ^parser.Unary_Op_Expr:
+		if e.op == .USub {
+			inner := _tensor_shape_dim(e.operand)
+			return -inner
+		}
+	case ^parser.Name_Expr:
+		// Symbolic dimension variable: single uppercase letter -> deterministic ID
+		if len(e.id) == 1 {
+			ch := e.id[0]
+			if ch >= 'A' && ch <= 'Z' {
+				return SYMBOLIC_DIM_BASE - int(ch - 'A')
+			}
+		}
+		// Multi-char symbolic dim names: hash to a negative ID
+		if len(e.id) > 0 && e.id[0] >= 'A' && e.id[0] <= 'Z' {
+			h := 0
+			for c in e.id { h = h * 31 + int(c) }
+			return SYMBOLIC_DIM_BASE - (h % 1000) - 26
+		}
+	}
+	return -1 // unknown
 }
 
 // Record identifiers inside a string annotation as "used in annotations".

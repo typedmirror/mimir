@@ -1,6 +1,6 @@
 """GPU autograd: backward pass shape validation."""
 
-from mimir.array import Tensor, gpu
+from mimir.array import Tensor, gpu, float32
 
 @gpu
 def forward(

@@ -1,5 +1,5 @@
 """GPU tensor types: Tensor annotations and shape checking"""
-
+from mimir.array import Tensor, gpu, float32
 @gpu
 def tensor_add(a: Tensor[float32, 8, 8], b: Tensor[float32, 8, 8]) -> Tensor[float32, 8, 8]:
     return a + b
