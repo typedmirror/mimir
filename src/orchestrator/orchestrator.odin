@@ -66,6 +66,12 @@ Analysis_Graph :: struct {
 	safety_diags: []core.Diagnostic,
 	gpu_diags:    []core.Diagnostic,
 
+	// @gpu-decorated function defs discovered by the GPU pass (run.odin's
+	// `gpu` proc) — nil/empty if the GPU pass didn't run or found none.
+	// Consumed by resolve_shape_diagnostic_precedence (S wave D6) to bound
+	// which diagnostics count as "inside an @gpu body".
+	gpu_funcs:    []^parser.Func_Def,
+
 	// T1: unresolved-import accounting — drives the end-of-run summary line
 	// ("N imports unresolved — type coverage incomplete"). Incremented once per
 	// import statement that resolves to nothing (B003).
@@ -115,6 +121,194 @@ emit :: proc(g: ^Analysis_Graph, d: core.Diagnostic) {
 	g.seen_keys[key] = true
 
 	append(&g.diagnostics, d)
+}
+
+// ==================== D6: Cross-System Shape Precedence ====================
+//
+// Within @gpu-decorated function bodies: GPU0xx (System C, GPU-specific
+// domain checks) outranks S00x (System B, symbolic constraint solver)
+// outranks SHAPE00x (System A, AST-walk shape validator) — the more
+// domain-specific system wins when more than one fires on the same
+// expression node. Outside @gpu bodies this proc is a no-op by
+// construction (empty g.gpu_funcs): the D3 guard (checker/shapes.odin)
+// already arbitrates A-vs-B everywhere else, and System C (GPU pass) never
+// examines non-@gpu functions in the first place.
+//
+// Called once at the end of run(), after every pass (including GPU, which
+// always dispatches last) has emitted into g.diagnostics.
+
+// _shape_family_rank reports the D6 precedence rank for a diagnostic code
+// (lower = wins) and whether the code participates in the family at all.
+// S004 (device) and GPU012/013 (multigpu) are deliberately NOT listed —
+// different facts, never cross-suppressed.
+_shape_family_rank :: proc(code: string) -> (rank: int, in_family: bool) {
+	switch code {
+	case "GPU011":
+		return 0, true
+	case "S001", "S002", "S003":
+		return 1, true
+	case "SHAPE001", "SHAPE002", "SHAPE003":
+		return 2, true
+	}
+	return 0, false
+}
+
+// _stmt_line / _expr_line: exhaustive (non-partial) switches over every
+// Stmt/Expr variant, returning Node_Base.loc.line. Exhaustive on purpose —
+// Odin's compiler rejects a plain `switch` over a union that misses a case,
+// so this can never silently under-cover a variant the way a #partial
+// switch could (Src_Loc.end_line/end_col are declared but never populated
+// anywhere in this codebase — see trail warn — so this walk-and-track is
+// the only reliable way to bound a function's line extent).
+_stmt_line :: proc(stmt: parser.Stmt) -> i32 {
+	switch s in stmt {
+	case ^parser.Func_Def:        return s.loc.line
+	case ^parser.Async_Func_Def:  return s.loc.line
+	case ^parser.Class_Def:       return s.loc.line
+	case ^parser.Return_Stmt:     return s.loc.line
+	case ^parser.Delete_Stmt:     return s.loc.line
+	case ^parser.Assign:          return s.loc.line
+	case ^parser.Aug_Assign:      return s.loc.line
+	case ^parser.Ann_Assign:      return s.loc.line
+	case ^parser.For_Stmt:        return s.loc.line
+	case ^parser.Async_For:       return s.loc.line
+	case ^parser.While_Stmt:      return s.loc.line
+	case ^parser.If_Stmt:         return s.loc.line
+	case ^parser.With_Stmt:       return s.loc.line
+	case ^parser.Async_With:      return s.loc.line
+	case ^parser.Match_Stmt:      return s.loc.line
+	case ^parser.Raise_Stmt:      return s.loc.line
+	case ^parser.Try_Stmt:        return s.loc.line
+	case ^parser.Try_Star:        return s.loc.line
+	case ^parser.Assert_Stmt:     return s.loc.line
+	case ^parser.Import_Stmt:     return s.loc.line
+	case ^parser.Import_From:     return s.loc.line
+	case ^parser.Global_Stmt:     return s.loc.line
+	case ^parser.Nonlocal_Stmt:   return s.loc.line
+	case ^parser.Expr_Stmt:       return s.loc.line
+	case ^parser.Pass_Stmt:       return s.loc.line
+	case ^parser.Break_Stmt:      return s.loc.line
+	case ^parser.Continue_Stmt:   return s.loc.line
+	case ^parser.Type_Alias_Stmt: return s.loc.line
+	}
+	return 0
+}
+
+_expr_line :: proc(expr: parser.Expr) -> i32 {
+	switch e in expr {
+	case ^parser.Bool_Op_Expr:     return e.loc.line
+	case ^parser.Named_Expr:       return e.loc.line
+	case ^parser.Bin_Op_Expr:      return e.loc.line
+	case ^parser.Unary_Op_Expr:    return e.loc.line
+	case ^parser.Lambda_Expr:      return e.loc.line
+	case ^parser.If_Expr:          return e.loc.line
+	case ^parser.Dict_Expr:        return e.loc.line
+	case ^parser.Set_Expr:         return e.loc.line
+	case ^parser.List_Comp:        return e.loc.line
+	case ^parser.Set_Comp:         return e.loc.line
+	case ^parser.Dict_Comp:        return e.loc.line
+	case ^parser.Generator_Expr:   return e.loc.line
+	case ^parser.Await_Expr:       return e.loc.line
+	case ^parser.Yield_Expr:       return e.loc.line
+	case ^parser.Yield_From_Expr:  return e.loc.line
+	case ^parser.Compare_Expr:     return e.loc.line
+	case ^parser.Call_Expr:        return e.loc.line
+	case ^parser.Formatted_Value:  return e.loc.line
+	case ^parser.Joined_Str:       return e.loc.line
+	case ^parser.Constant_Expr:    return e.loc.line
+	case ^parser.Attribute_Expr:   return e.loc.line
+	case ^parser.Subscript_Expr:   return e.loc.line
+	case ^parser.Starred_Expr:     return e.loc.line
+	case ^parser.Name_Expr:        return e.loc.line
+	case ^parser.List_Expr:        return e.loc.line
+	case ^parser.Tuple_Expr:       return e.loc.line
+	case ^parser.Slice_Expr:       return e.loc.line
+	}
+	return 0
+}
+
+_Max_Line_Ctx :: struct { max_line: i32 }
+
+_track_max_line_stmt :: proc(stmt: parser.Stmt, raw_ctx: rawptr) {
+	ctx := cast(^_Max_Line_Ctx)raw_ctx
+	if l := _stmt_line(stmt); l > ctx.max_line { ctx.max_line = l }
+}
+
+_track_max_line_expr :: proc(expr: parser.Expr, raw_ctx: rawptr) {
+	ctx := cast(^_Max_Line_Ctx)raw_ctx
+	if l := _expr_line(expr); l > ctx.max_line { ctx.max_line = l }
+}
+
+_Gpu_Range :: struct { lo, hi: i32 }
+
+_line_in_gpu_body :: proc(line: i32, ranges: []_Gpu_Range) -> bool {
+	for r in ranges {
+		if line >= r.lo && line <= r.hi { return true }
+	}
+	return false
+}
+
+// resolve_shape_diagnostic_precedence applies the D6 arbitration in place on
+// g.diagnostics. No-op (fast-return) when the GPU pass found no @gpu
+// functions, so it costs nothing on the overwhelming majority of files.
+resolve_shape_diagnostic_precedence :: proc(g: ^Analysis_Graph) {
+	if len(g.gpu_funcs) == 0 { return }
+
+	// Bound each @gpu function's line extent by walking its body with the
+	// shared AST walker (core:core's AST_Visitor — same walker used by the
+	// JSON/DB/crypt checks and System B's shape-constraint collection).
+	ranges := make([dynamic]_Gpu_Range, 0, len(g.gpu_funcs), context.temp_allocator)
+	for func in g.gpu_funcs {
+		mctx := _Max_Line_Ctx{max_line = func.loc.line}
+		v := core.AST_Visitor{
+			visit_stmt = _track_max_line_stmt,
+			visit_expr = _track_max_line_expr,
+			ctx        = &mctx,
+		}
+		core.walk_all_stmts(&v, func.body)
+		append(&ranges, _Gpu_Range{lo = func.loc.line, hi = mctx.max_line})
+	}
+
+	// Group family-member diagnostics inside @gpu bodies by exact (line,col).
+	Loc :: [2]int
+	groups := make(map[Loc][dynamic]int, 8, context.temp_allocator)
+	for d, i in g.diagnostics {
+		_, in_family := _shape_family_rank(d.code)
+		if !in_family { continue }
+		if !_line_in_gpu_body(i32(d.location.line), ranges[:]) { continue }
+		loc := Loc{d.location.line, d.location.column}
+		if loc not_in groups {
+			groups[loc] = make([dynamic]int, 0, 2, context.temp_allocator)
+		}
+		g2 := &groups[loc]
+		append(g2, i)
+	}
+
+	// Within each multi-entry group, keep only the lowest-rank (highest
+	// precedence) index/indices; mark the rest for removal.
+	drop := make(map[int]bool, 8, context.temp_allocator)
+	for _, idxs in groups {
+		if len(idxs) < 2 { continue }
+		best_rank := int(max(i32))
+		for i in idxs {
+			r, _ := _shape_family_rank(g.diagnostics[i].code)
+			if r < best_rank { best_rank = r }
+		}
+		for i in idxs {
+			r, _ := _shape_family_rank(g.diagnostics[i].code)
+			if r != best_rank { drop[i] = true }
+		}
+	}
+	if len(drop) == 0 { return }
+
+	// Filter-and-rebuild rather than in-place removal — preserves survivor
+	// order without index-shift bugs while iterating.
+	kept := make([dynamic]core.Diagnostic, 0, len(g.diagnostics), g.allocator)
+	for d, i in g.diagnostics {
+		if i in drop { continue }
+		append(&kept, d)
+	}
+	g.diagnostics = kept
 }
 
 // ==================== Pass Orchestration ====================

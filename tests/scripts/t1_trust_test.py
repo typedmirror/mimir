@@ -116,6 +116,24 @@ CASES = [
          ("absent",  r"error\["),
          ("exit", 0),
      ]),
+    ("gpu_shape/positive: D6 precedence — exactly ONE error (GPU011) on the "
+     "planted matmul line; S001/SHAPE001/T003 all suppressed (conform's "
+     "line-level marker absorption can't see this class — that's why this "
+     "is a t1_trust case, not a marker)",
+     "gpu_shape", "bad_matmul.py", [
+         ("present", r"bad_matmul\.py:10:\d+: error\[GPU011\]"),
+         ("absent",  r"bad_matmul\.py:10:\d+: error\[S001\]"),
+         ("absent",  r"bad_matmul\.py:10:\d+: error\[SHAPE001\]"),
+         ("absent",  r"error\[T003\]"),
+         ("exit", 1),
+     ]),
+    ("gpu_shape/negative: genuine shaped-vs-shaped return mismatch still "
+     "fires — proves the D6 shape-erasure + is_assignable src.ndim==0 "
+     "symmetry did NOT make tensor returns universally permissive",
+     "gpu_shape", "wrong_return.py", [
+         ("present", r"wrong_return\.py:14:\d+: error\[T003\]"),
+         ("exit", 1),
+     ]),
 ]
 
 

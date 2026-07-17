@@ -772,12 +772,20 @@ infer_binop :: proc(op: parser.Binary_Op, left: Type_ID, right: Type_ID, reg: ^T
 		}
 
 	case .Mat_Mult:
-		// Tensor @ Tensor → Tensor (shape validated in shape pass)
+		// Tensor @ Tensor → Tensor, shape-erased (ndim=0, element type only).
+		// The caller (infer_expr_inner's Bin_Op_Expr case, "Refine tensor
+		// binop shapes") re-validates via validate_matmul and overwrites
+		// this with the correct concrete result shape on success; on
+		// failure it leaves this shape-erased placeholder standing rather
+		// than a wrong-shape fabrication inherited from the left operand
+		// (S wave D6 companion fix — kills the cascading T003 on a failed
+		// matmul's return). Same idiom as the elementwise-op case below
+		// (make_tensor_type(reg, element_type, {})).
 		lt := get_type(reg, left)
 		rt := get_type(reg, right)
-		if _, l_ok := lt.info.(Tensor_Type); l_ok {
+		if l_tensor, l_ok := lt.info.(Tensor_Type); l_ok {
 			if _, r_ok := rt.info.(Tensor_Type); r_ok {
-				return left // Shape pass validates dims; return left's type for now
+				return make_tensor_type(reg, l_tensor.element_type, {})
 			}
 		}
 		return TYPE_UNKNOWN

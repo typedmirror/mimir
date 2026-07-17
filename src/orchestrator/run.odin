@@ -86,6 +86,12 @@ run :: proc(g: ^Analysis_Graph, cfg: Run_Config) {
 	if .Perf in cfg.passes { perf(g, &cfg.perf_config) }
 	if .Safety in cfg.passes { safety(g, &cfg.safety_config) }
 	if .GPU in cfg.passes { gpu(g, &cfg.gpu_config) }
+
+	// S wave D6: cross-system shape-diagnostic precedence, within @gpu
+	// bodies only. No-op when GPU didn't run or found no @gpu functions
+	// (g.gpu_funcs stays nil/empty). Must run after every pass above has
+	// emitted, since it operates on the converged g.diagnostics list.
+	resolve_shape_diagnostic_precedence(g)
 }
 
 // Virtual_Only check: the plain single-file checker — private registry,
@@ -236,4 +242,9 @@ gpu :: proc(g: ^Analysis_Graph, config: ^gpupkg.GPU_Config) {
 
 	g.gpu_diags = diags[:]
 	for d in diags { emit(g, d) }
+
+	// D6 needs the @gpu function set to bound "inside an @gpu body" —
+	// stash it on the graph (nil/empty if none found, which is also the
+	// correct no-op signal for resolve_shape_diagnostic_precedence).
+	g.gpu_funcs = gpu_funcs
 }

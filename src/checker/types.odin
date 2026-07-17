@@ -1036,6 +1036,14 @@ is_assignable :: proc(reg: ^Type_Registry, source: Type_ID, target: Type_ID) -> 
 			if src.element_type != tgt.element_type { return false }
 			// Shape-erased target (ndim == 0) accepts any shape
 			if tgt.ndim == 0 { return true }
+			// Shape-erased source (ndim == 0) is assignable to any target shape —
+			// symmetric completion of the tgt branch above (S wave D6 companion
+			// fix): a shape-erased VALUE (e.g. a failed matmul's result, or any
+			// other producer that can't determine a concrete shape) is genuinely
+			// unknown, not a concrete mismatch — same element-type precondition
+			// already enforced above, no other checks to mirror (tgt branch does
+			// nothing besides that precondition + unconditional true).
+			if src.ndim == 0 { return true }
 			if src.ndim != tgt.ndim { return false }
 			for i := 0; i < src.ndim; i += 1 {
 				// -1 = symbolic/unknown matches anything
