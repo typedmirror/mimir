@@ -9,7 +9,7 @@ c = matmul(a, b)  # OK: (3,4) @ (4,5) -> (3,5)
 
 # Invalid matmul — inner dimensions mismatch
 d = zeros((5, 6))
-e = matmul(a, d)  # E: inner dimensions 4 != 5
+e = matmul(a, d)  # E[SHAPE001]: inner dimensions 4 != 5
 
 # Valid square matmul
 f = zeros((3, 3))
@@ -21,4 +21,4 @@ i = matmul(h, b)  # OK: (4,) @ (4,5) -> (5,)
 
 # Invalid 1D @ 2D
 j = zeros((3,))
-k = matmul(j, b)  # E: inner dimensions 3 != 4
+k = matmul(j, b)  # E[SHAPE001]: inner dimensions 3 != 4

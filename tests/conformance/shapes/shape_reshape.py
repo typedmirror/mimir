@@ -11,5 +11,5 @@ d = reshape(a, (4, 3))   # OK: 12 = 12
 e = reshape(a, (1, 12))  # OK: 12 = 12
 
 # Invalid reshape — element count mismatch
-f = reshape(a, (2, 5))   # E: 12 != 10
-g = reshape(a, (3, 5))   # E: 12 != 15
+f = reshape(a, (2, 5))   # E[SHAPE002]: 12 != 10
+g = reshape(a, (3, 5))   # E[SHAPE002]: 12 != 15
