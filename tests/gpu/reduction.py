@@ -1,4 +1,4 @@
-from typing import Tensor
+from mimir.array import Tensor, gpu, float32
 
 @gpu
 def sum_reduce(x: Tensor[float32, 1024]) -> Tensor[float32, 1]:

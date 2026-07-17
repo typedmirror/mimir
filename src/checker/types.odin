@@ -269,6 +269,18 @@ Type_Registry :: struct {
 	typeis_targets:          map[binder.Symbol_ID]Type_ID,  // func sym → TypeIs[T] target type (PEP 742)
 	proto_for_class:         map[Qualified_Symbol]Type_ID,  // Class pre-reg ID → Protocol_Type ID
 	current_resolve_class:   Type_ID,  // Set during class scope processing for Self resolution
+	// GPU DSL precision dtypes (mimir.array), registered DISTINCT from TYPE_FLOAT/TYPE_INT —
+	// mirrors src/gpu/types.odin's private gpu_names table (float32/float16/bfloat16/int32/int64
+	// map to hardware precisions, not Python's float/int). Populated by register_mimir_array
+	// (0/INVALID_TYPE if virtual registry never initialized on this registry). Stored on the
+	// registry — not threaded through resolve_annotation's optional env — so Tensor[float32,...]
+	// resolves identically in both per-scope (env-bearing) and pre-pass (env=nil, e.g. return-type
+	// collection) annotation contexts.
+	gpu_float32_id:  Type_ID,
+	gpu_float16_id:  Type_ID,
+	gpu_bfloat16_id: Type_ID,
+	gpu_int32_id:    Type_ID,
+	gpu_int64_id:    Type_ID,
 	allocator:      mem.Allocator,
 }
 

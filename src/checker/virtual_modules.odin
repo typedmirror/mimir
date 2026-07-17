@@ -199,6 +199,57 @@ register_mimir_array :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 	a_param     := Param_Type{name = "a", type_id = tensor_f64}
 	no_params   := make([]Param_Type, 0, reg.allocator)
 
+	// ---- @gpu DSL surface: Tensor, gpu, precision dtypes (D2 canonical import) ----
+	// GPU precision dtypes: DISTINCT Type_IDs from TYPE_FLOAT/TYPE_INT (Python float is
+	// float64). Mirrors src/gpu/types.odin:30-41's private gpu_names table exactly — that
+	// registry is gpu-command-private (per-invocation, own Type_Registry) and cannot be
+	// imported here (checker → gpu is a banned import cycle), so the five precisions are
+	// re-registered on the shared checker registry and stored on Type_Registry itself
+	// (reg.gpu_float32_id etc.) so resolve_annotation can identify them without needing
+	// the per-scope env (which isn't populated yet during the return-type pre-pass).
+	//
+	// IDEMPOTENCY GUARD (load-bearing, found empirically): init_virtual_registry runs
+	// MORE THAN ONCE against the SAME live registry within a single `mimir check` —
+	// once from the orchestrator's project-level setup, again from
+	// _check_with_resolution (checker.odin ~444) per file. register_type always appends
+	// a fresh slot, so without this guard the second call silently reassigns
+	// reg.gpu_float32_id etc. to NEW Type_IDs mid-pipeline. Since collect_func_return_types
+	// (the return-type pre-pass) runs BEFORE that second call and per-scope param
+	// resolution runs AFTER it, an unguarded re-registration makes a function's own
+	// declared return dtype fail to == its own param dtype (verified: reproduced with a
+	// single `def f(x: Tensor[float32,32]) -> Tensor[float32,32]: return x` — spurious
+	// T003, "Tensor[float,32]" vs itself). Guarding on the first field being unset makes
+	// re-entry a no-op, matching the (untouched) pattern the rest of this proc's
+	// non-idempotent locals rely on the registry being fresh per real check — this is the
+	// one part of the surface a second init call is observed to corrupt.
+	if reg.gpu_float32_id == INVALID_TYPE {
+		reg.gpu_float32_id  = register_type(reg, Primitive_Type{.Float})
+		reg.gpu_float16_id  = register_type(reg, Primitive_Type{.Float})
+		reg.gpu_bfloat16_id = register_type(reg, Primitive_Type{.Float})
+		reg.gpu_int32_id    = register_type(reg, Primitive_Type{.Int})
+		reg.gpu_int64_id    = register_type(reg, Primitive_Type{.Int})
+	}
+	exports["float32"]  = reg.gpu_float32_id
+	exports["float16"]  = reg.gpu_float16_id
+	exports["bfloat16"] = reg.gpu_bfloat16_id
+	exports["int32"]    = reg.gpu_int32_id
+	exports["int64"]    = reg.gpu_int64_id
+
+	// gpu: identity decorator (@gpu marks a function for GPU compilation; it does not
+	// change the decorated function's apparent signature for type-checking purposes).
+	// Callable[[Any], Any] with an Any return makes _has_unknown_decorator's existing
+	// erasure logic treat the decorated function as permissive — no new decorator-handling
+	// code needed; GPU-subset legality (GPU001-013) is validated separately by gpu.validate_file.
+	exports["gpu"] = make_callable_type(reg,
+		{Param_Type{name = "fn", type_id = TYPE_ANY}},
+		TYPE_ANY)
+
+	// Tensor: bare-name (non-subscripted) use resolves to a shape/dtype-erased instance.
+	// The subscripted form Tensor[dtype, dim1, ...] is handled directly in resolve_annotation
+	// (builtins.odin) via make_tensor_type — this Class_Type only covers `x: Tensor` (no shape).
+	gpu_tensor_class := register_type(reg, Class_Type{name = "Tensor"})
+	exports["Tensor"] = gpu_tensor_class
+
 	// ---- Creation ----
 	exports["array"] = make_callable_type(reg,
 		{Param_Type{name = "data", type_id = TYPE_ANY}},
@@ -298,9 +349,19 @@ register_mimir_array :: proc(vreg: ^Virtual_Registry, reg: ^Type_Registry) {
 		 Param_Type{name = "a_max", type_id = TYPE_FLOAT, has_default = true}},
 		tensor_f64)
 	exports["abs"] = make_callable_type(reg, {a_param}, tensor_f64)
-	exports["sqrt"] = make_callable_type(reg, {a_param}, tensor_f64)
-	exports["exp"] = make_callable_type(reg, {a_param}, tensor_f64)
-	exports["log"] = make_callable_type(reg, {a_param}, tensor_f64)
+	// sqrt/exp/log: TYPE_ANY in/out (Amendment 2 mitigation, applied empirically —
+	// not a blanket change). a_param/tensor_f64 (generic TYPE_FLOAT-element,
+	// shape-erased) collide with precise Tensor[float32,...] DSL annotations: passing
+	// a distinct-dtype argument trips T002 (element_type != TYPE_FLOAT), and the
+	// shape-erased-generic return trips T003 against a shaped/dtyped declared return.
+	// Verified: tests/gpu/math_ops.py's exp_log/sqrt_pow were the reproduction; this
+	// export-level fix does not touch is_assignable/Tensor_Type (out of scope this
+	// wave). Confirmed non-regressing against tests/conformance/constraints/array_expanded.py
+	// (the one conformance file that imports these from mimir.array; no assert_type or
+	// downstream Tensor-method use of their results there).
+	exports["sqrt"] = make_callable_type(reg, {Param_Type{name = "a", type_id = TYPE_ANY}}, TYPE_ANY)
+	exports["exp"]  = make_callable_type(reg, {Param_Type{name = "a", type_id = TYPE_ANY}}, TYPE_ANY)
+	exports["log"]  = make_callable_type(reg, {Param_Type{name = "a", type_id = TYPE_ANY}}, TYPE_ANY)
 
 	// ---- Random sub-module ----
 	random_exports := make(map[string]Type_ID, 8, reg.allocator)

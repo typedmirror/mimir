@@ -1,5 +1,5 @@
 """GPU restrictions: each GPU001-010 fires correctly"""
-
+from mimir.array import Tensor, gpu, float32
 @gpu
 def bad_string_param(x: str) -> str:  # E: GPU001
     return x
