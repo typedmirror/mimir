@@ -338,16 +338,27 @@ extract_arange_shape :: proc(args: []parser.Expr, allocator: mem.Allocator) -> [
 // ==================== Shape Analysis Pass ====================
 
 // Run shape analysis on all scopes. Called after type checking.
+//
+// reg is passed explicitly rather than derived from &result.registry:
+// Check_Result.registry is a VALUE field, and in multi-file/resolution mode
+// (_check_with_resolution) it is a byte-snapshot taken BEFORE inference
+// registers new types (e.g. shaped return types appended via reg_override).
+// Reading &result.registry here would silently see a stale, shorter
+// registry — any Type_ID allocated during inference resolves to the
+// INVALID sentinel (out-of-range), and every shape check early-returns.
+// Callers pass the live registry pointer that inference actually wrote
+// through: reg_override in _check_with_resolution, &result.registry itself
+// in _check_virtual_only (no snapshot exists there — same registry
+// throughout, so behavior is unchanged for that caller).
 analyze_shapes :: proc(
 	flow_result: ^flow.Flow_Result,
 	result: ^Check_Result,
 	bind_result: ^binder.Bind_Result,
+	reg: ^Type_Registry,
 	shape_reg: ^Shape_Registry,
 	file_path: string,
 	allocator: mem.Allocator,
 ) {
-	reg := &result.registry
-
 	// Walk all expressions looking for tensor operations
 	for &cfg in flow_result.cfgs {
 		const_map: ^flow.Const_Map = nil
@@ -544,17 +555,29 @@ check_shape_binop :: proc(
 	if left_tensor == nil || right_tensor == nil { return }
 	if left_tensor.ndim == 0 || right_tensor.ndim == 0 { return }
 
+	line, column := int(e.loc.line), int(e.loc.col)
+
 	#partial switch e.op {
 	case .Mat_Mult:
 		// a @ b — same as matmul
 		_, ok, err_msg := validate_matmul(left_tensor.shape, right_tensor.shape, allocator)
-		if !ok {
+		// D3 double-emit guard: System B (constraints.odin's
+		// collect_tensor_binop_shape → resolution.odin's
+		// resolve_shape_constraints, code S001) collects a Shape_Matmul
+		// constraint for this SAME Bin_Op_Expr node earlier in check_scope
+		// — before analyze_shapes (System A) ever runs. So if B was going
+		// to report this node, its diagnostic is already sitting in
+		// result.diagnostics at this exact location by the time we get
+		// here. B wins; A stays silent. (check_matmul_call's function-call
+		// form — `matmul(a, b)` — never shares this AST shape with B's
+		// checks, so it is never guarded and always fires independently.)
+		if !ok && !_diagnostic_at_location(result, file_path, line, column) {
 			append(&result.diagnostics, core.Diagnostic{
 				severity = .Error,
 				location = core.Location{
 					file   = file_path,
-					line   = int(e.loc.line),
-					column = int(e.loc.col),
+					line   = line,
+					column = column,
 				},
 				code = "SHAPE001",
 				what = "Matmul dimension mismatch",
@@ -566,13 +589,17 @@ check_shape_binop :: proc(
 	case .Add, .Sub, .Mult, .Div, .Pow, .Mod, .Floor_Div:
 		// Elementwise ops require broadcasting compatibility
 		_, ok, err_msg := broadcast_shapes(left_tensor.shape, right_tensor.shape, allocator)
-		if !ok {
+		// D3 double-emit guard — see .Mat_Mult case above. System B only
+		// collects a Shape_Broadcast constraint (code S002) for Add/Sub/
+		// Mult/Div; it has no constraint for Pow/Mod/Floor_Div, so A always
+		// fires uncontested for those three ops (nothing to guard against).
+		if !ok && !_diagnostic_at_location(result, file_path, line, column) {
 			append(&result.diagnostics, core.Diagnostic{
 				severity = .Error,
 				location = core.Location{
 					file   = file_path,
-					line   = int(e.loc.line),
-					column = int(e.loc.col),
+					line   = line,
+					column = column,
 				},
 				code = "SHAPE003",
 				what = "Incompatible broadcast shapes",
@@ -583,6 +610,22 @@ check_shape_binop :: proc(
 
 	case: // Other ops — no shape validation
 	}
+}
+
+// D3 double-emit guard helper: reports whether result.diagnostics already
+// carries an entry at this exact (file, line, column). Diagnostic order
+// within a single check() call is deterministic: System B's constraint
+// resolution runs inside check_scope, which completes in full before
+// analyze_shapes (System A) is invoked — in BOTH _check_virtual_only and
+// _check_with_resolution. So "already present here" means "System B
+// already reported this node" — never a race, never A racing itself.
+_diagnostic_at_location :: proc(result: ^Check_Result, file_path: string, line, column: int) -> bool {
+	for d in result.diagnostics {
+		if d.location.line == line && d.location.column == column && d.location.file == file_path {
+			return true
+		}
+	}
+	return false
 }
 
 // ==================== Helpers ====================

@@ -257,7 +257,7 @@ _check_virtual_only :: proc(
 
 	// Shape analysis pass — validate tensor operation shapes
 	if len(shape_reg.semantics) > 0 {
-		analyze_shapes(flow_result, &result, bind_result, &shape_reg, file_path, allocator)
+		analyze_shapes(flow_result, &result, bind_result, &result.registry, &shape_reg, file_path, allocator)
 	}
 
 	// Route analysis pass — validate mimir.http route decorators
@@ -564,9 +564,13 @@ _check_with_resolution :: proc(
 		revalidate_module_calls(module.body, &result, bind_result, builtins, file_path, registry)
 	}
 
-	// Shape analysis pass
+	// Shape analysis pass — registry is the LIVE pointer (reg_override
+	// throughout this function's check_scope/backfill/specialize calls),
+	// NOT &result.registry: that field is a value-snapshot taken at entry
+	// (line ~398) and is stale by the time inference has run (see
+	// analyze_shapes's doc comment in shapes.odin).
 	if len(shape_reg.semantics) > 0 {
-		analyze_shapes(flow_result, &result, bind_result, &shape_reg, file_path, allocator)
+		analyze_shapes(flow_result, &result, bind_result, registry, &shape_reg, file_path, allocator)
 	}
 
 	// Route analysis pass — validate mimir.http route decorators
