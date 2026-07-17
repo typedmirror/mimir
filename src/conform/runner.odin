@@ -12,6 +12,7 @@ import "mimir:lint"
 import "mimir:security"
 import "mimir:perf"
 import "mimir:safety"
+import "mimir:gpu"
 
 Conform_File_Result :: struct {
 	file:            string,
@@ -111,6 +112,7 @@ run_conform_file :: proc(
 		if strings.has_prefix(basename, "sec_") || strings.has_prefix(basename, "taint_") { passes += {.Security} }
 		if strings.has_prefix(basename, "perf_") { passes += {.Perf} }
 		if strings.has_prefix(basename, "safety_") || strings.contains(file, "/safety/") { passes += {.Safety} }
+		if strings.has_prefix(basename, "gpu_") { passes += {.GPU} }
 
 		// Run the pipeline through the orchestrator. Virtual_Only preserves
 		// conform's checker behavior exactly: private registry, virtual
@@ -124,6 +126,7 @@ run_conform_file :: proc(
 			security_config = security.default_config(),
 			perf_config     = perf.default_config(),
 			safety_config   = safety.default_config(),
+			gpu_config      = gpu.default_gpu_config(),
 		})
 
 		// Collect from the PER-PASS lists with the pre-T4 severity semantics,
@@ -159,6 +162,9 @@ run_conform_file :: proc(
 			_record_error(&error_lines, &error_codes, d.location.line, d.code)
 		}
 		for d in g.safety_diags {
+			_record_error(&error_lines, &error_codes, d.location.line, d.code)
+		}
+		for d in g.gpu_diags {
 			_record_error(&error_lines, &error_codes, d.location.line, d.code)
 		}
 	}

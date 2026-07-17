@@ -64,6 +64,7 @@ Analysis_Graph :: struct {
 	sec_diags:    []core.Diagnostic,
 	perf_diags:   []core.Diagnostic,
 	safety_diags: []core.Diagnostic,
+	gpu_diags:    []core.Diagnostic,
 
 	// T1: unresolved-import accounting — drives the end-of-run summary line
 	// ("N imports unresolved — type coverage incomplete"). Incremented once per

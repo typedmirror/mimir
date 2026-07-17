@@ -1673,12 +1673,16 @@ cmd_check_single :: proc(
 	source_data, _ := os.read_entire_file(file, arena.allocator)
 
 	// Build unified analysis graph and run the check pipeline through the
-	// orchestrator (T4 R5): Check+Concurrency passes, Full_Single resolution.
+	// orchestrator (T4 R5, extended S-wave L3): Check+Concurrency+GPU passes,
+	// Full_Single resolution. GPU is unconditional — validate_file's internal
+	// find_gpu_functions is a no-op on files with no @gpu functions, and
+	// graph-level GPU checks are self-gated on that discovery (run.odin).
 	g := orchestrator.init(module, string(source_data), file, arena.allocator)
 	orchestrator.run(&g, orchestrator.Run_Config{
-		passes     = {.Check, .Concurrency},
+		passes     = {.Check, .Concurrency, .GPU},
 		resolution = .Full_Single,
 		bridge     = bridge,
+		gpu_config = gpu.default_gpu_config(),
 	})
 
 	// Emit diagnostics with level/confidence filtering
@@ -1820,8 +1824,9 @@ cmd_check_multi :: proc(
 		// import-edge construction; the graph must share that instance.
 		orchestrator.bind_from(&g, info.bind_result)
 		orchestrator.run(&g, orchestrator.Run_Config{
-			passes           = {.Check, .Concurrency},
+			passes           = {.Check, .Concurrency, .GPU},
 			resolution       = .Full_Multi,
+			gpu_config       = gpu.default_gpu_config(),
 			shared_registry  = &registry,
 			shared_builtins  = &builtins,
 			resolution_ctx   = &res_ctx,
