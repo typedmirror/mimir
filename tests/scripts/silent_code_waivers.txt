@@ -19,15 +19,6 @@
 #                    T3a checkpoint 3). Re-measure after the crash fix.
 
 # ---- [other-command] mimir gpu / compile-gpu (src/gpu/) ----
-GPU001   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
-GPU002   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
-GPU003   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
-GPU004   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
-GPU005   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
-GPU006   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
-GPU008   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/restrictions.odin); outside gate commands
-GPU010   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/compute_graph.odin); outside gate commands
-GPU011   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/compute_graph.odin); outside gate commands
 GPU012   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/multigpu.odin); outside gate commands
 GPU013   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/multigpu.odin); outside gate commands
 
