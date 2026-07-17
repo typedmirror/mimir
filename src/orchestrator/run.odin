@@ -6,6 +6,7 @@ package orchestrator
 // (prerequisite); Flow is derived (auto-enabled iff Check or Security is
 // selected — the only passes that consume flow_result).
 
+import core    "mimir:core"
 import parser  "mimir:parser"
 import binder  "mimir:binder"
 import checker "mimir:checker"
@@ -14,9 +15,13 @@ import lintpkg "mimir:lint"     // aliased: frees `lint` as the pass-proc name (
 import secpkg  "mimir:security" // aliased: frees `security` as the pass-proc name
 import perfpkg "mimir:perf"     // aliased: frees `perf` as the pass-proc name
 import safepkg "mimir:safety"   // aliased: frees `safety` as the pass-proc name
+import gpupkg  "mimir:gpu"      // aliased: frees `gpu` as the pass-proc name. Legal direction:
+                                 // orchestrator→gpu (DAG); the reverse (checker→gpu) is a cycle
+                                 // and is banned (S wave D1 ruling) — this file never imports checker
+                                 // FROM gpu, only calls gpu's existing public API one-way.
 
 // Bind is implicit; Flow is derived from the set.
-Pass :: enum { Check, Concurrency, Lint, Security, Perf, Safety }
+Pass :: enum { Check, Concurrency, Lint, Security, Perf, Safety, GPU }
 Pass_Set :: bit_set[Pass]
 
 // What reaches check_scope as import types (R5 policy matrix; preserving
@@ -38,6 +43,7 @@ Run_Config :: struct {
 	security_config: secpkg.Security_Config,
 	perf_config:     perfpkg.Perf_Config,
 	safety_config:   safepkg.Safety_Config,
+	gpu_config:      gpupkg.GPU_Config,
 	// Full_Multi only (step G). All five are shared, caller-owned multi-
 	// module state — the graph never takes ownership. (shared_builtins,
 	// virtual_registry, module_info are tree adaptations beyond R5's sketch:
@@ -79,6 +85,7 @@ run :: proc(g: ^Analysis_Graph, cfg: Run_Config) {
 	if .Security in cfg.passes { security(g, &cfg.security_config) }
 	if .Perf in cfg.passes { perf(g, &cfg.perf_config) }
 	if .Safety in cfg.passes { safety(g, &cfg.safety_config) }
+	if .GPU in cfg.passes { gpu(g, &cfg.gpu_config) }
 }
 
 // Virtual_Only check: the plain single-file checker — private registry,
@@ -184,5 +191,49 @@ safety :: proc(g: ^Analysis_Graph, config: ^safepkg.Safety_Config) {
 	if !g.bound { bind(g) }
 	diags := safepkg.analyze_safety(g.module, &g.bind_result, g.file_path, config, g.allocator)
 	g.safety_diags = diags
+	for d in diags { emit(g, d) }
+}
+
+// GPU pass: @gpu subset validation (GPU001-010, restrictions.odin) always
+// runs — find_gpu_functions is internal to validate_file and is a fast
+// no-op on files with no @gpu functions. Graph-level checks (GPU011 shape
+// mismatch via extract_graph; GPU012/013 multi-device via analyze_multigpu)
+// are gated BY CONSTRUCTION on validate_file's own gpu_funcs result being
+// non-empty: analyze_multigpu scans ALL functions, not just @gpu ones, so
+// calling it unconditionally would risk new diagnostics on ordinary
+// non-@gpu code. Gating at this call site keeps the regression surface on
+// non-@gpu files at zero (S-wave lead ruling, checkpoint 1 amendment).
+gpu :: proc(g: ^Analysis_Graph, config: ^gpupkg.GPU_Config) {
+	if !g.bound { bind(g) }
+
+	// Fresh, throwaway registry + type context per file — mirrors cmd_gpu's
+	// own mini-pipeline (main.odin) exactly. Never shares the Check pass's
+	// registry: GPU_Type_Context resolves Tensor[...] annotations
+	// syntactically (literal identifier match against gpu_names), independent
+	// of the main checker's symbol/import resolution — so this pass is
+	// unaffected by whatever the Check pass does or does not resolve.
+	reg := checker.init_registry(g.allocator)
+	type_ctx := gpupkg.init_gpu_types(&reg, g.allocator)
+
+	diags := make([dynamic]core.Diagnostic, 0, 8, g.allocator)
+
+	restriction_diags, gpu_funcs := gpupkg.validate_file(
+		g.module, &g.bind_result, &type_ctx, g.file_path, config, g.allocator,
+	)
+	for d in restriction_diags { append(&diags, d) }
+
+	// Graph-level checks — gated on ≥1 discovered @gpu function (see header).
+	if len(gpu_funcs) > 0 {
+		multigpu_diags := make([dynamic]core.Diagnostic, 0, 4, g.allocator)
+		gpupkg.analyze_multigpu(g.module, &g.bind_result, g.file_path, &multigpu_diags, g.allocator)
+		for d in multigpu_diags { append(&diags, d) }
+
+		for func in gpu_funcs {
+			_, graph_diags := gpupkg.extract_graph(func, &g.bind_result, &type_ctx, g.file_path, g.allocator)
+			for d in graph_diags { append(&diags, d) }
+		}
+	}
+
+	g.gpu_diags = diags[:]
 	for d in diags { emit(g, d) }
 }
