@@ -51,42 +51,19 @@ E000     [other-command] emitted only by the LSP server (src/lsp/analysis.odin) 
 #  the independent verifier's stale-waiver flag. Doctrine: stale = removed.)
 
 # ---- [coverage-gap] reachable via `mimir check` (checker domain passes) ----
-API005   [coverage-gap] src/checker/api_contract_check.odin; no corpus file triggers this API-contract variant; T3b fixture candidate
-COMPAT002 [coverage-gap] src/checker/compat_check.odin; no corpus file triggers this version-compat rule; T3b fixture candidate
-COMPAT003 [coverage-gap] src/checker/compat_check.odin; no corpus file triggers this version-compat rule; T3b fixture candidate
-DEP002   [coverage-gap] src/checker/compat_check.odin; no corpus file triggers this deprecation rule; T3b fixture candidate
-DATA002  [coverage-gap] src/checker/infer.odin (dataframe domain); no corpus file triggers it; T3b fixture candidate
 DB002    [coverage-gap] src/checker/infer.odin (db query result schema); no corpus file triggers it; T3b fixture candidate
 JSON002  [coverage-gap] src/checker/infer.odin (json schema type); no corpus file triggers it; T3b fixture candidate
 JSON003  [coverage-gap] src/checker/json_check.odin; no corpus file triggers it; T3b fixture candidate
 M001     [coverage-gap] circular-import diagnostic (src/modules/graph.odin); corpus has no project-mode import cycle; T3b fixture candidate
-MATCH002 [coverage-gap] src/checker/infer.odin (match statement rule); no corpus file triggers it since the S90 FP fix; T3b fixture candidate
-P001     [coverage-gap] parse-drop warning (src/parser, T1d) requires deliberately-broken syntax; the gate corpus (conformance+smoke) is valid-Python by design. Permanently exercised by tests/scripts/t1_trust_test.py via tests/fixtures/trust_t1/parse_drop/. Waiver ruled by lead at Phase T integration, 2026-07-15.
-PROC002  [coverage-gap] src/checker/crossproc_check.odin; no corpus file triggers it; T3b fixture candidate
-RT001    [coverage-gap] src/checker/runtime_check.odin; no corpus file triggers it; T3b fixture candidate
-RT002    [coverage-gap] src/checker/runtime_check.odin; no corpus file triggers it; T3b fixture candidate
-RT003    [coverage-gap] src/checker/runtime_check.odin; no corpus file triggers it; T3b fixture candidate
-RT005    [coverage-gap] src/checker/runtime_check.odin; no corpus file triggers it; T3b fixture candidate
-SER002   [coverage-gap] src/checker/serial_check.odin; no corpus file triggers it; T3b fixture candidate
 # (SHAPE001-003 waivers removed 2026-07-15 at Phase T integration: the codes
 #  now fire across the corpus — unblocked by the T5 crash fixes — per the
 #  independent verifier's stale-waiver flag.)
-T013     [coverage-gap] src/checker/infer.odin; no corpus file triggers this type rule; T3b fixture candidate
-T015     [coverage-gap] src/checker/checker.odin; no corpus file triggers this type rule; T3b fixture candidate
 TEST001  [coverage-gap] src/checker/test_check.odin (pytest mock rule); no corpus file triggers it; T3b fixture candidate
-TIME001  [coverage-gap] src/checker/time_encoding_check.odin; no corpus file triggers it; T3b fixture candidate
-CONC007  [coverage-gap] src/concurrency/rules.odin; no corpus file triggers it under check; T3b fixture candidate
-CONC008  [coverage-gap] src/concurrency/concurrency.odin (asyncio.gather rule); no corpus file triggers it under check; T3b fixture candidate
 
 # ---- [coverage-gap] reachable via `mimir lint` ----
-L008     [coverage-gap] compare-to-none rule (src/lint/rules.odin); no lint_*.py corpus file triggers it; T3b fixture candidate
-L011     [coverage-gap] builtin-shadow rule (src/lint/rules.odin); no lint_*.py corpus file triggers it; T3b fixture candidate
 
 # ---- [coverage-gap] reachable via `mimir perf` ----
-PERF009  [coverage-gap] redundant-sorted rule (src/perf/rules.odin); no perf corpus file triggers it; T3b fixture candidate
-PERF010  [coverage-gap] list-wrapping-comprehension rule (src/perf/rules.odin); no perf corpus file triggers it; T3b fixture candidate
-PROF001  [coverage-gap] quadratic-nested-loop rule (src/perf/rules.odin); no perf corpus file triggers it; T3b fixture candidate
-PROF002  [coverage-gap] blocking-call-in-loop rule (src/perf/rules.odin); no perf corpus file triggers it; T3b fixture candidate
 
 # ---- [coverage-gap] reachable via `mimir safety` ----
-SAF011   [coverage-gap] mutable-class-variable rule (src/safety/rules.odin); no safety corpus file triggers it; T3b fixture candidate
+DATA002  [coverage-gap] FIRES under conform (virtual-only path, fixture gap_data002.py marker-matched) but SILENT under CLI check — registry-reinit family 4th instance (init_virtual_registry double-init reassigns data singleton Type_IDs; same mechanism blocks DB002/JSON002/JSON003). Wave-2 structural fix unparks all four. Ruled by lead at Wave C close, 2026-07-17.
+API005   [coverage-gap] fixture withdrawn at Wave C close: the author's openapi.json overwrote/collided with the PRE-EXISTING tracked corpus openapi.json (which api_contract.py's API001/API002 depend on); lead's cleanup then briefly deleted the tracked file (restored). Re-land needs a fixture designed against the existing corpus json or an isolated dir. Lead ruling 2026-07-17, corrected same day.
