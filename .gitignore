@@ -7,9 +7,9 @@ build/
 __pycache__/
 
 # Binaries
-mimir
-mimir_bin
-mimir_test
+/mimir
+/mimir_bin
+/mimir_test
 
 # Editor/IDE
 ols.json
@@ -20,7 +20,7 @@ ols.json
 .claude/
 CLAUDE.md
 
-# Development state docs (local only, never committed)
-docs/*.md
+# Development state docs and internal specs (local only, never committed)
+docs/
 
 
