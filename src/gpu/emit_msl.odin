@@ -13,10 +13,14 @@ emit_msl :: proc(
 	type_ctx: ^GPU_Type_Context,
 	bindings: ^Binding_Info,
 	allocator: mem.Allocator,
-) -> string {
+) -> (string, bool) {
+	use_matmul := has_matmul(graph)
+	if use_matmul && !gpu_validate_2d_kernel(graph, "msl") {
+		return "", false
+	}
+
 	b := strings.builder_make(0, 2048, allocator)
 	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx, .MSL)
-	use_matmul := has_matmul(graph)
 
 	fmt.sbprint(&b, "#include <metal_stdlib>\nusing namespace metal;\n\n")
 
@@ -71,7 +75,7 @@ emit_msl :: proc(
 	}
 
 	fmt.sbprint(&b, "}\n")
-	return strings.to_string(b)
+	return strings.to_string(b), true
 }
 
 msl_emit_node :: proc(
@@ -347,8 +351,24 @@ msl_input_ref :: proc(graph: ^Compute_Graph, nid: GPU_Node_ID, bindings: ^Bindin
 	node := get_node(graph, nid)
 	if node == nil { return "0.0f" }
 	if node.kind == .Param {
-		// MatMul handles its own param indexing; other ops use tid
-		return fmt.tprintf("param_%s[tid]", node.name)
+		// MatMul handles its own param indexing; other ops index by thread.
+		if !use_matmul {
+			return fmt.tprintf("param_%s[tid]", node.name)
+		}
+		// 2D (matmul) mode: no linear `tid` is declared — index by the
+		// broadcast-aware row/col that IS declared. gpu_validate_2d_kernel
+		// already refused emission for any pattern this can't classify.
+		m, n, ok := gpu_kernel_ref_shape(graph)
+		if ok {
+			switch gpu_param_bcast_mode(node.output_shape, m, n) {
+			case .Full:   return fmt.tprintf("param_%s[row * N + col]", node.name)
+			case .Col:    return fmt.tprintf("param_%s[col]", node.name)
+			case .Row:    return fmt.tprintf("param_%s[row]", node.name)
+			case .Scalar: return fmt.tprintf("param_%s[0]", node.name)
+			case .Unsupported:
+			}
+		}
+		return fmt.tprintf("param_%s[row * N + col]", node.name)
 	}
 	return fmt.tprintf("v%d", int(nid))
 }

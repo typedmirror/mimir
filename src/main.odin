@@ -3177,9 +3177,13 @@ cmd_repl_gpu :: proc(bridge: ^parser.Bridge, arena: ^core.Analysis_Arena) {
 
 					// Generate WGSL preview
 					bindings := gpu.assign_bindings(&graph, arena.allocator)
-					wgsl := gpu.emit_wgsl(&graph, &type_ctx, &bindings, arena.allocator)
-					wgsl_lines := strings.count(wgsl, "\n")
-					fmt.printfln("    WGSL: %d lines generated", wgsl_lines)
+					wgsl, wgsl_ok := gpu.emit_wgsl(&graph, &type_ctx, &bindings, arena.allocator)
+					if wgsl_ok {
+						wgsl_lines := strings.count(wgsl, "\n")
+						fmt.printfln("    WGSL: %d lines generated", wgsl_lines)
+					} else {
+						fmt.printfln("    WGSL: refused (unsupported dispatch-mode combination — see stderr)")
+					}
 				}
 				fmt.println()
 			}
@@ -4138,6 +4142,7 @@ cmd_compile_gpu :: proc(args: []string) {
 	type_ctx := gpu.init_gpu_types(&reg, p.arena.allocator)
 
 	total_kernels := 0
+	refused_kernels := 0
 
 	backends_to_emit: [dynamic]gpu.Emit_Backend
 	if emit_all {
@@ -4189,7 +4194,8 @@ cmd_compile_gpu :: proc(args: []string) {
 					sub := gpu.extract_subgraph(&graph, grp, &node_group_map, p.arena.allocator)
 
 					for be in backends_to_emit {
-						data, is_binary := gpu.emit_kernel(&sub, &type_ctx, be, p.arena.allocator)
+						data, is_binary, kok := gpu.emit_kernel(&sub, &type_ctx, be, p.arena.allocator)
+						if !kok { refused_kernels += 1; continue }
 						if data == nil { continue }
 						ext := gpu.backend_extension(be)
 						emit_gpu_output(output_dir, fmt.tprintf("%s_%d", graph.func_name, grp.id), ext, data, is_binary, verbose, &graph, be)
@@ -4204,7 +4210,8 @@ cmd_compile_gpu :: proc(args: []string) {
 				}
 
 				for be in backends_to_emit {
-					data, is_binary := gpu.emit_kernel(&graph, &type_ctx, be, p.arena.allocator)
+					data, is_binary, kok := gpu.emit_kernel(&graph, &type_ctx, be, p.arena.allocator)
+					if !kok { refused_kernels += 1; continue }
 					if data == nil { continue }
 					ext := gpu.backend_extension(be)
 					emit_gpu_output(output_dir, graph.func_name, ext, data, is_binary, verbose, &graph, be)
@@ -4238,7 +4245,8 @@ cmd_compile_gpu :: proc(args: []string) {
 					fmt.printfln("  Backward: %d nodes (forward: %d)", len(backward.nodes), len(graph.nodes))
 				}
 				for be in backends_to_emit {
-					data, is_binary := gpu.emit_kernel(&backward, &type_ctx, be, p.arena.allocator)
+					data, is_binary, kok := gpu.emit_kernel(&backward, &type_ctx, be, p.arena.allocator)
+					if !kok { refused_kernels += 1; continue }
 					if data == nil { continue }
 					ext := gpu.backend_extension(be)
 					emit_gpu_output(output_dir, backward.func_name, ext, data, is_binary, verbose, &backward, be)
@@ -4248,6 +4256,14 @@ cmd_compile_gpu :: proc(args: []string) {
 		}
 	}
 
+	if refused_kernels > 0 {
+		// Loud refusal: per-kernel diagnostics already went to stderr above.
+		// "emitted N, refused 0" would be semi-silent green — the summary
+		// line must state refusals explicitly, and the exit code must be
+		// nonzero, even if some other kernel(s) in the same run succeeded.
+		fmt.printfln("mimir compile-gpu: emitted %d kernel(s), refused %d", total_kernels, refused_kernels)
+		os.exit(1)
+	}
 	if total_kernels > 0 {
 		fmt.printfln("mimir compile-gpu: emitted %d kernel(s)", total_kernels)
 	} else {

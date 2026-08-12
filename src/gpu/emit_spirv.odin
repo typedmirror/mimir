@@ -191,7 +191,14 @@ emit_spirv :: proc(
 	type_ctx: ^GPU_Type_Context,
 	bindings: ^Binding_Info,
 	allocator: mem.Allocator,
-) -> []u8 {
+) -> ([]u8, bool) {
+	if has_matmul(graph) {
+		fmt.eprintfln(
+			"mimir compile-gpu: spirv: kernel '%s' uses matmul, which is not implemented for the SPIR-V backend (elementwise-only stub) — refusing rather than emitting a silently-wrong passthrough; use msl/wgsl for matmul kernels",
+			graph.func_name)
+		return nil, false
+	}
+
 	m := spirv_init(allocator)
 
 	// --- Preamble ---
@@ -355,7 +362,7 @@ emit_spirv :: proc(
 	spirv_emit(&m.functions, SPIRV_OP_FUNCTION_END)
 
 	// --- Assemble ---
-	return spirv_assemble(&m, allocator)
+	return spirv_assemble(&m, allocator), true
 }
 
 spirv_emit_graph_node :: proc(

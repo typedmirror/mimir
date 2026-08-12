@@ -123,29 +123,161 @@ has_reduction :: proc(graph: ^Compute_Graph) -> bool {
 	return false
 }
 
+// ==================== 2D-kernel dispatch validation ====================
+//
+// MSL/WGSL emit two mutually-exclusive per-thread indexing modes for a single
+// (unfused) kernel: 1D elementwise (`tid`, declared only in that mode) and 2D
+// matmul (`row`/`col`/`gid`, declared only in that mode). A graph that mixes
+// matmul with a linear-thread-group construct (reduction ops, or Transpose's
+// shared-memory tile path) in ONE unfused kernel cannot be correctly indexed
+// under the current single-dispatch design — nor can a Param whose shape
+// doesn't broadcast cleanly against the kernel's 2D output shape, nor two
+// MatMuls with different (M,K,N) sharing one `dims` uniform. Rather than
+// silently emit code referencing an undeclared identifier (MSL/WGSL) or
+// silently mis-index a buffer, refuse loudly (project invariant: no silent
+// anything) — the caller must use `--fuse` to split into separate kernels.
+
+// Reference 2D shape [M, N] for row/col broadcast indexing in a matmul-mode
+// kernel — the graph's final output shape, which is what `result[row*N+col]`
+// already assumes.
+gpu_kernel_ref_shape :: proc(graph: ^Compute_Graph) -> (m: int, n: int, ok: bool) {
+	if len(graph.outputs) == 0 { return 0, 0, false }
+	out := get_node(graph, graph.outputs[0])
+	if out == nil || out.output_shape == nil || len(out.output_shape) != 2 { return 0, 0, false }
+	return out.output_shape[0], out.output_shape[1], true
+}
+
+Param_Bcast_Mode :: enum {
+	Full,        // 2D (M,N) — same shape as kernel output, index [row*N+col]
+	Col,         // 1D (N,) or 2D (1,N) — broadcast down rows, index [col]
+	Row,         // 2D (M,1) — broadcast across columns, index [row]
+	Scalar,      // 1D (1,) or 2D (1,1) — index [0]
+	Unsupported, // does not broadcast cleanly against [M,N] under numpy rules
+}
+
+gpu_param_bcast_mode :: proc(shape: []int, m: int, n: int) -> Param_Bcast_Mode {
+	if shape == nil || len(shape) == 0 { return .Scalar }
+	switch len(shape) {
+	case 1:
+		d := shape[0]
+		if d == n { return .Col }
+		if d == 1 { return .Scalar }
+		return .Unsupported
+	case 2:
+		d0, d1 := shape[0], shape[1]
+		if d0 == m && d1 == n { return .Full }
+		if d0 == m && d1 == 1 { return .Row }
+		if d0 == 1 && d1 == n { return .Col }
+		if d0 == 1 && d1 == 1 { return .Scalar }
+		return .Unsupported
+	}
+	return .Unsupported
+}
+
+// True if `param_id` is consumed by any node other than MatMul — MatMul
+// indexes its own operands directly (row*K+k / k*N+col) and must not be
+// reclassified against the kernel's [M,N] output shape.
+gpu_param_used_outside_matmul :: proc(graph: ^Compute_Graph, param_id: GPU_Node_ID) -> bool {
+	for node in graph.nodes {
+		if node.kind == .MatMul { continue }
+		for inp in node.inputs {
+			if inp == param_id { return true }
+		}
+	}
+	return false
+}
+
+// Validate that a matmul-mode (2D-dispatch) kernel can be correctly emitted
+// under the current single row/col indexing scheme. Prints a diagnostic and
+// returns false when it cannot — callers must not emit in that case.
+gpu_validate_2d_kernel :: proc(graph: ^Compute_Graph, backend_name: string) -> bool {
+	m, n, have_ref := gpu_kernel_ref_shape(graph)
+
+	matmul_count := 0
+	ref_k, ref_n2 := -1, -1
+	ref_m2 := -1
+
+	for &node in graph.nodes {
+		#partial switch node.kind {
+		case .Sum, .Mean, .Max, .Min, .Softmax, .CrossEntropy,
+		     .Conv2d, .MaxPool2d, .AvgPool2d:
+			fmt.eprintfln(
+				"mimir compile-gpu: %s: kernel '%s' mixes matmul (2D row/col dispatch) with '%s' (linear thread-group reduction) in one unfused kernel — unsupported dispatch-mode combination; use --fuse to split into separate kernels",
+				backend_name, graph.func_name, op_kind_string(node.kind))
+			return false
+
+		case .Transpose:
+			a := get_node(graph, node.inputs[0])
+			if a != nil && a.kind == .Param && len(a.name) > 0 {
+				fmt.eprintfln(
+					"mimir compile-gpu: %s: kernel '%s' mixes matmul (2D row/col dispatch) with a shared-memory Transpose tile (linear thread indexing) in one unfused kernel — unsupported dispatch-mode combination; use --fuse to split into separate kernels",
+					backend_name, graph.func_name)
+				return false
+			}
+
+		case .MatMul:
+			if node.output_shape != nil && len(node.output_shape) == 2 {
+				k := -1
+				if len(node.inputs) >= 1 {
+					a := get_node(graph, node.inputs[0])
+					if a != nil && a.output_shape != nil && len(a.output_shape) >= 1 {
+						k = a.output_shape[len(a.output_shape)-1]
+					}
+				}
+				mm, nn := node.output_shape[0], node.output_shape[1]
+				if matmul_count == 0 {
+					ref_m2, ref_k, ref_n2 = mm, k, nn
+				} else if mm != ref_m2 || k != ref_k || nn != ref_n2 {
+					fmt.eprintfln(
+						"mimir compile-gpu: %s: kernel '%s' chains multiple matmuls with different shapes ([%d,%d]x[%d,%d] vs [%d,%d]x[%d,%d]) in one unfused kernel — a single `dims` (M,K,N) uniform cannot represent both; use --fuse to split into separate kernels",
+						backend_name, graph.func_name, ref_m2, ref_k, ref_k, ref_n2, mm, k, k, nn)
+					return false
+				}
+				matmul_count += 1
+			}
+
+		case .Param:
+			if !have_ref { continue }
+			if !gpu_param_used_outside_matmul(graph, node.id) { continue }
+			if gpu_param_bcast_mode(node.output_shape, m, n) == .Unsupported {
+				fmt.eprintfln(
+					"mimir compile-gpu: %s: kernel '%s' param '%s' has shape %v which cannot be statically broadcast against 2D kernel shape [%d, %d] (unsupported broadcast pattern)",
+					backend_name, graph.func_name, node.name, node.output_shape, m, n)
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Top-level emit dispatcher.
 emit_kernel :: proc(
 	graph: ^Compute_Graph,
 	type_ctx: ^GPU_Type_Context,
 	backend: Emit_Backend,
 	allocator: mem.Allocator,
-) -> (data: []u8, is_binary: bool) {
+) -> (data: []u8, is_binary: bool, ok: bool) {
 	bindings := assign_bindings(graph, allocator)
 
 	switch backend {
 	case .WGSL:
-		s := emit_wgsl(graph, type_ctx, &bindings, allocator)
-		return transmute([]u8)s, false
+		s, wok := emit_wgsl(graph, type_ctx, &bindings, allocator)
+		if !wok { return nil, false, false }
+		return transmute([]u8)s, false, true
 	case .MSL:
-		s := emit_msl(graph, type_ctx, &bindings, allocator)
-		return transmute([]u8)s, false
+		s, mok := emit_msl(graph, type_ctx, &bindings, allocator)
+		if !mok { return nil, false, false }
+		return transmute([]u8)s, false, true
 	case .SPIRV:
-		return emit_spirv(graph, type_ctx, &bindings, allocator), true
+		d, sok := emit_spirv(graph, type_ctx, &bindings, allocator)
+		if !sok { return nil, true, false }
+		return d, true, true
 	case .PTX:
-		s := emit_ptx(graph, type_ctx, &bindings, allocator)
-		return transmute([]u8)s, false
+		s, pok := emit_ptx(graph, type_ctx, &bindings, allocator)
+		if !pok { return nil, false, false }
+		return transmute([]u8)s, false, true
 	}
-	return nil, false
+	return nil, false, false
 }
 
 // Backend file extension.

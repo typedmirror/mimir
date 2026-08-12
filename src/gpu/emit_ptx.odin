@@ -13,7 +13,14 @@ emit_ptx :: proc(
 	type_ctx: ^GPU_Type_Context,
 	bindings: ^Binding_Info,
 	allocator: mem.Allocator,
-) -> string {
+) -> (string, bool) {
+	if has_matmul(graph) {
+		fmt.eprintfln(
+			"mimir compile-gpu: ptx: kernel '%s' uses matmul, which is not implemented for the PTX backend (elementwise-only stub) — refusing rather than emitting a silently-wrong passthrough; use msl/wgsl for matmul kernels",
+			graph.func_name)
+		return "", false
+	}
+
 	b := strings.builder_make(0, 2048, allocator)
 	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx, .PTX)
 	is_float := etype == ".f32"
@@ -103,7 +110,7 @@ emit_ptx :: proc(
 
 	fmt.sbprint(&b, "\n    ret;\n")
 	fmt.sbprint(&b, "}\n")
-	return strings.to_string(b)
+	return strings.to_string(b), true
 }
 
 ptx_emit_node :: proc(
