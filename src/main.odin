@@ -1522,37 +1522,39 @@ cmd_check :: proc(args: []string) {
 	if sarif_mode { sarif_diags = make([dynamic]core.Diagnostic, 0, 32, p.arena.allocator) }
 
 	// Single vs multi-file mode selection.
-	// Multi-file when: directory target, project root found, or single file in a Python package.
+	// Multi-file when: directory target, or single file in a Python package (__init__.py sibling).
+	//
+	// Policy A (S114 launch-blocker ruling, docs/DECISIONS.md): a single-FILE
+	// argument to `check` ALWAYS means exactly that file, for both relative
+	// and absolute path forms — no silent ancestor-.git/pyproject.toml/setup.py
+	// walk-up promotion to whole-project mode. That promotion (S96 "B2") was
+	// asymmetric by construction (find_project_root's up-walk only reliably
+	// reaches real filesystem ancestors for absolute paths — see
+	// core.find_project_root) and violated "no silent anything": a single-file
+	// check could silently balloon into checking the entire repository,
+	// including directories like .claude/worktrees/ that must never be
+	// traversed. Every existing gate already assumes single-file-argument
+	// checks stay single-file. Project-wide checking remains available via an
+	// explicit directory target (`mimir check .` / `mimir check src/`).
+	// find_project_root remains available in core/utils.odin for a possible
+	// future explicit `--project` opt-in flag (not implemented here).
 	errors := 0
 	use_multi := len(p.files) > 1
 	if len(p.files) == 1 && strings.has_suffix(target, ".py") {
-		// B2: Auto-detect project root by walking up to .git/pyproject.toml/mimir.toml/setup.py
-		project_root := core.find_project_root(target, p.arena.allocator)
-		if len(project_root) > 0 {
-			root_files, root_err := core.find_python_files(project_root)
-			if root_err == nil && len(root_files) > 1 {
-				use_multi = true
-				p.files = root_files
-				target = project_root
-			}
-		}
-
 		// Fallback: check if file is in a Python package (has __init__.py sibling)
-		if !use_multi {
-			dir := target
-			for i := len(dir) - 1; i >= 0; i -= 1 {
-				if dir[i] == '/' { dir = dir[:i]; break }
-				if i == 0 { dir = "." }
-			}
-			init_path := strings.concatenate({dir, "/__init__.py"}, p.arena.allocator)
-			init_info, init_err := os.stat(init_path, context.temp_allocator)
-			if init_err == nil {
-				os.file_info_delete(init_info, context.temp_allocator)
-				pkg_files, pkg_err := core.find_python_files(dir)
-				if pkg_err == nil && len(pkg_files) > 1 {
-					use_multi = true
-					p.files = pkg_files
-				}
+		dir := target
+		for i := len(dir) - 1; i >= 0; i -= 1 {
+			if dir[i] == '/' { dir = dir[:i]; break }
+			if i == 0 { dir = "." }
+		}
+		init_path := strings.concatenate({dir, "/__init__.py"}, p.arena.allocator)
+		init_info, init_err := os.stat(init_path, context.temp_allocator)
+		if init_err == nil {
+			os.file_info_delete(init_info, context.temp_allocator)
+			pkg_files, pkg_err := core.find_python_files(dir)
+			if pkg_err == nil && len(pkg_files) > 1 {
+				use_multi = true
+				p.files = pkg_files
 			}
 		}
 	}

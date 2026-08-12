@@ -6,6 +6,7 @@ import "core:strings"
 
 IGNORE_DIRS :: [?]string{
 	".git",
+	".claude",
 	"__pycache__",
 	".venv",
 	"venv",
@@ -64,6 +65,14 @@ _walk_dir :: proc(dir: string, files: ^[dynamic]string, allocator := context.all
 
 @(private = "file")
 _is_ignored :: proc(name: string) -> bool {
+	// Hidden/dot-directories are NEVER descended into by any directory walk —
+	// this is a general rule, not just the specific IGNORE_DIRS entries below
+	// (S114 launch-blocker fix: .claude/worktrees/ held other agents' full
+	// repo checkouts on disk and was not excluded, so any promoted or
+	// directory-target walk that reached the repo root would recurse into
+	// them). "." and ".." are never returned by directory listing, so this
+	// is safe.
+	if len(name) > 0 && name[0] == '.' { return true }
 	for ignore in IGNORE_DIRS {
 		if name == ignore do return true
 	}
