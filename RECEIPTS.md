@@ -81,7 +81,7 @@ PASS  gpu_shape/positive: D6 precedence — exactly ONE error (GPU011) on the pl
 PASS  gpu_shape/negative: genuine shaped-vs-shaped return mismatch still fires
 PASS  t5/import-requests (exit 0, no signal)
 PASS  t5/import-urllib3 (exit 0, no signal)
-PASS  t5/conc_blocking.py (exit 1, no signal)
+PASS  t5/conc_blocking.py (exit 0, no signal)
 PASS  t5/sec_supply_chain.py (exit 1, no signal)
 PASS  t5/conformance-dir-mode (exit 1, no signal)
 

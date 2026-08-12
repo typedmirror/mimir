@@ -10,7 +10,6 @@ everyone measures against the same commit.
 | | |
 |---|---|
 | Path | set `MYPY_DIR` (env var) or pass `--mypy-dir PATH` |
-| Legacy fallback | `/Users/ivermektin/Desktop/mypy` — used only if `MYPY_DIR` is unset AND this path already exists on the machine |
 | Repository | `https://github.com/python/mypy.git` |
 | Pinned commit | `25b210d2cdf3f5d4e17a96eb7ed25f54456bc631` |
 | Baseline at this pin | 2902/6029 runnable cases (48.1%), measured 2026-07-15 |
@@ -29,11 +28,8 @@ and keeps the download small; a full clone works too.)
 Set `MYPY_DIR` in your shell profile (or export it before running the
 scripts) so `mypy_test_runner.py`, `triage.py`, and `gap_analysis.py` all
 pick it up. `--mypy-dir PATH` on any of those scripts overrides `MYPY_DIR`
-for a single run. If neither is set, the scripts fall back to the legacy
-path `/Users/ivermektin/Desktop/mypy` when it exists (kept only for
-machines with a pre-existing checkout there); if that's also absent, the
-scripts print this file's fetch instructions and exit 1 — no default path
-is required.
+for a single run. If neither is set, the scripts print this file's fetch
+instructions and exit 1 — there is no default path.
 
 ## Verify
 

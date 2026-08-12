@@ -243,16 +243,12 @@ def evaluate_case(case: TestCase, mimir_bin: str) -> TestResult:
 def _default_mypy_dir():
     """Resolve the default mypy checkout path.
 
-    Precedence: MYPY_DIR env var, then the original author's local path
-    (kept as a last-resort fallback for machines where it already exists),
-    then None (caller must tell the user to set MYPY_DIR).
+    Precedence: MYPY_DIR env var, else None (caller must tell the
+    user to set MYPY_DIR or pass --mypy-dir).
     """
     env = os.environ.get('MYPY_DIR')
     if env:
         return env
-    legacy = '/Users/ivermektin/Desktop/mypy'
-    if os.path.isdir(legacy):
-        return legacy
     return None
 
 
@@ -417,6 +413,8 @@ def main():
             print(f"WARNING: mypy checkout at {head[:12]}, pinned commit is "
                   f"{PINNED_COMMIT[:12]} — results NOT comparable to the "
                   "baseline (see tests/scripts/MYPY_DEP.md)")
+        elif head:
+            print(f"mypy checkout @ {head[:12]} (matches pin)")
     except (OSError, subprocess.TimeoutExpired):
         print("WARNING: could not verify mypy checkout commit "
               "(git unavailable?) — see tests/scripts/MYPY_DEP.md")
