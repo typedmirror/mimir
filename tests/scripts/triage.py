@@ -17,7 +17,7 @@ from collections import defaultdict
 
 # Reuse the test runner's infrastructure
 sys.path.insert(0, os.path.dirname(__file__))
-from mypy_test_runner import parse_test_file, evaluate_case
+from mypy_test_runner import parse_test_file, evaluate_case, _default_mypy_dir
 
 
 def extract_error_info(output: str) -> list[dict]:
@@ -200,13 +200,20 @@ def run_triage(mypy_dir: str, mimir_bin: str, save_path: str = None,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Mypy test triage')
-    parser.add_argument('--mypy-dir', default='/Users/ivermektin/Desktop/mypy')
+    parser.add_argument('--mypy-dir', default=_default_mypy_dir(),
+                       help='Path to mypy repo (env: MYPY_DIR)')
     parser.add_argument('--mimir-bin', default='./mimir_bin')
     parser.add_argument('--save', help='Save baseline to JSON file')
     parser.add_argument('--diff', help='Diff against saved baseline JSON')
     parser.add_argument('--top', type=int, default=20, help='Show top N patterns')
     args = parser.parse_args()
 
+    if args.mypy_dir is None:
+        print("Error: no mypy checkout found.")
+        print("Set the MYPY_DIR environment variable to a mypy checkout "
+              "(see tests/scripts/MYPY_DEP.md for the pinned commit and "
+              "fetch instructions), or pass --mypy-dir PATH.")
+        sys.exit(1)
     if not os.path.isdir(args.mypy_dir):
         print(f"Error: mypy directory not found at {args.mypy_dir}")
         sys.exit(1)

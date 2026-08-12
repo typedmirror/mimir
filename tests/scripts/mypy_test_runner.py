@@ -240,6 +240,22 @@ def evaluate_case(case: TestCase, mimir_bin: str) -> TestResult:
     )
 
 
+def _default_mypy_dir():
+    """Resolve the default mypy checkout path.
+
+    Precedence: MYPY_DIR env var, then the original author's local path
+    (kept as a last-resort fallback for machines where it already exists),
+    then None (caller must tell the user to set MYPY_DIR).
+    """
+    env = os.environ.get('MYPY_DIR')
+    if env:
+        return env
+    legacy = '/Users/ivermektin/Desktop/mypy'
+    if os.path.isdir(legacy):
+        return legacy
+    return None
+
+
 def run_tests(mypy_dir: str, mimir_bin: str, file_filter: str = None,
               dry_run: bool = False, verbose: bool = False,
               max_cases: int = 0) -> dict:
@@ -346,8 +362,8 @@ def run_tests(mypy_dir: str, mimir_bin: str, file_filter: str = None,
 
 def main():
     parser = argparse.ArgumentParser(description='Run mypy tests against mimir')
-    parser.add_argument('--mypy-dir', default='/Users/ivermektin/Desktop/mypy',
-                       help='Path to mypy repo')
+    parser.add_argument('--mypy-dir', default=_default_mypy_dir(),
+                       help='Path to mypy repo (env: MYPY_DIR)')
     parser.add_argument('--mimir-bin', default='./mimir_bin',
                        help='Path to mimir binary')
     parser.add_argument('--filter', default=None,
@@ -365,6 +381,17 @@ def main():
     # External dependency: the mypy test corpus is a pinned git checkout.
     # Pin details + fetch instructions: tests/scripts/MYPY_DEP.md
     PINNED_COMMIT = '25b210d2cdf3f5d4e17a96eb7ed25f54456bc631'
+    if args.mypy_dir is None:
+        print("Error: no mypy checkout found.")
+        print("Set the MYPY_DIR environment variable to a mypy checkout "
+              f"pinned at commit {PINNED_COMMIT}, or pass --mypy-dir PATH.")
+        print("Fetch it with:")
+        print("    git clone --filter=blob:none "
+              "https://github.com/python/mypy.git <path>")
+        print(f"    git -C <path> checkout {PINNED_COMMIT}")
+        print("    export MYPY_DIR=<path>")
+        print("Details: tests/scripts/MYPY_DEP.md")
+        sys.exit(1)
     test_data = os.path.join(args.mypy_dir, 'test-data', 'unit')
     if not os.path.isdir(args.mypy_dir) or not os.path.isdir(test_data):
         print(f"Error: mypy checkout not found at {args.mypy_dir}")

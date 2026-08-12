@@ -20,7 +20,7 @@ import sys
 from collections import defaultdict, Counter
 
 sys.path.insert(0, os.path.dirname(__file__))
-from mypy_test_runner import parse_test_file, evaluate_case
+from mypy_test_runner import parse_test_file, evaluate_case, _default_mypy_dir
 
 
 # ============================================================
@@ -421,10 +421,17 @@ def run_gap_analysis(mypy_dir: str, mimir_bin: str):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Feature gap analysis')
-    parser.add_argument('--mypy-dir', default='/Users/ivermektin/Desktop/mypy')
+    parser.add_argument('--mypy-dir', default=_default_mypy_dir(),
+                       help='Path to mypy repo (env: MYPY_DIR)')
     parser.add_argument('--mimir-bin', default='./mimir_bin')
     args = parser.parse_args()
 
+    if args.mypy_dir is None:
+        print("Error: no mypy checkout found.")
+        print("Set the MYPY_DIR environment variable to a mypy checkout "
+              "(see tests/scripts/MYPY_DEP.md for the pinned commit and "
+              "fetch instructions), or pass --mypy-dir PATH.")
+        sys.exit(1)
     if not os.path.isdir(args.mypy_dir):
         print(f"Error: mypy directory not found at {args.mypy_dir}")
         sys.exit(1)

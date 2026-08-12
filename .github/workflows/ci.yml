@@ -31,18 +31,36 @@ jobs:
       - name: Build
         run: odin build src/ -collection:mimir=src/ -out:mimir -o:speed
 
+      - name: Copy test-runner binary
+        run: cp mimir mimir_bin
+
       - name: Fetch typeshed stubs
-        run: ./mimir stubs fetch
+        run: ./mimir_bin stubs fetch
 
       - name: Run conformance tests
-        run: ./mimir conform tests/conformance/
+        run: ./mimir_bin conform tests/conformance/
 
       - name: Run smoke tests
         run: |
-          for f in tests/smoke/*.py; do
+          for f in $(find tests/smoke -name '*.py' | sort); do
             echo "checking $f..."
-            ./mimir check "$f"
+            ./mimir_bin check "$f"
           done
+
+      - name: Run t1 trust gate
+        run: python3 tests/scripts/t1_trust_test.py
+
+      - name: Run every-code-fires gate
+        run: python3 tests/scripts/every_code_fires.py
+
+      - name: Run LSP smoke gate
+        run: python3 tests/scripts/lsp_smoke_test.py
+
+      - name: Run GPU emit backend gate
+        run: python3 tests/scripts/gpu_emit_backend_test.py
+
+      - name: Run shim functional gate
+        run: PYTHONPATH=python python3 tests/scripts/shim_functional_test.py
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
