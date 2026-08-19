@@ -21,8 +21,21 @@ package main
 //   numeric correctness itself in `run` mode, only whether the Metal API
 //   call sequence itself succeeded (compiled, bound, dispatched cleanly).
 //
-//     dispatch  := "1d:<N>"                 -- elementwise/reduction-style;
+//     dispatch  := "1d:<N>"                 -- elementwise-style;
 //                                               dispatchThreads({N,1,1}, {min(N,256),1,1})
+//                | "reduce"                 -- reduction/softmax-style
+//                                               (seam-1 ABI, D-G3v2/D-G4v2(e)):
+//                                               PARSES the emitted kernel's
+//                                               own "exactly 1 threadgroup of
+//                                               N threads" comment and
+//                                               dispatches exactly that many
+//                                               threads in exactly one
+//                                               threadgroup — no size is
+//                                               taken from the CLI, no width
+//                                               is assumed; missing the
+//                                               marker comment is a loud
+//                                               refusal (see
+//                                               parse_dispatch_requirement).
 //                | "2d:<M>:<K>:<N>"          -- matmul-style; binds a
 //                                               `constant uint3&` dims uniform
 //                                               {M,K,N} (12 bytes, mirrors
@@ -268,6 +281,29 @@ Buffer_Spec :: struct {
 	count:    int,    // element count (in: from file size/4; out: from spec)
 }
 
+// Parses the emitter's own dispatch-requirement comment, e.g.:
+//   "// dispatch requirement: exactly 1 threadgroup of 256 threads"
+// out of a raw kernel source string. Returns (thread_count, true) on a
+// match, (0, false) if the marker text isn't present at all — callers must
+// treat that as a loud refusal, never a silent default.
+parse_dispatch_requirement :: proc(src: string) -> (threads: int, ok: bool) {
+	marker :: "exactly 1 threadgroup of "
+	idx := strings.index(src, marker)
+	if idx < 0 {
+		return 0, false
+	}
+	rest := src[idx + len(marker):]
+	end := strings.index(rest, " threads")
+	if end < 0 {
+		return 0, false
+	}
+	n, pok := strconv.parse_int(rest[:end])
+	if !pok || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 run_mode :: proc(argv: []string) {
 	if len(argv) < 3 {
 		run_fail("usage: metal_run_bin run <kernel.metal> <entry> <dispatch> <buffer-spec>...")
@@ -393,8 +429,28 @@ run_mode :: proc(argv: []string) {
 		// empirical repro and disposition).
 		threads_per_grid = MTL.Size{NS.Integer(m), NS.Integer(n), 1}
 		threads_per_threadgroup = MTL.Size{8, 8, 1}
+	} else if dispatch_spec == "reduce" {
+		// Reduction/softmax kernels (seam-1 ABI, D-G3v2/D-G4v2(e), candor):
+		// require EXACTLY one threadgroup dispatched, whatever its width —
+		// the shared-memory tree (threadgroup float sh_N[W]) is sized to
+		// that width and every lane 0..W-1 must run (tail lanes beyond the
+		// real N are guarded in-kernel with an identity value: 0 for sum,
+		// +-INFINITY for max/min, -INFINITY for softmax's max-pass). Under-
+		// dispatching (e.g. only N threads when N < W) leaves shared-memory
+		// slots N..W-1 uninitialized garbage — silently wrong, not a crash.
+		// The emitter states its own requirement in a source comment; this
+		// tool PARSES it rather than assuming a width, so it stays correct
+		// if the emitted block width ever changes.
+		threads, ok := parse_dispatch_requirement(string(kernel_src))
+		if !ok {
+			run_fail("dispatch spec \"reduce\" requires a dispatch-requirement comment " +
+				"(\"exactly 1 threadgroup of N threads\") in %s — none found; refusing to " +
+				"guess a threadgroup width", kernel_path)
+		}
+		threads_per_grid = MTL.Size{NS.Integer(threads), 1, 1}
+		threads_per_threadgroup = MTL.Size{NS.Integer(threads), 1, 1}
 	} else {
-		run_fail("bad dispatch spec %q — want 1d:<N> or 2d:M:K:N", dispatch_spec)
+		run_fail("bad dispatch spec %q — want 1d:<N>, 2d:M:K:N, or reduce", dispatch_spec)
 	}
 
 	queue := device->newCommandQueue()
