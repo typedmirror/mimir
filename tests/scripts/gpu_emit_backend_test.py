@@ -319,6 +319,26 @@ def main():
     dg3v2_reduction_oversize_refusal(mimir_bin, "wgsl")
 
     clause_e_softmax_barrier(mimir_bin, "msl", "metal")
+
+    # G1 wave close (lead): host JS dispatch order must be M-first — the kernel
+    # binds row=gid.x (spans M), col=gid.y (spans N). Transposed order proven
+    # wrong on-device (scale/L2 repro, DECISIONS S115).
+    with tempfile.TemporaryDirectory() as host_dir:
+        subprocess.run(
+            [mimir_bin, "compile-gpu", os.path.join(REPO_ROOT, "tests/gpu/shape_integration.py"),
+             "--backend", "wgsl", "--host", "-o", host_dir],
+            capture_output=True, text=True)
+        js_files = [f for f in os.listdir(host_dir) if f.endswith(".js")]
+        js_text = ""
+        for f in js_files:
+            with open(os.path.join(host_dir, f)) as fh:
+                js_text += fh.read()
+        check("host-js 2D dispatch M-first",
+              "dispatchWorkgroups(Math.ceil(dims.M / 8), Math.ceil(dims.N / 8))" in js_text,
+              f"js files: {js_files}")
+        check("host-js 2D dispatch not N-first",
+              "dispatchWorkgroups(Math.ceil(dims.N / 8), Math.ceil(dims.M / 8))" not in js_text,
+              "transposed dispatch order present")
     clause_e_softmax_barrier(mimir_bin, "wgsl", "wgsl")
 
     clause_f_method_form_activations(mimir_bin, "msl", "metal")

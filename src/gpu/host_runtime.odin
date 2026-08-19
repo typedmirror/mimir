@@ -145,7 +145,12 @@ emit_host_js :: proc(
 	fmt.sbprint(&b, "      passEncoder.setBindGroup(0, bindGroup);\n")
 
 	if is_matmul {
-		fmt.sbprint(&b, "      passEncoder.dispatchWorkgroups(Math.ceil(dims.N / 8), Math.ceil(dims.M / 8));\n")
+		// Dispatch X must span M and Y must span N: the emitted kernel binds
+		// row = gid.x (indexes the M dimension) and col = gid.y (indexes N).
+		// The previous N-first order silently zeroed trailing columns for any
+		// M != N kernel and risked OOB writes for N > M — proven on-device
+		// (Apple M3, G1 wave, scale/L2 empirical repro; DECISIONS S115).
+		fmt.sbprint(&b, "      passEncoder.dispatchWorkgroups(Math.ceil(dims.M / 8), Math.ceil(dims.N / 8));\n")
 	} else {
 		// Compute dispatch size from first input shape
 		fmt.sbprint(&b, "      const numElements = ")
