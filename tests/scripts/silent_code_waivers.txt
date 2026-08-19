@@ -72,3 +72,4 @@ TEST001  [coverage-gap] src/checker/test_check.odin (pytest mock rule); no corpu
 
 # ---- [other-command] emitted outside gate commands ----
 GPU014   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/compute_graph.odin); outside gate commands; fires in tests/scripts/gpu_emit_backend_test.py (subscript refusal, both directions). Ruled by lead at G1 close, 2026-08-19.
+GPU015   [other-command] emitted only by `mimir gpu`/`compile-gpu` (src/gpu/compute_graph.odin); outside gate commands; fires in tests/scripts/gpu_emit_backend_test.py (unknown tensor method refusal, both directions). Ruled by lead at G1 close, 2026-08-19.
