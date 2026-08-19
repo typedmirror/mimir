@@ -60,6 +60,20 @@ jobs:
       - name: Run shim functional gate
         run: PYTHONPATH=python python3 tests/scripts/shim_functional_test.py
 
+      # Metal execution leg (D-G2v2) — macOS-only: vendor:darwin/Metal does
+      # not build on Linux. GitHub's macos-14 runners are not guaranteed to
+      # expose a real Metal-capable device (m2: "assume nothing"); the test
+      # itself renders SKIPPED(no-GPU) per-kernel and exits 0 in that case —
+      # never blank, never a fabricated PASS, and never a hard CI failure.
+      # It only fails the build on a real dispatch/correctness FAIL.
+      - name: Build Metal parity runner
+        if: matrix.os == 'macos-14'
+        run: odin build tests/tools/metal_run.odin -file -out:tests/tools/metal_run_bin
+
+      - name: Run GPU kernel parity gate (shim vs Metal device, SKIPPED-loud if no GPU)
+        if: matrix.os == 'macos-14'
+        run: PYTHONPATH=python python3 tests/scripts/kernel_parity_test.py
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
