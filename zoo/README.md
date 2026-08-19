@@ -58,23 +58,58 @@ Renamed from an earlier `mse_loss` draft to `squared_error`: a `.mean()`
 reduction is a Tier-2 concern (the 1D reducer needs D-G3v2's size-general
 fix first), so this entry stays purely elementwise to be green in Tier 1.
 
-## Tier 2 — PENDING (hard-gated, per D-G1v2 / lane L3 acceptance)
+## Tier 2 — green (gates fired: L1 merged, D-G3v2 merged, D-G4v2 (c)/(e)/(f)
+merged, L2 green on Tier 1 — all four confirmed at main @ a377f90)
 
-Gate: **L1 merged AND D-G3v2 merged AND D-G4v2 (c)/(e)/(f) merged AND L2
-green on Tier 1.** None of the four gates has fired yet as of this wave;
-no Tier-2 entry is authored, even speculatively.
+### Reduction/softmax size bound
 
-| Kernel | Expression (planned) | Blocked on |
-|---|---|---|
-| `relu` | `x.relu()` | L1 (method case, TYPE_ANY-free typing) |
-| `sigmoid` | `x.sigmoid()` | L1 (method case, TYPE_ANY-free typing) |
-| `elementwise_math` | `x.exp()` / `.log()` / `.sqrt()` / `.abs()` chains | L1 seam (5) — method forms don't exist yet; N1 moved this out of Tier 1 because its old green route was the Any-typed free-function imports this canon bans |
-| `saxpy` | `a * x + y` (scalar-vector-add via 1D param broadcast) | D-G4v2(c) — 1D param broadcast refusal/correctness |
-| `sum_reduce` | `x.sum()` | D-G3v2 — size-general reducer fix (current 1D reducer is wrong: 256-hardcoded, `.Mean` divides by literal 256, broadcasts garbage N-wide instead of writing once to `result[0]`) |
-| `max_reduce` | `x.max()` | D-G3v2 (same reducer fix) |
-| `mean` | `x.mean()` | D-G3v2 (same reducer fix) |
-| `mse_loss` | `squared_error(pred, target).mean()` | D-G3v2 (reduction) — composes on top of `squared_error` once reductions are size-general |
-| `softmax` | `x.softmax()` | D-G4v2(e) — inline-reduce barrier fix (data race between reading `sm[0]` and the exp-overwrite) + D-G3v2 size-generalization; D-G4v2(f) — method-form activation extraction must be proven (not just typed) before `.softmax()`/`.relu()`/etc. are trusted to compile to a real op node |
+All reduction and softmax entries use **N ≤ 256** — `GPU_REDUCTION_BLOCK_BOUND`
+(src/gpu/emit.odin). This is a ruled contract term for the zoo, not a hard
+system ceiling: D-G3v2's size-general fix supports two-pass reduction for
+N > 256 in general, but every wave-1 zoo reduction/softmax entry stays
+within the single-workgroup bound so each compiles to **exactly one
+256-thread threadgroup** (tail-guarded tree reduction, single write to
+`result[0]`) — sizes above the bound refuse loudly by design rather than
+silently truncating. The parity harness must dispatch these five kernels
+as one 256-thread group, not a grid.
+
+| Kernel | Expression | Tolerance (derivation) | Backends |
+|---|---|---|---|
+| `relu` | `y = x.relu()` | abs 1e-5 — comparison + select, no rounding-prone arithmetic | check clean · MSL emit clean · WGSL emit clean · shim-verified |
+| `sigmoid` | `y = x.sigmoid()` | abs 1e-5 — one exp + reciprocal per element, no accumulation | check clean · MSL emit clean · WGSL emit clean · shim-verified |
+| `elementwise_math` | `x.exp().log().sqrt().abs()` | abs 1e-5 — four chained elementwise ops, well-conditioned at O(1) magnitudes, no cross-element accumulation | check clean · MSL emit clean · WGSL emit clean · shim-verified |
+| `saxpy` | `z = a * x + y` (`a`: `Tensor[float32,1]`, 1D scalar broadcast `[0]`) | abs 1e-5 — one scalar-broadcast multiply + one elementwise add, no accumulation | check clean · MSL emit clean · WGSL emit clean · shim-verified |
+| `sum_reduce` | `y = x.sum()` → `Tensor[float32,1]` | RELATIVE 3.05e-5 = N·ε_f32, N=256, ε_f32=2⁻²³≈1.1920929e-7 | check clean · MSL emit clean (1×256-thread threadgroup) · WGSL emit clean · shim-verified |
+| `max_reduce` | `y = x.max()` → `Tensor[float32,1]` | RELATIVE 3.05e-5 = N·ε_f32 (stated for convention consistency; a comparison-tree accumulates no rounding error in practice) | check clean · MSL emit clean (1×256-thread threadgroup) · WGSL emit clean · shim-verified |
+| `mean` | `y = x.mean()` → `Tensor[float32,1]` | RELATIVE 3.05e-5 = N·ε_f32 — sum-tree dominates, final divide-by-N adds one negligible rounding step | check clean · MSL emit clean (1×256-thread threadgroup) · WGSL emit clean · shim-verified |
+| `mse_loss` | `((pred-target)*(pred-target)).mean()` → `Tensor[float32,1]` | RELATIVE 3.05e-5 = N·ε_f32 — sum-tree inside `.mean()` dominates over the elementwise sub+mul feeding it | check clean · MSL emit clean (1×256-thread threadgroup) · WGSL emit clean · shim-verified |
+| `softmax` | `y = x.softmax()` | RELATIVE 3.05e-5 = N·ε_f32 — two N-term reductions (max-reduce, sum-of-exp) dominate | check clean · MSL emit clean (1×256-thread threadgroup, barrier confirmed between the max-reduce read of `sm[0]` and the exp-overwrite — D-G4v2(e)) · WGSL emit clean · shim-verified |
+
+All nine entries verified: `mimir check` clean, `compile-gpu --backend msl`
+and `--backend wgsl` both exit 0 with no refusals, `PYTHONPATH=python
+python3 zoo/<entry>.py` exits 0 with output matching the derivation exactly
+(e.g. `sum_reduce(ones(256)) == 256.0`, `softmax(ones(256))[0] == 1/256`).
+`softmax`'s emitted MSL was spot-checked for the D-G4v2(e) barrier: a
+`threadgroup_barrier` sits between `sm_max = sm[0]` and the following
+exp-overwrite of `sm[tid]` — the fix for the read/overwrite data race.
+Parity is corroboration of that fix, not proof of race-freedom (the
+both-directions barrier fixture landed by D-G4v2(e) is the proof —
+candor's trail confirms extraction (f) needed no code fix, only fixtures).
+
+`elementwise_math`: unlocked by L1 seam (5) — `.exp()/.log()/.sqrt()/.abs()`
+now exist as precise same-shape/dtype Tensor→Tensor methods
+(src/checker/array_check.odin), so this entry no longer needs the
+Any-typed free-function imports the D-G1v2 canon bans (N1, resolved).
+
+`saxpy`: unlocked by D-G4v2(c) — 1D param broadcast now classifies a
+length-1 param as `[0]` (scalar broadcast) against a length-N kernel's
+`[tid]`, refusing any other length loudly (B2, resolved).
+
+`mse_loss`: composes `zoo/squared_error.py`'s elementwise formula (inlined,
+not imported — each zoo entry is a standalone file) with `.mean()`, now
+that D-G3v2's size-general reducer fix makes reductions correct at N=256
+(real N in the kernel, guarded tails, mean divides by actual N, single
+write to `result[0]`).
 
 Out of wave 1 entirely (unchanged from the contract): layernorm, attention,
 scan, MLP-as-fused, quantization.
@@ -94,3 +129,11 @@ reference (interpreted shim) with seeded inputs:
 Reproduce: `python3 tests/scripts/kernel_parity_test.py` (builds nothing itself;
 needs `mimir_bin` and `tests/tools/metal_run_bin` — see the harness header).
 The harness is mutation-proven: a deliberately broken kernel reports FAIL.
+
+The nine Tier-2 entries are **not yet in this table** — device parity for
+them is PENDING until lane L2 (scale) re-runs the harness against the
+newly-landed entries (five of the nine are the single-256-thread-threadgroup
+reduction/softmax dispatch shape, which the harness has not yet exercised).
+Each entry's own check/compile-gpu/shim legs are independently verified
+above; that is not a substitute for on-device parity and is not presented
+as one.
