@@ -13,8 +13,6 @@ jobs:
         include:
           - os: macos-14
             target: darwin-arm64
-          - os: macos-13
-            target: darwin-amd64
           - os: ubuntu-latest
             target: linux-amd64
 
