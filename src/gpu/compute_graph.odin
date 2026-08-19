@@ -425,6 +425,7 @@ extract_call :: proc(call: ^parser.Call_Expr, ctx: ^GPU_Graph_Context) -> GPU_No
 		case "relu":           kind = .ReLU
 		case "sigmoid":        kind = .Sigmoid
 		case "tanh":           kind = .Tanh
+		case "abs":            kind = .Abs
 		case "reshape":        kind = .Reshape
 		case "softmax":        kind = .Softmax
 		case "sum":            kind = .Sum
@@ -436,6 +437,7 @@ extract_call :: proc(call: ^parser.Call_Expr, ctx: ^GPU_Graph_Context) -> GPU_No
 		case "exp":            kind = .Exp
 		case "log":            kind = .Log
 		case "sqrt":           kind = .Sqrt
+		case "pow":            kind = .Pow
 		case "clamp":          kind = .Clamp
 		case: is_known = false
 		}
@@ -459,6 +461,31 @@ extract_call :: proc(call: ^parser.Call_Expr, ctx: ^GPU_Graph_Context) -> GPU_No
 				name   = f.attr,
 			})
 		}
+		// Structural fix (GPU015, D-G4v2(f) follow-up): an unknown tensor
+		// method call has no GPU_Op_Kind mapping. The old behavior fell
+		// through to the generic "unknown call" path below, which extracts
+		// args for side effects and returns an opaque node — silently
+		// producing a kernel with a missing computation and no result
+		// write (exit 0, wrong device output; this is exactly how the
+		// missing `.abs()` case went undetected). Whack-a-mole (adding one
+		// more `case` at a time) doesn't close the class of bug; refusing
+		// loudly on ANY unrecognized method name does. Mirrors GPU014.
+		append(ctx.diagnostics, core.Diagnostic{
+			severity = .Error,
+			location = core.Location{
+				file   = ctx.file_path,
+				line   = int(call.loc.line),
+				column = int(call.loc.col),
+			},
+			what = fmt.tprintf("unknown tensor method '.%s()' in @gpu function body has no compute-graph representation", f.attr),
+			why  = "the method-form extractor has no GPU_Op_Kind mapping for this name — silently dropping it (the old behavior) produces a kernel with a missing computation and no result write",
+			fix  = "use a supported tensor method (e.g. .relu(), .sum(), .exp(), .abs()) or extend the extractor's method table if this op is genuinely new",
+			code = "GPU015",
+		})
+		for arg in call.args {
+			extract_expr(arg, ctx)
+		}
+		return GPU_Node_ID(0)
 	}
 
 	// Unknown call — extract args but return opaque node
