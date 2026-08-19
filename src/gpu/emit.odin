@@ -123,6 +123,16 @@ has_reduction :: proc(graph: ^Compute_Graph) -> bool {
 	return false
 }
 
+// True for the scalar-output tree reducers (D-G3v2): single write to
+// result[0], not a per-thread broadcast. Softmax/CrossEntropy are
+// shape-preserving (per-thread output) and are NOT scalar reducers.
+is_reduction_kind :: proc(kind: GPU_Op_Kind) -> bool {
+	#partial switch kind {
+	case .Sum, .Mean, .Max, .Min: return true
+	}
+	return false
+}
+
 // ==================== 2D-kernel dispatch validation ====================
 //
 // MSL/WGSL emit two mutually-exclusive per-thread indexing modes for a single
@@ -185,6 +195,118 @@ gpu_param_used_outside_matmul :: proc(graph: ^Compute_Graph, param_id: GPU_Node_
 		}
 	}
 	return false
+}
+
+// ==================== 1D-kernel param broadcast (clause c) ====================
+//
+// MSL/WGSL non-matmul (1D `tid`-indexed) kernels previously emitted every
+// Param reference as `param[tid]` unconditionally. A scalar-broadcast param
+// (shape (1,) — e.g. saxpy's `a` in `y = a*x + y`) has a length-1 buffer;
+// `param[tid]` reads out of bounds for every tid > 0 and returns garbage,
+// not a broadcast. Classify each param against the kernel's real dispatch
+// length N: len-N -> [tid] (elementwise), len-1 -> [0] (scalar broadcast),
+// anything else -> refuse loudly (no other 1D broadcast shape is supported).
+
+// Total element count of a shape (product of positive dims; nil/empty -> 1).
+gpu_shape_elem_count :: proc(shape: []int) -> int {
+	if shape == nil || len(shape) == 0 { return 1 }
+	total := 1
+	for d in shape {
+		if d > 0 { total *= d }
+	}
+	return total
+}
+
+// Reference dispatch length N for a 1D (non-matmul) kernel: the largest
+// element count among the graph's Param inputs — the size every full-length
+// (non-broadcast) param and the output must agree on.
+gpu_kernel_ref_len_1d :: proc(graph: ^Compute_Graph) -> (n: int, ok: bool) {
+	n = 0
+	for inp in graph.inputs {
+		node := get_node(graph, inp)
+		if node == nil { continue }
+		total := gpu_shape_elem_count(node.output_shape)
+		if total > n { n = total }
+	}
+	return n, n > 0
+}
+
+gpu_param_bcast_mode_1d :: proc(shape: []int, n: int) -> Param_Bcast_Mode {
+	total := gpu_shape_elem_count(shape)
+	if total == n { return .Col }
+	if total == 1 { return .Scalar }
+	return .Unsupported
+}
+
+// Validate that a non-matmul (1D-dispatch) kernel's params all broadcast
+// cleanly (full-length or scalar) against the kernel's dispatch length.
+gpu_validate_1d_kernel :: proc(graph: ^Compute_Graph, backend_name: string) -> bool {
+	n, have_ref := gpu_kernel_ref_len_1d(graph)
+	if !have_ref { return true }
+	for &node in graph.nodes {
+		if node.kind != .Param { continue }
+		if gpu_param_bcast_mode_1d(node.output_shape, n) == .Unsupported {
+			fmt.eprintfln(
+				"mimir compile-gpu: %s: kernel '%s' param '%s' has shape %v which cannot be statically broadcast against 1D kernel length %d (supported: length-%d full array, or length-1 scalar broadcast)",
+				backend_name, graph.func_name, node.name, node.output_shape, n, n)
+			return false
+		}
+	}
+	return true
+}
+
+// ==================== Reduction size-general fix (D-G3v2 / clauses d,e) ====================
+//
+// The 1D reducer (Sum/Mean/Max/Min/Softmax) runs as a single-workgroup tree
+// reduction. GPU_REDUCTION_BLOCK_BOUND is the workgroup width — the WebGPU
+// spec's guaranteed-portable minimum for maxComputeInvocationsPerWorkgroup,
+// so it is safe on every WGSL implementation without querying device limits;
+// MSL/Metal threadgroups comfortably support this width on all Apple GPUs.
+// Reductions over more elements than this bound need a two-pass (multi-
+// workgroup) scheme, which is not implemented this wave (lead-ruled: all
+// wave-1 Tier-2 zoo reduction/softmax entries use N <= 256; exceeding it is
+// a named wave-2 item, not a silent truncation) — refuse loudly instead.
+GPU_REDUCTION_BLOCK_BOUND :: 256
+
+// Element count of the value a reduction/softmax node reduces/normalizes
+// over — its first input's own output shape (which propagate_shapes has
+// already traced back to the underlying Param's declared length).
+gpu_reduction_input_len :: proc(graph: ^Compute_Graph, node: ^GPU_Node) -> (n: int, ok: bool) {
+	if len(node.inputs) == 0 { return 0, false }
+	in_node := get_node(graph, node.inputs[0])
+	if in_node == nil || in_node.output_shape == nil { return 0, false }
+	return gpu_shape_elem_count(in_node.output_shape), true
+}
+
+// Refuse any reduction/softmax node whose input exceeds the single-group
+// bound — emitting a truncated (silently-wrong) reduction is worse than
+// refusing.
+gpu_validate_reduction_bound :: proc(graph: ^Compute_Graph, backend_name: string) -> bool {
+	for &node in graph.nodes {
+		#partial switch node.kind {
+		case .Sum, .Mean, .Max, .Min, .Softmax:
+			n, ok := gpu_reduction_input_len(graph, &node)
+			if !ok { continue }
+			if n > GPU_REDUCTION_BLOCK_BOUND {
+				fmt.eprintfln(
+					"mimir compile-gpu: %s: kernel '%s' reduces '%s' over %d elements, exceeding the single-workgroup bound of %d — multi-group (two-pass) reduction is not implemented this wave; refusing rather than emitting a silently-truncated reduction",
+					backend_name, graph.func_name, op_kind_string(node.kind), n, GPU_REDUCTION_BLOCK_BOUND)
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Per-op identity element for the tail-guard fill in the shared-memory load
+// (tid >= N lanes must not perturb the reduction result).
+gpu_reduce_identity_kind :: proc(kind: GPU_Op_Kind) -> string {
+	#partial switch kind {
+	case .Sum, .Mean: return "zero"
+	case .Max:         return "neg_inf"
+	case .Min:         return "pos_inf"
+	}
+	return "zero"
 }
 
 // Validate that a matmul-mode (2D-dispatch) kernel can be correctly emitted

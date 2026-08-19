@@ -18,11 +18,23 @@ emit_msl :: proc(
 	if use_matmul && !gpu_validate_2d_kernel(graph, "msl") {
 		return "", false
 	}
+	if !use_matmul && !gpu_validate_1d_kernel(graph, "msl") {
+		return "", false
+	}
+	use_reduction := has_reduction(graph)
+	if use_reduction && !gpu_validate_reduction_bound(graph, "msl") {
+		return "", false
+	}
 
 	b := strings.builder_make(0, 2048, allocator)
 	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx, .MSL)
 
 	fmt.sbprint(&b, "#include <metal_stdlib>\nusing namespace metal;\n\n")
+	if use_reduction {
+		fmt.sbprintf(&b, "// dispatch requirement: exactly 1 threadgroup of %d threads\n", GPU_REDUCTION_BLOCK_BOUND)
+		fmt.sbprint(&b, "// (single-group tail-guarded reduction; bound is the WebGPU-portable\n")
+		fmt.sbprint(&b, "// workgroup-width minimum, kept identical across MSL/WGSL for parity)\n\n")
+	}
 
 	// Kernel signature
 	fmt.sbprintf(&b, "kernel void kernel_%s(\n", graph.func_name)
@@ -67,9 +79,24 @@ emit_msl :: proc(
 
 	// Store outputs
 	for out in graph.outputs {
-		if use_matmul {
+		out_node := get_node(graph, out)
+		is_reduce := out_node != nil && is_reduction_kind(out_node.kind)
+		switch {
+		case use_matmul:
 			fmt.sbprintf(&b, "    result[row * N + col] = v%d;\n", int(out))
-		} else {
+		case is_reduce:
+			// D-G3v2: single write, once, to result[0] — not a per-thread
+			// broadcast to result[tid] (the old bug: every thread wrote the
+			// same value N-wide, and the buffer must be length 1 anyway).
+			fmt.sbprintf(&b, "    if (tid == 0) result[0] = v%d;\n", int(out))
+		case use_reduction:
+			// Non-reduction output sharing a kernel with a reduction node
+			// (e.g. softmax): dispatch is over-provisioned to the block
+			// bound, so guard against writing past this output's real length.
+			out_n, ok := gpu_reduction_input_len(graph, out_node)
+			if !ok { out_n = GPU_REDUCTION_BLOCK_BOUND }
+			fmt.sbprintf(&b, "    if (tid < %du) result[tid] = v%d;\n", out_n, int(out))
+		case:
 			fmt.sbprintf(&b, "    result[tid] = v%d;\n", int(out))
 		}
 	}
@@ -91,7 +118,13 @@ msl_emit_node :: proc(
 	switch node.kind {
 	case .Param:
 		if !use_matmul {
-			fmt.sbprintf(b, "    %s v%d = param_%s[tid];\n", etype, id, node.name)
+			// Route through msl_input_ref so this (unused-downstream, but
+			// still-executed) declaration gets the same scalar/full/clamped
+			// indexing as every real use site — an unguarded `param[tid]`
+			// here would be an out-of-bounds read whenever a reduction
+			// over-provisions tid past this param's real length.
+			a := msl_input_ref(graph, node.id, bindings, use_matmul)
+			fmt.sbprintf(b, "    %s v%d = %s;\n", etype, id, a)
 		}
 
 	case .Constant:
@@ -154,20 +187,29 @@ msl_emit_node :: proc(
 
 	case .Softmax:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    // Softmax: exp(x - max) / sum(exp(x - max))\n")
-		fmt.sbprintf(b, "    threadgroup %s sm_%d[256];\n", etype, id)
-		fmt.sbprintf(b, "    sm_%d[tid %% 256] = %s;\n", id, a)
+		n, has_n := gpu_reduction_input_len(graph, node)
+		if !has_n { n = GPU_REDUCTION_BLOCK_BOUND }
+		neg_inf := msl_reduce_identity(etype, .Max)
+		half := GPU_REDUCTION_BLOCK_BOUND / 2
+		fmt.sbprintf(b, "    // Softmax: exp(x - max) / sum(exp(x - max)) -- tail-guarded, N=%d\n", n)
+		fmt.sbprintf(b, "    threadgroup %s sm_%d[%d];\n", etype, id, GPU_REDUCTION_BLOCK_BOUND)
+		fmt.sbprintf(b, "    sm_%d[tid] = (tid < %du) ? %s : %s;\n", id, n, a, neg_inf)
 		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
-		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
-		fmt.sbprintf(b, "        if (tid %% 256 < s) sm_%d[tid %% 256] = metal::max(sm_%d[tid %% 256], sm_%d[tid %% 256 + s]);\n", id, id, id)
+		fmt.sbprintf(b, "    for (uint s = %d; s > 0; s >>= 1) {{\n", half)
+		fmt.sbprintf(b, "        if (tid < s) sm_%d[tid] = metal::max(sm_%d[tid], sm_%d[tid + s]);\n", id, id, id)
 		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
 		fmt.sbprintf(b, "    }}\n")
 		fmt.sbprintf(b, "    %s sm_max_%d = sm_%d[0];\n", etype, id, id)
-		fmt.sbprintf(b, "    %s sm_exp_%d = metal::exp(%s - sm_max_%d);\n", etype, id, a, id)
-		fmt.sbprintf(b, "    sm_%d[tid %% 256] = sm_exp_%d;\n", id, id)
+		// D-G4v2(e): every thread must finish reading sm_%d[0] (the max)
+		// before any thread starts overwriting the same shared array with
+		// its exp value — without this barrier a fast thread's write races
+		// a slow thread's still-pending read (data race).
 		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
-		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
-		fmt.sbprintf(b, "        if (tid %% 256 < s) sm_%d[tid %% 256] += sm_%d[tid %% 256 + s];\n", id, id)
+		fmt.sbprintf(b, "    %s sm_exp_%d = (tid < %du) ? metal::exp(%s - sm_max_%d) : (%s)0;\n", etype, id, n, a, id, etype)
+		fmt.sbprintf(b, "    sm_%d[tid] = sm_exp_%d;\n", id, id)
+		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+		fmt.sbprintf(b, "    for (uint s = %d; s > 0; s >>= 1) {{\n", half)
+		fmt.sbprintf(b, "        if (tid < s) sm_%d[tid] += sm_%d[tid + s];\n", id, id)
 		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
 		fmt.sbprintf(b, "    }}\n")
 		fmt.sbprintf(b, "    %s v%d = sm_exp_%d / sm_%d[0];\n", etype, id, id, id)
@@ -202,44 +244,64 @@ msl_emit_node :: proc(
 
 	case .Sum:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    threadgroup %s sh_%d[256];\n", etype, id)
-		fmt.sbprintf(b, "    sh_%d[tid %% 256] = %s;\n", id, a)
+		n, has_n := gpu_reduction_input_len(graph, node)
+		if !has_n { n = GPU_REDUCTION_BLOCK_BOUND }
+		ident := msl_reduce_identity(etype, .Sum)
+		half := GPU_REDUCTION_BLOCK_BOUND / 2
+		fmt.sbprintf(b, "    // Sum reduction -- tail-guarded, N=%d\n", n)
+		fmt.sbprintf(b, "    threadgroup %s sh_%d[%d];\n", etype, id, GPU_REDUCTION_BLOCK_BOUND)
+		fmt.sbprintf(b, "    sh_%d[tid] = (tid < %du) ? %s : %s;\n", id, n, a, ident)
 		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
-		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
-		fmt.sbprintf(b, "        if (tid %% 256 < s) sh_%d[tid %% 256] += sh_%d[tid %% 256 + s];\n", id, id)
+		fmt.sbprintf(b, "    for (uint s = %d; s > 0; s >>= 1) {{\n", half)
+		fmt.sbprintf(b, "        if (tid < s) sh_%d[tid] += sh_%d[tid + s];\n", id, id)
 		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
 		fmt.sbprintf(b, "    }}\n")
 		fmt.sbprintf(b, "    %s v%d = sh_%d[0];\n", etype, id, id)
 
 	case .Mean:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    threadgroup %s sh_%d[256];\n", etype, id)
-		fmt.sbprintf(b, "    sh_%d[tid %% 256] = %s;\n", id, a)
+		n, has_n := gpu_reduction_input_len(graph, node)
+		if !has_n { n = GPU_REDUCTION_BLOCK_BOUND }
+		ident := msl_reduce_identity(etype, .Mean)
+		half := GPU_REDUCTION_BLOCK_BOUND / 2
+		fmt.sbprintf(b, "    // Mean reduction -- tail-guarded, N=%d (divides by real N, not the block bound)\n", n)
+		fmt.sbprintf(b, "    threadgroup %s sh_%d[%d];\n", etype, id, GPU_REDUCTION_BLOCK_BOUND)
+		fmt.sbprintf(b, "    sh_%d[tid] = (tid < %du) ? %s : %s;\n", id, n, a, ident)
 		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
-		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
-		fmt.sbprintf(b, "        if (tid %% 256 < s) sh_%d[tid %% 256] += sh_%d[tid %% 256 + s];\n", id, id)
+		fmt.sbprintf(b, "    for (uint s = %d; s > 0; s >>= 1) {{\n", half)
+		fmt.sbprintf(b, "        if (tid < s) sh_%d[tid] += sh_%d[tid + s];\n", id, id)
 		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
 		fmt.sbprintf(b, "    }}\n")
-		fmt.sbprintf(b, "    %s v%d = sh_%d[0] / (%s)256;\n", etype, id, id, etype)
+		fmt.sbprintf(b, "    %s v%d = sh_%d[0] / (%s)%d;\n", etype, id, id, etype, n)
 
 	case .Max:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    threadgroup %s sh_%d[256];\n", etype, id)
-		fmt.sbprintf(b, "    sh_%d[tid %% 256] = %s;\n", id, a)
+		n, has_n := gpu_reduction_input_len(graph, node)
+		if !has_n { n = GPU_REDUCTION_BLOCK_BOUND }
+		ident := msl_reduce_identity(etype, .Max)
+		half := GPU_REDUCTION_BLOCK_BOUND / 2
+		fmt.sbprintf(b, "    // Max reduction -- tail-guarded, N=%d\n", n)
+		fmt.sbprintf(b, "    threadgroup %s sh_%d[%d];\n", etype, id, GPU_REDUCTION_BLOCK_BOUND)
+		fmt.sbprintf(b, "    sh_%d[tid] = (tid < %du) ? %s : %s;\n", id, n, a, ident)
 		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
-		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
-		fmt.sbprintf(b, "        if (tid %% 256 < s) sh_%d[tid %% 256] = metal::max(sh_%d[tid %% 256], sh_%d[tid %% 256 + s]);\n", id, id, id)
+		fmt.sbprintf(b, "    for (uint s = %d; s > 0; s >>= 1) {{\n", half)
+		fmt.sbprintf(b, "        if (tid < s) sh_%d[tid] = metal::max(sh_%d[tid], sh_%d[tid + s]);\n", id, id, id)
 		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
 		fmt.sbprintf(b, "    }}\n")
 		fmt.sbprintf(b, "    %s v%d = sh_%d[0];\n", etype, id, id)
 
 	case .Min:
 		a := msl_input_ref(graph, node.inputs[0], bindings, use_matmul)
-		fmt.sbprintf(b, "    threadgroup %s sh_%d[256];\n", etype, id)
-		fmt.sbprintf(b, "    sh_%d[tid %% 256] = %s;\n", id, a)
+		n, has_n := gpu_reduction_input_len(graph, node)
+		if !has_n { n = GPU_REDUCTION_BLOCK_BOUND }
+		ident := msl_reduce_identity(etype, .Min)
+		half := GPU_REDUCTION_BLOCK_BOUND / 2
+		fmt.sbprintf(b, "    // Min reduction -- tail-guarded, N=%d\n", n)
+		fmt.sbprintf(b, "    threadgroup %s sh_%d[%d];\n", etype, id, GPU_REDUCTION_BLOCK_BOUND)
+		fmt.sbprintf(b, "    sh_%d[tid] = (tid < %du) ? %s : %s;\n", id, n, a, ident)
 		fmt.sbprintf(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
-		fmt.sbprintf(b, "    for (uint s = 128; s > 0; s >>= 1) {{\n")
-		fmt.sbprintf(b, "        if (tid %% 256 < s) sh_%d[tid %% 256] = metal::min(sh_%d[tid %% 256], sh_%d[tid %% 256 + s]);\n", id, id, id)
+		fmt.sbprintf(b, "    for (uint s = %d; s > 0; s >>= 1) {{\n", half)
+		fmt.sbprintf(b, "        if (tid < s) sh_%d[tid] = metal::min(sh_%d[tid], sh_%d[tid + s]);\n", id, id, id)
 		fmt.sbprintf(b, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
 		fmt.sbprintf(b, "    }}\n")
 		fmt.sbprintf(b, "    %s v%d = sh_%d[0];\n", etype, id, id)
@@ -347,12 +409,42 @@ msl_emit_node :: proc(
 	}
 }
 
+// Per-op identity element for the tail-guard fill (clauses d/e, D-G3v2):
+// lanes at tid >= N must contribute nothing to the reduction.
+msl_reduce_identity :: proc(etype: string, kind: GPU_Op_Kind) -> string {
+	is_int := etype == "int" || etype == "long"
+	#partial switch kind {
+	case .Sum, .Mean:
+		return "0" if is_int else "0.0f"
+	case .Max:
+		return "(-2147483647 - 1)" if is_int else "-INFINITY"
+	case .Min:
+		return "2147483647" if is_int else "INFINITY"
+	}
+	return "0"
+}
+
 msl_input_ref :: proc(graph: ^Compute_Graph, nid: GPU_Node_ID, bindings: ^Binding_Info, use_matmul: bool) -> string {
 	node := get_node(graph, nid)
 	if node == nil { return "0.0f" }
 	if node.kind == .Param {
 		// MatMul handles its own param indexing; other ops index by thread.
 		if !use_matmul {
+			// Clause (c): classify against the kernel's real dispatch length —
+			// gpu_validate_1d_kernel already refused anything Unsupported.
+			n, ok := gpu_kernel_ref_len_1d(graph)
+			if ok && gpu_param_bcast_mode_1d(node.output_shape, n) == .Scalar {
+				return fmt.tprintf("param_%s[0]", node.name)
+			}
+			if ok && n > 0 && has_reduction(graph) {
+				// Reduction/softmax kernels dispatch GPU_REDUCTION_BLOCK_BOUND
+				// threads regardless of this param's real length (tail-guarded
+				// single group) — clamp the READ index so over-provisioned
+				// threads stay in-bounds. The reduction's own shared-memory
+				// load applies the identity-element mask for correctness;
+				// this clamp is a memory-safety guard only.
+				return fmt.tprintf("param_%s[metal::min(tid, (uint)%d - 1)]", node.name, n)
+			}
 			return fmt.tprintf("param_%s[tid]", node.name)
 		}
 		// 2D (matmul) mode: no linear `tid` is declared — index by the

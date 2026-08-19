@@ -306,8 +306,22 @@ extract_expr :: proc(expr: parser.Expr, ctx: ^GPU_Graph_Context) -> GPU_Node_ID 
 		})
 
 	case ^parser.Subscript_Expr:
-		// Tensor indexing — pass through for now
-		return extract_expr(e.value, ctx)
+		// Tensor indexing has no GPU_Op_Kind representation — silently treating
+		// x[i] as x (the old behavior) would compute the wrong value wherever
+		// the index isn't the identity. Refuse loudly instead of passing through.
+		append(ctx.diagnostics, core.Diagnostic{
+			severity = .Error,
+			location = core.Location{
+				file   = ctx.file_path,
+				line   = int(e.loc.line),
+				column = int(e.loc.col),
+			},
+			what = "tensor subscript expression in @gpu function body has no compute-graph representation",
+			why  = "indexing (e.g. x[i]) is not extracted to a GPU op — silently substituting the base tensor for the subscripted value would compute the wrong result wherever the index isn't the identity",
+			fix  = "avoid explicit element indexing in @gpu kernel bodies; use full-tensor method calls instead (e.g. x.sum(), x.relu())",
+			code = "GPU014",
+		})
+		return GPU_Node_ID(0)
 
 	case ^parser.Attribute_Expr:
 		// e.g. x.T for transpose

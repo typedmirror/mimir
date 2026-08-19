@@ -4167,7 +4167,22 @@ cmd_compile_gpu :: proc(args: []string) {
 
 		for func in gpu_funcs {
 			graph, graph_diags2 := gpu.extract_graph(func, &bind_result, &type_ctx, file, p.arena.allocator)
-			for d in graph_diags2 { core.diagnostic_print(d) }
+			has_extract_error := false
+			for d in graph_diags2 {
+				core.diagnostic_print(d)
+				if d.severity == .Error { has_extract_error = true }
+			}
+			if has_extract_error {
+				// D-G4v2(b): a graph-extraction error (e.g. GPU014 — a
+				// subscript expression with no compute-graph representation)
+				// means the graph is incomplete/wrong (e.g. missing outputs).
+				// Printing the diagnostic above is not a refusal by itself —
+				// emit_kernel must never be reached for this func, or an
+				// empty-but-"successful" kernel is exactly the semi-silent
+				// green this project bans.
+				refused_kernels += len(backends_to_emit)
+				continue
+			}
 
 			// Phase 27: Fusion
 			if fuse_flag {
