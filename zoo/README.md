@@ -78,3 +78,19 @@ no Tier-2 entry is authored, even speculatively.
 
 Out of wave 1 entirely (unchanged from the contract): layernorm, attention,
 scan, MLP-as-fused, quantization.
+
+## Parity status — G1 wave (2026-08-19, independently verified)
+
+All four Tier-1 entries executed on-device and compared against the CPU
+reference (interpreted shim) with seeded inputs:
+
+| kernel | MSL executed (Apple M3) | max |Δ| |
+|---|---|---|
+| vector_add | PASS | 0.0e+00 |
+| linear_forward | PASS | 0.0e+00 |
+| matmul | PASS | 0.0e+00 |
+| squared_error | PASS | 0.0e+00 |
+
+Reproduce: `python3 tests/scripts/kernel_parity_test.py` (builds nothing itself;
+needs `mimir_bin` and `tests/tools/metal_run_bin` — see the harness header).
+The harness is mutation-proven: a deliberately broken kernel reports FAIL.
