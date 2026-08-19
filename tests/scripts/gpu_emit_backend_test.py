@@ -158,6 +158,26 @@ def clause_b_subscript_refusal(mimir_bin: str, backend: str):
               str(kernel_files(out_dir, "metal" if backend == "msl" else backend)))
 
 
+def gpu015_unknown_method_refusal(mimir_bin: str, backend: str):
+    """Post-freeze structural fix: an unrecognized tensor method call has
+    no GPU_Op_Kind mapping. GPU015 must refuse emission (not just print a
+    diagnostic while still emitting an incomplete/broken kernel) — this is
+    the whack-a-mole-closing fix for the class of bug the missing `.abs()`
+    case (see clause_f_method_form_activations) belonged to."""
+    print(f"negative (GPU015): unknown_method_refusal.py refuses on {backend}")
+    with tempfile.TemporaryDirectory(prefix=f"gpu_emit_gpu015_{backend}_") as out_dir:
+        fixture = os.path.join(GPU_FIXTURES, "unknown_method_refusal.py")
+        stdout, stderr, code = run_compile_gpu(mimir_bin, fixture, backend, out_dir)
+        check(f"[{backend}] nonzero exit code", code != 0, f"exit={code}")
+        # core.diagnostic_print writes to stdout (unlike the eprintfln-based
+        # refusal messages elsewhere in this file, which go to stderr).
+        check(f"[{backend}] GPU015 diagnostic fires", "GPU015" in stdout, stdout)
+        check(f"[{backend}] summary states refusal explicitly (not a silent 'emitted 1 kernel(s)')",
+              "refused" in stdout, stdout)
+        check(f"[{backend}] no kernel file written", len(kernel_files(out_dir, "metal" if backend == "msl" else backend)) == 0,
+              str(kernel_files(out_dir, "metal" if backend == "msl" else backend)))
+
+
 def clause_c_saxpy_broadcast(mimir_bin: str, backend: str, ext: str):
     """D-G4v2(c) positive: a length-1 scalar param (`a`) broadcasts as [0];
     the length-N params (`x`, `y`) index as [tid]. The old emitter always
@@ -273,6 +293,7 @@ def clause_f_method_form_activations(mimir_bin: str, backend: str, ext: str):
             "exp_method": "exp(",
             "log_method": "log(",
             "sqrt_method": "sqrt(",
+            "abs_method": "abs(" if backend == "wgsl" else "metal::abs(",
         }
         for fn_name, needle in expect.items():
             content = read_kernel(out_dir, fn_name, ext)
@@ -307,6 +328,9 @@ def main():
 
     clause_b_subscript_refusal(mimir_bin, "msl")
     clause_b_subscript_refusal(mimir_bin, "wgsl")
+
+    gpu015_unknown_method_refusal(mimir_bin, "msl")
+    gpu015_unknown_method_refusal(mimir_bin, "wgsl")
 
     clause_c_saxpy_broadcast(mimir_bin, "msl", "metal")
     clause_c_saxpy_broadcast(mimir_bin, "wgsl", "wgsl")
