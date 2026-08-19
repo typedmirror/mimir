@@ -281,6 +281,19 @@ Type_Registry :: struct {
 	gpu_bfloat16_id: Type_ID,
 	gpu_int32_id:    Type_ID,
 	gpu_int64_id:    Type_ID,
+	// Registry-reinit structural fix (S-G6, family's 4th instance): caches the
+	// FIRST init_virtual_registry() result for this live registry. That proc
+	// is called more than once against the same registry in every project-mode
+	// check (orchestrator project-setup + per-file/_check_with_resolution) —
+	// without this cache, the second call unconditionally re-registers every
+	// mimir.* export via register_type (which always appends a FRESH Type_ID),
+	// silently reassigning singleton fields like json_parse_type/db_query_type/
+	// data_read_csv_type/etc. to new ids that no longer match the ids baked
+	// into import_types from the first call. That desync is why DB002/JSON002/
+	// JSON003/DATA002's override branches (infer.odin) never matched under CLI
+	// project-mode check, despite firing under conform's single-init Virtual_Only
+	// path. nil ⇒ never initialized on this registry (first call builds + caches).
+	vreg_cache: ^Virtual_Registry,
 	allocator:      mem.Allocator,
 }
 
