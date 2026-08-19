@@ -116,8 +116,9 @@ scan, MLP-as-fused, quantization.
 
 ## Parity status — G1 wave (2026-08-19, independently verified)
 
-All four Tier-1 entries executed on-device and compared against the CPU
-reference (interpreted shim) with seeded inputs:
+All thirteen entries executed on-device (Apple M3, MSL compiled at runtime
+via the Metal framework) and compared against the CPU reference (interpreted
+shim) with seeded inputs:
 
 | kernel | MSL executed (Apple M3) | max |Δ| |
 |---|---|---|
@@ -125,15 +126,25 @@ reference (interpreted shim) with seeded inputs:
 | linear_forward | PASS | 0.0e+00 |
 | matmul | PASS | 0.0e+00 |
 | squared_error | PASS | 0.0e+00 |
+| relu | PASS | 0.0e+00 |
+| sigmoid | PASS | 0.0e+00 |
+| elementwise_math | PASS | 0.0e+00 |
+| saxpy | PASS | 0.0e+00 |
+| sum_reduce | PASS | 0.0e+00 |
+| max_reduce | PASS | 0.0e+00 |
+| mean | PASS | 0.0e+00 |
+| mse_loss | PASS | 0.0e+00 |
+| softmax | PASS | 0.0e+00 |
 
 Reproduce: `python3 tests/scripts/kernel_parity_test.py` (builds nothing itself;
 needs `mimir_bin` and `tests/tools/metal_run_bin` — see the harness header).
-The harness is mutation-proven: a deliberately broken kernel reports FAIL.
+The harness is mutation-proven both ways: a deliberately broken elementwise
+kernel (+→−) and a wrong-divisor reduction mutation each report FAIL.
 
-The nine Tier-2 entries are **not yet in this table** — device parity for
-them is PENDING until lane L2 (scale) re-runs the harness against the
-newly-landed entries (five of the nine are the single-256-thread-threadgroup
-reduction/softmax dispatch shape, which the harness has not yet exercised).
-Each entry's own check/compile-gpu/shim legs are independently verified
-above; that is not a substitute for on-device parity and is not presented
-as one.
+Honesty note: during this wave the harness caught a real compiler bug in
+production use — `elementwise_math` initially FAILED parity (max |Δ| = 1.0)
+because the method-form `.abs()` was silently dropped during graph extraction,
+emitting a kernel that computed nothing while exiting 0. The fix (plus a new
+GPU015 loud refusal for ANY unknown tensor method, closing the class) landed
+before this table went green. Static checks alone did not and could not catch
+it; on-device numerical parity did. That is why this harness exists.
