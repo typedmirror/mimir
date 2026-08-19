@@ -20,6 +20,12 @@ emit_ptx :: proc(
 			graph.func_name)
 		return "", false
 	}
+	if has_reduction(graph) {
+		fmt.eprintfln(
+			"mimir compile-gpu: ptx: kernel '%s' uses a reduction/softmax op, which is not implemented for the PTX backend (elementwise-only stub — no cross-thread synchronization primitives emitted) — refusing rather than emitting a silently-wrong single-thread-copy passthrough; use msl/wgsl for reduction/softmax kernels",
+			graph.func_name)
+		return "", false
+	}
 
 	b := strings.builder_make(0, 2048, allocator)
 	etype := element_type_str(wgsl_infer_element_type(graph, type_ctx), type_ctx, .PTX)

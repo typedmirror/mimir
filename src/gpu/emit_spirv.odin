@@ -198,6 +198,12 @@ emit_spirv :: proc(
 			graph.func_name)
 		return nil, false
 	}
+	if has_reduction(graph) {
+		fmt.eprintfln(
+			"mimir compile-gpu: spirv: kernel '%s' uses a reduction/softmax op, which is not implemented for the SPIR-V backend (elementwise-only stub — no cross-thread synchronization emitted) — refusing rather than emitting a silently-wrong per-thread passthrough (e.g. Sum/Mean/Max/Min return their unreduced first operand, Softmax returns bare exp() with no normalization); use msl/wgsl for reduction/softmax kernels",
+			graph.func_name)
+		return nil, false
+	}
 
 	m := spirv_init(allocator)
 
