@@ -24,6 +24,30 @@ Virtual_Registry :: struct {
 // ==================== Initialization ====================
 
 init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
+	// STRUCTURAL IDEMPOTENCY GUARD (S-G6, registry-reinit family — the general
+	// fix that supersedes per-field guards like register_mimir_array's
+	// gpu_float32_id check below, which stays in place as defense-in-depth).
+	// This proc is called MORE THAN ONCE against the SAME live registry within
+	// a single `mimir check` project-mode invocation: once at orchestrator
+	// project-setup (orchestrator.odin, builds import_types from THIS call's
+	// Type_IDs) and again per file inside checker._check_with_resolution.
+	// Every register_mimir_X call unconditionally re-registers exports via
+	// register_type, which ALWAYS appends a fresh Type_ID — so an unguarded
+	// second call reassigns every singleton field on Type_Registry (
+	// json_parse_type, db_query_type, data_read_csv_type, actor_spawn_type,
+	// etc.) to NEW ids that no longer match the ids already baked into
+	// import_types from the first call. Downstream identity checks like
+	// `func_type == ctx.reg.json_parse_type` (infer.odin) then silently never
+	// match, so the DB002/JSON002/JSON003/DATA002 override branches (where
+	// those diagnostics live) are skipped entirely — the bug fires ONLY under
+	// project-mode CLI check; conform's Virtual_Only policy calls this proc
+	// exactly once and was never affected. Caching the first call's result and
+	// returning it unchanged on re-entry makes every current AND future virtual
+	// module singleton immune to this class of bug in one place.
+	if reg.vreg_cache != nil {
+		return reg.vreg_cache^
+	}
+
 	vreg: Virtual_Registry
 	vreg.modules = make(map[string]Virtual_Module, 8, reg.allocator)
 
@@ -67,6 +91,10 @@ init_virtual_registry :: proc(reg: ^Type_Registry) -> Virtual_Registry {
 	register_torch_optim(&vreg, reg)
 	register_torch_cuda(&vreg, reg)
 	register_torch_utils_data(&vreg, reg)
+
+	cached := new(Virtual_Registry, reg.allocator)
+	cached^ = vreg
+	reg.vreg_cache = cached
 
 	return vreg
 }

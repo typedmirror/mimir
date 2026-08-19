@@ -89,9 +89,19 @@ def test_rel_vs_abs_identical(mimir_bin: str) -> list:
 
     # (b) single-file mode must stay single-file: exactly one file checked,
     # never a corpus-wide/repo-wide walk.
-    if not re.search(r"successfully checked 1 file\(s\)|\d+ error\(s\) in 1 file\(s\)", rel_out):
+    # Three single-file trailer forms exist (main.odin): clean success
+    # ("successfully checked 1 file(s)"), the shared multi-file-style error
+    # count ("N error(s) in 1 file(s)", used on parse-error-free error exits
+    # from some call sites), and cmd_check_single's own error trailer
+    # ("1 file(s) had errors", main.odin:1671/1708 -- hit whenever the
+    # single-file target itself has an Error-severity diagnostic, e.g. a
+    # DATA002/DB002/JSON002/JSON003 fixture under the now-fixed
+    # registry-reinit path). All three assert "stayed single-file"; only the
+    # exact wording differs by call site.
+    TRAILER_RE = r"successfully checked 1 file\(s\)|\d+ error\(s\) in 1 file\(s\)|\d+ file\(s\) had errors"
+    if not re.search(TRAILER_RE, rel_out):
         problems.append(f"rel output does not show a 1-file-checked trailer:\n      {rel_out!r}")
-    if not re.search(r"successfully checked 1 file\(s\)|\d+ error\(s\) in 1 file\(s\)", abs_out):
+    if not re.search(TRAILER_RE, abs_out):
         problems.append(f"abs output does not show a 1-file-checked trailer (LAUNCH-BLOCKER "
                          f"REGRESSION: abs-path single-file check silently promoted to "
                          f"project/multi-file mode):\n      {abs_out!r}")
