@@ -231,6 +231,12 @@ class Tensor:
     def __pow__(self, other):
         return _elementwise(self, other, lambda x, y: x ** y)
 
+    def __truediv__(self, other):
+        return _elementwise(self, other, lambda x, y: x / y)
+
+    def __rtruediv__(self, other):
+        return _elementwise(other, self, lambda x, y: x / y)
+
     def __neg__(self):
         return Tensor.from_flat([-v for v in self.data], self.shape)
 
@@ -269,6 +275,60 @@ class Tensor:
 
     def flatten(self):
         return Tensor.from_flat(self.data, (len(self.data),))
+
+    # -----------------------------------------------------------------
+    # Method-form reductions — match the checker's Tensor[T,1] typing
+    # (src/checker/array_check.odin): a rank-1, single-element result,
+    # not a bare Python scalar, so shim output shape mirrors the
+    # emitted device buffer ABI (single write to result[0]).
+    # -----------------------------------------------------------------
+    def sum(self):
+        return Tensor.from_flat([sum(self.data)], (1,))
+
+    def mean(self):
+        return Tensor.from_flat([sum(self.data) / len(self.data)], (1,))
+
+    def max(self):
+        return Tensor.from_flat([max(self.data)], (1,))
+
+    def min(self):
+        return Tensor.from_flat([min(self.data)], (1,))
+
+    # -----------------------------------------------------------------
+    # Method-form activations (D-G1v2 canon: method forms only, no
+    # free-function activation imports). Elementwise, shape-preserving.
+    # -----------------------------------------------------------------
+    def relu(self):
+        return Tensor.from_flat([v if v > 0.0 else 0.0 for v in self.data], self.shape)
+
+    def sigmoid(self):
+        return Tensor.from_flat([1.0 / (1.0 + math.exp(-v)) for v in self.data], self.shape)
+
+    def tanh(self):
+        return Tensor.from_flat([math.tanh(v) for v in self.data], self.shape)
+
+    def softmax(self):
+        # Numerically stable: subtract the max before exponentiating.
+        m = max(self.data)
+        exps = [math.exp(v - m) for v in self.data]
+        s = sum(exps)
+        return Tensor.from_flat([e / s for e in exps], self.shape)
+
+    # -----------------------------------------------------------------
+    # Method-form elementwise math (N1 — mirrors the free functions
+    # below, as methods; unlocks Tier-2 elementwise_math zoo entries).
+    # -----------------------------------------------------------------
+    def exp(self):
+        return _unary(self, math.exp)
+
+    def log(self):
+        return _unary(self, math.log)
+
+    def sqrt(self):
+        return _unary(self, math.sqrt)
+
+    def abs(self):
+        return self.__abs__()
 
 
 # ---------------------------------------------------------------------------

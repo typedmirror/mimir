@@ -19,6 +19,13 @@ in a scratch script and got purged along with everything else in /tmp —
 that capture is no longer reproducible by anyone. This is its tracked
 replacement.
 
+Grown for Phase G Wave 1 / L1 "gate" (docs/FACTORY_CONTRACT_G.md seam 3):
+covers the new method-form surface added to python/mimir/array.py —
+__truediv__/__rtruediv__, method reductions (.sum/.mean/.max/.min, each
+Tensor[T,1] per the checker's new typing), method activations
+(.relu/.sigmoid/.tanh/.softmax), and method math (.exp/.log/.sqrt/.abs) —
+each checked against an INDEPENDENT reference (never the shim's own math).
+
 Usage:
     PYTHONPATH=python python3 tests/scripts/shim_functional_test.py
 """
@@ -75,6 +82,56 @@ def close(a, b, tol=1e-6):
     if len(a) != len(b):
         return False
     return all(abs(x - y) <= tol * max(1.0, abs(y)) for x, y in zip(a, b))
+
+
+def ref_sum(flat):
+    total = 0.0
+    for v in flat:
+        total += v
+    return total
+
+
+def ref_mean(flat):
+    return ref_sum(flat) / len(flat)
+
+
+def ref_max(flat):
+    m = flat[0]
+    for v in flat[1:]:
+        if v > m:
+            m = v
+    return m
+
+
+def ref_min(flat):
+    m = flat[0]
+    for v in flat[1:]:
+        if v < m:
+            m = v
+    return m
+
+
+def ref_relu(flat):
+    return [v if v > 0.0 else 0.0 for v in flat]
+
+
+def ref_sigmoid(flat):
+    return [1.0 / (1.0 + math.exp(-v)) for v in flat]
+
+
+def ref_tanh(flat):
+    return [(math.exp(v) - math.exp(-v)) / (math.exp(v) + math.exp(-v)) for v in flat]
+
+
+def ref_softmax(flat):
+    m = ref_max(flat)
+    exps = [math.exp(v - m) for v in flat]
+    s = ref_sum(exps)
+    return [e / s for e in exps]
+
+
+def ref_truediv(a, b):
+    return [av / bv for av, bv in zip(a, b)]
 
 
 _results = []
@@ -150,6 +207,91 @@ def main():
     expected_loss = [d * d for d in diff]
     check("train_step: matches independent forward+MSE reference",
           close(loss.data, expected_loss))
+
+    # -- reduction.py: method-form reductions (sum/mean/max/min), each Tensor[T,1]
+    reduction_mod = _load_kernel_module('tests/gpu/reduction.py')
+
+    rs = randn(1024, seed=12)
+    out_sum = reduction_mod.sum_reduce(rs)
+    check("sum_reduce: output shape (1,)", out_sum.shape == (1,), f"got {out_sum.shape}")
+    check("sum_reduce: matches independent sum reference",
+          close(out_sum.data, [ref_sum(rs.data)]))
+
+    rm = randn(256, seed=13)
+    out_mean = reduction_mod.mean_reduce(rm)
+    check("mean_reduce: output shape (1,)", out_mean.shape == (1,), f"got {out_mean.shape}")
+    check("mean_reduce: matches independent mean reference",
+          close(out_mean.data, [ref_mean(rm.data)]))
+
+    rmax = randn(512, seed=14)
+    out_max = reduction_mod.max_reduce(rmax)
+    check("max_reduce: output shape (1,)", out_max.shape == (1,), f"got {out_max.shape}")
+    check("max_reduce: matches independent max reference",
+          close(out_max.data, [ref_max(rmax.data)]))
+
+    rmin = randn(512, seed=15)
+    out_min = reduction_mod.min_reduce(rmin)
+    check("min_reduce: output shape (1,)", out_min.shape == (1,), f"got {out_min.shape}")
+    check("min_reduce: matches independent min reference",
+          close(out_min.data, [ref_min(rmin.data)]))
+
+    # -- softmax.py: method-form activation, two sizes --
+    softmax_mod = _load_kernel_module('tests/gpu/softmax.py')
+
+    sm1 = randn(256, seed=16)
+    out_sm1 = softmax_mod.softmax_1d(sm1)
+    check("softmax_1d: output shape (256,)", out_sm1.shape == (256,), f"got {out_sm1.shape}")
+    check("softmax_1d: matches independent softmax reference",
+          close(out_sm1.data, ref_softmax(sm1.data)))
+    check("softmax_1d: sums to 1.0", abs(sum(out_sm1.data) - 1.0) <= 1e-6)
+
+    sm2 = randn(128, seed=17)
+    out_sm2 = softmax_mod.softmax_method(sm2)
+    check("softmax_method: output shape (128,)", out_sm2.shape == (128,), f"got {out_sm2.shape}")
+    check("softmax_method: matches independent softmax reference",
+          close(out_sm2.data, ref_softmax(sm2.data)))
+
+    # -- method-form activations directly on Tensor (relu/sigmoid/tanh —
+    # not yet exercised by any @gpu fixture, so spot-checked here) --
+    av = randn(64, seed=18)
+    out_relu = av.relu()
+    check("Tensor.relu: matches independent relu reference",
+          close(out_relu.data, ref_relu(av.data)))
+
+    out_sig = av.sigmoid()
+    check("Tensor.sigmoid: matches independent sigmoid reference",
+          close(out_sig.data, ref_sigmoid(av.data)))
+
+    out_tanh = av.tanh()
+    check("Tensor.tanh: matches independent tanh reference",
+          close(out_tanh.data, ref_tanh(av.data)))
+
+    # -- method-form elementwise math (mirrors the free-function forms
+    # already covered above by exp_log/sqrt_pow/clamp_abs, but as methods) --
+    mv = randn(64, seed=19)
+    check("Tensor.exp: matches independent math.exp reference",
+          close(mv.exp().data, [math.exp(v) for v in mv.data]))
+
+    pv = Tensor.from_flat([abs(v) + 0.1 for v in randn(64, seed=20).data], (64,))
+    check("Tensor.log: matches independent math.log reference",
+          close(pv.log().data, [math.log(v) for v in pv.data]))
+    check("Tensor.sqrt: matches independent math.sqrt reference",
+          close(pv.sqrt().data, [math.sqrt(v) for v in pv.data]))
+
+    nv = randn(64, seed=21)
+    check("Tensor.abs: matches independent abs reference",
+          close(nv.abs().data, [v if v >= 0 else -v for v in nv.data]))
+
+    # -- __truediv__ / __rtruediv__ (Tensor/Tensor and scalar/Tensor) --
+    dv_a = randn(64, seed=22)
+    dv_b = Tensor.from_flat([abs(v) + 0.1 for v in randn(64, seed=23).data], (64,))
+    out_div = dv_a / dv_b
+    check("Tensor.__truediv__: matches independent elementwise division reference",
+          close(out_div.data, ref_truediv(dv_a.data, dv_b.data)))
+
+    out_rdiv = 2.0 / dv_b
+    check("Tensor.__rtruediv__: matches independent elementwise division reference",
+          close(out_rdiv.data, ref_truediv([2.0] * len(dv_b.data), dv_b.data)))
 
     passed = sum(1 for _, ok in _results if ok)
     total = len(_results)

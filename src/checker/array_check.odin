@@ -5,7 +5,11 @@ package checker
 // Attribute and method resolution for Tensor_Type (mimir.array).
 // Properties: .shape, .ndim, .dtype, .size, .T
 // Methods: .reshape(), .sum(), .mean(), .min(), .max(), .flatten(),
-//          .squeeze(), .astype(), .tolist(), .copy()
+//          .squeeze(), .astype(), .tolist(), .copy(),
+//          .relu()/.sigmoid()/.tanh()/.softmax(), .exp()/.log()/.sqrt()/.abs()
+// Reductions (.sum/.prod/.mean/.std/.var/.min/.max) return Tensor[T,1] — a
+// rank-1 single-element tensor, matching the GPU-emitted device buffer ABI
+// (docs/FACTORY_CONTRACT_G.md D-G3v2/seam-1). .argmin()/.argmax() stay int.
 
 // Resolve Tensor attribute access — properties and methods.
 resolve_tensor_attr :: proc(reg: ^Type_Registry, tensor: ^Tensor_Type, attr: string) -> Type_ID {
@@ -33,19 +37,26 @@ resolve_tensor_attr :: proc(reg: ^Type_Registry, tensor: ^Tensor_Type, attr: str
 	case "flat":
 		return make_tensor_type(reg, tensor.element_type, {})
 
-	// Reduction methods → scalar or tensor depending on axis
+	// Reduction methods → Tensor[T,1] (rank-1 single-element device buffer — matches
+	// the GPU-emitted reduction output ABI: single write to result[0], buffer len 1;
+	// see docs/FACTORY_CONTRACT_G.md D-G3v2/seam-1). axis param retained but the
+	// return type does not vary by axis (existing simplification, pre-dates this change).
 	case "sum", "prod":
 		return make_callable_type(reg,
 			{Param_Type{name = "axis", type_id = TYPE_INT, has_default = true}},
-			tensor.element_type) // scalar when no axis
+			make_tensor_type(reg, tensor.element_type, {1}))
 	case "mean", "std", "var":
+		// Element type preserved (was hardcoded TYPE_FLOAT — masked pre-fix by the
+		// bigger scalar-vs-Tensor mismatch; a float32-precision Tensor's .mean() must
+		// return Tensor[float32,1], not Tensor[python-float,1], to type-check against
+		// its own declared return annotation. See tests/gpu/reduction.py mean_reduce.
 		return make_callable_type(reg,
 			{Param_Type{name = "axis", type_id = TYPE_INT, has_default = true}},
-			TYPE_FLOAT)
+			make_tensor_type(reg, tensor.element_type, {1}))
 	case "min", "max":
 		return make_callable_type(reg,
 			{Param_Type{name = "axis", type_id = TYPE_INT, has_default = true}},
-			tensor.element_type)
+			make_tensor_type(reg, tensor.element_type, {1}))
 	case "argmin", "argmax":
 		return make_callable_type(reg,
 			{Param_Type{name = "axis", type_id = TYPE_INT, has_default = true}},
@@ -152,6 +163,28 @@ resolve_tensor_attr :: proc(reg: ^Type_Registry, tensor: ^Tensor_Type, attr: str
 		return make_callable_type(reg,
 			{Param_Type{name = "decimals", type_id = TYPE_INT, has_default = true}},
 			same_tensor)
+
+	// Activations (elementwise) — same-shape/dtype Tensor in → Tensor out.
+	// Precise typing per D-G1v2/M4: built via register_type preserving
+	// tensor.shape/ndim/device (the .cuda()/.cpu() template above), NEVER the
+	// same_tensor helper (:13 — shape-ERASED, {} dims) and NEVER TYPE_ANY
+	// (the exp/log/sqrt free-function degradation at virtual_modules.odin is
+	// the anti-pattern this method-form surface exists to avoid).
+	case "relu", "sigmoid", "tanh", "softmax":
+		out := register_type(reg, Tensor_Type{
+			element_type = tensor.element_type, shape = tensor.shape, ndim = tensor.ndim,
+			device = tensor.device,
+		})
+		return make_callable_type(reg, no_params, out)
+
+	// Elementwise math methods (N1 — unlocks Tier-2 elementwise_math without
+	// the Any-typed free-function route). Same precise-typing rule as above.
+	case "exp", "log", "sqrt", "abs":
+		out := register_type(reg, Tensor_Type{
+			element_type = tensor.element_type, shape = tensor.shape, ndim = tensor.ndim,
+			device = tensor.device,
+		})
+		return make_callable_type(reg, no_params, out)
 
 	// Autograd (mimir.ml tensor extensions)
 	case "backward":

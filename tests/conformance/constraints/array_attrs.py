@@ -1,5 +1,5 @@
 from typing import assert_type
-from mimir.array import zeros, array, ones
+from mimir.array import zeros, array, ones, Tensor
 
 a = zeros((3, 4))
 
@@ -19,12 +19,15 @@ t = a.T
 # Methods
 flat = a.flatten()
 r = a.reshape((12,))
+# sum/mean/max now return Tensor[T,1] (rank-1, single element) — the
+# GPU-emitted reduction ABI (docs/FACTORY_CONTRACT_G.md D-G3v2/seam-1),
+# not a bare scalar. Semantic change recorded in DECISIONS (S-G1).
 sm = a.sum()
-assert_type(sm, float)
+assert_type(sm, Tensor[float, 1])
 mn = a.mean()
-assert_type(mn, float)
+assert_type(mn, Tensor[float, 1])
 mx = a.max()
-assert_type(mx, float)
+assert_type(mx, Tensor[float, 1])
 ami = a.argmin()
 assert_type(ami, int)
 
